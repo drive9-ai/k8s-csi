@@ -128,6 +128,20 @@ func (c *drive9Client) validateMarker(ctx context.Context, remotePath string, wa
 	return nil
 }
 
+func (c *drive9Client) upsertIndex(ctx context.Context, remotePath string, marker volumeMarker) error {
+	exists, err := c.exists(ctx, remotePath)
+	if err != nil {
+		return err
+	}
+	if exists {
+		if err := c.validateMarker(ctx, remotePath, marker); err != nil {
+			return err
+		}
+		return nil
+	}
+	return c.writeJSON(ctx, remotePath, marker)
+}
+
 func (c *drive9Client) removeAll(ctx context.Context, remotePath string) error {
 	resp, err := c.request(ctx, http.MethodDelete, remotePath, "recursive=1", nil)
 	if err != nil {

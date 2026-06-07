@@ -141,7 +141,7 @@ func (d *Driver) stopRecordedMount(ctx context.Context, volumeID string) error {
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
-	_ = syscall.Kill(state.PID, syscall.SIGTERM)
+	_ = syscall.Kill(-state.PID, syscall.SIGTERM)
 	return nil
 }
 

@@ -41,6 +41,8 @@ The sidecar fallback necessarily injects the secret into the mounter sidecar env
 
 The node plugin needs privileged FUSE access. Treat it like other node storage plugins: restrict who can modify its DaemonSet and Secret.
 
+The first version stores CSI metadata under `/k8s/.drive9-csi/volumes`. If you use a scoped Drive9 token instead of an owner key, its scope must cover both the volume prefix, for example `/k8s/pvc`, and the metadata index path `/k8s/.drive9-csi/volumes`.
+
 ## Install
 
 Build and publish the image:
@@ -77,7 +79,7 @@ reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer
 ```
 
-`Retain` is the default example because this is customer data. If a customer wants automatic deletion, they can switch to `Delete`; the driver still refuses to delete paths without a matching `.drive9-csi-volume.json` marker.
+`Retain` is the default example because this is customer data. If a customer wants automatic deletion, they can switch to `Delete`; the driver still refuses to delete paths without both a matching metadata index entry and a matching `.drive9-csi-volume.json` marker.
 
 ## Sidecar Fallback
 

@@ -3,7 +3,6 @@ package driver
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -11,6 +10,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -23,6 +23,7 @@ import (
 
 const (
 	defaultRemoteRootPrefix = "/k8s"
+	metadataRoot            = "/k8s/.drive9-csi/volumes"
 	markerFileName          = ".drive9-csi-volume.json"
 )
 
@@ -172,6 +173,9 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	}
 
 	client := newDrive9Client(creds)
+	if err := client.mkdir(ctx, metadataRoot); err != nil {
+		return nil, err
+	}
 	exists, err := client.exists(ctx, remoteRoot)
 	if err != nil {
 		return nil, err
@@ -187,6 +191,9 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 		if err := client.writeJSON(ctx, markerPath(remoteRoot), marker); err != nil {
 			return nil, err
 		}
+	}
+	if err := client.upsertIndex(ctx, indexPath(volumeID), marker); err != nil {
+		return nil, err
 	}
 
 	return &csi.CreateVolumeResponse{
@@ -210,30 +217,43 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 	if err != nil {
 		return nil, err
 	}
-	remoteRoot, err := remoteRootFromVolumeID(volumeID)
+	client := newDrive9Client(creds)
+	marker, err := client.readMarker(ctx, indexPath(volumeID))
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "volume id: %v", err)
+		if status.Code(err) == codes.NotFound {
+			return &csi.DeleteVolumeResponse{}, nil
+		}
+		return nil, err
 	}
+	if marker.VolumeID != volumeID || marker.Driver != d.cfg.DriverName {
+		return nil, status.Error(codes.FailedPrecondition, "refusing to delete Drive9 path without matching CSI index")
+	}
+	remoteRoot := marker.RemoteRoot
 	if err := validateRemoteRoot(remoteRoot); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "remoteRoot: %v", err)
 	}
 
-	client := newDrive9Client(creds)
 	exists, err := client.exists(ctx, remoteRoot)
 	if err != nil {
 		return nil, err
 	}
 	if !exists {
+		if err := client.removeAll(ctx, indexPath(volumeID)); err != nil {
+			return nil, err
+		}
 		return &csi.DeleteVolumeResponse{}, nil
 	}
-	marker, err := client.readMarker(ctx, markerPath(remoteRoot))
+	rootMarker, err := client.readMarker(ctx, markerPath(remoteRoot))
 	if err != nil {
 		return nil, err
 	}
-	if marker.VolumeID != volumeID || marker.RemoteRoot != remoteRoot || marker.Driver != d.cfg.DriverName {
+	if rootMarker.VolumeID != volumeID || rootMarker.RemoteRoot != remoteRoot || rootMarker.Driver != d.cfg.DriverName {
 		return nil, status.Error(codes.FailedPrecondition, "refusing to delete Drive9 path without matching CSI marker")
 	}
 	if err := client.removeAll(ctx, remoteRoot); err != nil {
+		return nil, err
+	}
+	if err := client.removeAll(ctx, indexPath(volumeID)); err != nil {
 		return nil, err
 	}
 	return &csi.DeleteVolumeResponse{}, nil
@@ -393,36 +413,7 @@ func requestedCapacity(r *csi.CapacityRange) int64 {
 
 func volumeIDForRemoteRoot(remoteRoot string) string {
 	sum := sha256.Sum256([]byte(remoteRoot))
-	return "drive9-" + hex.EncodeToString(sum[:])[:32] + "." + base64RawURL(remoteRoot)
-}
-
-func remoteRootFromVolumeID(volumeID string) (string, error) {
-	parts := strings.SplitN(volumeID, ".", 2)
-	if len(parts) != 2 || !strings.HasPrefix(parts[0], "drive9-") {
-		return "", errors.New("invalid Drive9 CSI volume id")
-	}
-	remoteRoot, err := base64RawURLDecode(parts[1])
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256([]byte(remoteRoot))
-	wantPrefix := "drive9-" + hex.EncodeToString(sum[:])[:32]
-	if parts[0] != wantPrefix {
-		return "", errors.New("volume id checksum mismatch")
-	}
-	return normalizeRemotePath(remoteRoot)
-}
-
-func base64RawURL(s string) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(s))
-}
-
-func base64RawURLDecode(s string) (string, error) {
-	body, err := base64.RawURLEncoding.DecodeString(s)
-	if err != nil {
-		return "", errors.New("invalid encoded remote root")
-	}
-	return string(body), nil
+	return "drive9-" + hex.EncodeToString(sum[:])[:32]
 }
 
 func (d *Driver) mountStatePath(volumeID string) string {
@@ -434,6 +425,10 @@ func markerPath(remoteRoot string) string {
 		return "/" + markerFileName
 	}
 	return strings.TrimRight(remoteRoot, "/") + "/" + markerFileName
+}
+
+func indexPath(volumeID string) string {
+	return path.Join(metadataRoot, safeFileName(volumeID)+".json")
 }
 
 type volumeMarker struct {

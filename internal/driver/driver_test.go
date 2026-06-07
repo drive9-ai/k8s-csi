@@ -36,15 +36,24 @@ func TestEncodeDrive9FSPathEscapesSegments(t *testing.T) {
 	}
 }
 
-func TestRemoteRootVolumeIDRoundTrip(t *testing.T) {
-	want := "/k8s/pvc/demo"
-	volumeID := volumeIDForRemoteRoot(want)
-	got, err := remoteRootFromVolumeID(volumeID)
-	if err != nil {
-		t.Fatalf("remoteRootFromVolumeID error = %v", err)
+func TestVolumeIDIsShortAndStable(t *testing.T) {
+	remoteRoot := "/k8s/pvc/demo"
+	first := volumeIDForRemoteRoot(remoteRoot)
+	second := volumeIDForRemoteRoot(remoteRoot)
+	if first != second {
+		t.Fatalf("volume id is not stable: %q != %q", first, second)
 	}
-	if got != want {
-		t.Fatalf("remote root = %q, want %q", got, want)
+	if len(first) > 64 {
+		t.Fatalf("volume id len = %d, want <= 64", len(first))
+	}
+}
+
+func TestIndexPathUsesMetadataRoot(t *testing.T) {
+	remoteRoot := "/k8s/pvc/demo"
+	volumeID := volumeIDForRemoteRoot(remoteRoot)
+	got := indexPath(volumeID)
+	if got != metadataRoot+"/"+volumeID+".json" {
+		t.Fatalf("index path = %q", got)
 	}
 }
 

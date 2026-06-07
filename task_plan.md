@@ -22,6 +22,6 @@ Provide a minimal but careful Kubernetes integration demo for customers whose wo
 ## Safety Invariants
 
 - `CreateVolume` must be idempotent.
-- `DeleteVolume` must not delete arbitrary Drive9 paths; it requires a marker matching the CSI volume ID.
+- `DeleteVolume` must not delete arbitrary Drive9 paths; it requires a metadata index entry plus a root marker matching the CSI volume ID.
 - Node mount paths must remain under kubelet-provided staging/target paths.
 - API keys must only be read from CSI secrets or explicit Secret refs in the sidecar example.
