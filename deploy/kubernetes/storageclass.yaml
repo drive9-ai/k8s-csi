@@ -1,0 +1,15 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: drive9-rwo
+provisioner: csi.drive9.ai
+parameters:
+  remoteRootPrefix: /k8s/pvc
+  profile: coding-agent
+  csi.storage.k8s.io/provisioner-secret-name: drive9-csi-secret
+  csi.storage.k8s.io/provisioner-secret-namespace: drive9-csi
+  csi.storage.k8s.io/node-stage-secret-name: drive9-csi-secret
+  csi.storage.k8s.io/node-stage-secret-namespace: drive9-csi
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: false

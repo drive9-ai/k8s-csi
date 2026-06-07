@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drive9-sidecar-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: drive9-sidecar-demo
+  template:
+    metadata:
+      labels:
+        app: drive9-sidecar-demo
+    spec:
+      containers:
+        - name: app
+          image: busybox:1.36
+          command: ["sh", "-c", "while true; do date >> /workspace/heartbeat.log; sleep 10; done"]
+          volumeMounts:
+            - name: drive9-workspace
+              mountPath: /workspace
+              mountPropagation: HostToContainer
+        - name: drive9-mounter
+          image: ghcr.io/drive9-ai/drive9-csi:latest
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["SYS_ADMIN"]
+          command:
+            - sh
+            - -ec
+            - |
+              mkdir -p /mnt/drive9 /cache
+              if ! drive9 fs stat ":${DRIVE9_REMOTE_ROOT}" >/dev/null 2>&1; then
+                drive9 fs mkdir ":${DRIVE9_REMOTE_ROOT}"
+              fi
+              exec drive9 mount --mode=fuse --allow-other --cache-dir /cache --profile "${DRIVE9_PROFILE}" ":${DRIVE9_REMOTE_ROOT}" /mnt/drive9
+          env:
+            - name: DRIVE9_SERVER
+              valueFrom:
+                secretKeyRef:
+                  name: drive9-sidecar-secret
+                  key: server
+            - name: DRIVE9_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: drive9-sidecar-secret
+                  key: apiKey
+            - name: DRIVE9_REMOTE_ROOT
+              value: /k8s/sidecar-demo
+            - name: DRIVE9_PROFILE
+              value: coding-agent
+          volumeMounts:
+            - name: drive9-workspace
+              mountPath: /mnt/drive9
+              mountPropagation: Bidirectional
+            - name: drive9-cache
+              mountPath: /cache
+            - name: dev-fuse
+              mountPath: /dev/fuse
+      volumes:
+        - name: drive9-workspace
+          hostPath:
+            path: /var/lib/drive9-sidecar/demo/workspace
+            type: DirectoryOrCreate
+        - name: drive9-cache
+          emptyDir: {}
+        - name: dev-fuse
+          hostPath:
+            path: /dev/fuse
+            type: CharDevice
