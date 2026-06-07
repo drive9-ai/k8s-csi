@@ -117,8 +117,10 @@ hack/e2e-k8s.sh
 
 The script intentionally requires `DRIVE9_CSI_E2E_CONFIRM=1` because it mutates
 the current Kubernetes context. It deploys the CSI driver into an isolated
-`drive9-csi-e2e-driver` namespace, creates a PVC, mounts it into a pod, writes
-and reads a file, then deletes the pod and PVC and waits for the PV to be
-deleted. It fails closed if cluster-scoped CSI resources already exist, because
-the e2e should run on a clean validation cluster. Do not use `:latest` for
-`DRIVE9_CSI_IMAGE`; use an immutable tag or digest for customer evidence.
+`drive9-csi-e2e-driver` namespace, creates a PVC, mounts it into one pod,
+writes and reads a file, deletes that pod, remounts the same PVC into a second
+pod, reads the same token again, then deletes the pod and PVC and waits for the
+PV to be deleted. It fails closed if either e2e namespace or cluster-scoped CSI
+resources already exist, because the e2e should run on a clean validation
+cluster. Do not use `:latest` for `DRIVE9_CSI_IMAGE`; use an immutable tag or
+digest for customer evidence.

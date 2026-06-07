@@ -165,11 +165,18 @@ spec:
   resources:
     requests:
       storage: 1Gi
----
+EOF
+}
+
+write_test_pod() {
+	local pod_name="$1"
+	local target="$2"
+
+	cat > "$target" <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
-  name: drive9-csi-e2e
+  name: $pod_name
   namespace: $test_namespace
 spec:
   restartPolicy: Never
@@ -224,7 +231,12 @@ fi
 DRIVE9_REMOTE_ROOT_PREFIX="${DRIVE9_REMOTE_ROOT_PREFIX:-/k8s/pvc-e2e}"
 DRIVE9_PROFILE="${DRIVE9_PROFILE:-coding-agent}"
 
+if [[ "$driver_namespace" == "$test_namespace" ]]; then
+	fail "driver and test namespaces must be different"
+fi
+
 ensure_absent namespace "$driver_namespace"
+ensure_absent namespace "$test_namespace"
 ensure_absent clusterrole drive9-csi-controller
 ensure_absent clusterrolebinding drive9-csi-controller
 ensure_absent csidriver csi.drive9.ai
@@ -251,6 +263,8 @@ copy_manifest node.yaml node.yaml
 write_secret
 write_storageclass
 write_test_workload
+write_test_pod drive9-csi-e2e-write "$tmp_dir/pod-write.yaml"
+write_test_pod drive9-csi-e2e-read "$tmp_dir/pod-read.yaml"
 
 kubectl apply -f "$manifest_dir" || fail "apply CSI manifests"
 kubectl -n "$driver_namespace" rollout status deployment/drive9-csi-controller \
@@ -259,14 +273,15 @@ kubectl -n "$driver_namespace" rollout status daemonset/drive9-csi-node \
 	--timeout=300s || fail "node rollout"
 
 kubectl apply -f "$tmp_dir/workload.yaml" || fail "apply test workload"
-kubectl -n "$test_namespace" wait pod/drive9-csi-e2e \
-	--for=condition=Ready --timeout=300s || fail "test pod ready"
+kubectl apply -f "$tmp_dir/pod-write.yaml" || fail "apply write pod"
+kubectl -n "$test_namespace" wait pod/drive9-csi-e2e-write \
+	--for=condition=Ready --timeout=300s || fail "write pod ready"
 
 e2e_token="drive9-csi-e2e-$(date +%s)"
-kubectl -n "$test_namespace" exec drive9-csi-e2e -- \
+kubectl -n "$test_namespace" exec drive9-csi-e2e-write -- \
 	sh -c "printf '%s\n' '$e2e_token' > /workspace/e2e.txt && sync" ||
 	fail "write through mounted volume"
-kubectl -n "$test_namespace" exec drive9-csi-e2e -- \
+kubectl -n "$test_namespace" exec drive9-csi-e2e-write -- \
 	sh -c "test \"\$(cat /workspace/e2e.txt)\" = '$e2e_token'" ||
 	fail "read through mounted volume"
 
@@ -274,10 +289,18 @@ pv_name="$(kubectl -n "$test_namespace" get pvc drive9-workspace-e2e \
 	-o jsonpath='{.spec.volumeName}')" || fail "read bound PV name"
 [[ "$pv_name" != "" ]] || fail "PVC did not bind a PV"
 
-kubectl -n "$test_namespace" delete pod drive9-csi-e2e \
-	--wait=true || fail "delete test pod"
+kubectl -n "$test_namespace" delete pod drive9-csi-e2e-write \
+	--wait=true || fail "delete write pod"
+kubectl apply -f "$tmp_dir/pod-read.yaml" || fail "apply read pod"
+kubectl -n "$test_namespace" wait pod/drive9-csi-e2e-read \
+	--for=condition=Ready --timeout=300s || fail "read pod ready"
+kubectl -n "$test_namespace" exec drive9-csi-e2e-read -- \
+	sh -c "test \"\$(cat /workspace/e2e.txt)\" = '$e2e_token'" ||
+	fail "read after pod remount"
+kubectl -n "$test_namespace" delete pod drive9-csi-e2e-read \
+	--wait=true || fail "delete read pod"
 kubectl -n "$test_namespace" delete pvc drive9-workspace-e2e \
 	--wait=true || fail "delete test PVC"
 wait_for_pv_deleted "$pv_name"
 
-info "passed: mount/write/read/unpublish/unstage/delete"
+info "passed: mount/write/read/remount/unpublish/unstage/delete"
