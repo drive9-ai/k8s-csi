@@ -100,3 +100,25 @@ This is less clean than CSI because it requires privileged pods and hostPath mou
 ```sh
 make test
 ```
+
+## Real Kubernetes E2E Gate
+
+Static checks are not enough for customer distribution. Before calling a build
+production-safe, run a real Kubernetes cluster against a real Drive9 server and
+API key:
+
+```sh
+export DRIVE9_SERVER=https://drive9.example.com
+export DRIVE9_API_KEY=drive9_api_key_redacted
+export DRIVE9_CSI_IMAGE=ghcr.io/drive9-ai/drive9-csi:0.1.0
+export DRIVE9_CSI_E2E_CONFIRM=1
+hack/e2e-k8s.sh
+```
+
+The script intentionally requires `DRIVE9_CSI_E2E_CONFIRM=1` because it mutates
+the current Kubernetes context. It deploys the CSI driver into an isolated
+`drive9-csi-e2e-driver` namespace, creates a PVC, mounts it into a pod, writes
+and reads a file, then deletes the pod and PVC and waits for the PV to be
+deleted. It fails closed if cluster-scoped CSI resources already exist, because
+the e2e should run on a clean validation cluster. Do not use `:latest` for
+`DRIVE9_CSI_IMAGE`; use an immutable tag or digest for customer evidence.
