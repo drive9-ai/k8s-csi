@@ -13,7 +13,6 @@ spec:
         app: drive9-csi-node
     spec:
       serviceAccountName: drive9-csi-node
-      hostPID: true
       containers:
         - name: node-driver-registrar
           image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0

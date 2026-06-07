@@ -76,9 +76,15 @@ func (d *Driver) startDrive9Mount(ctx context.Context, req drive9MountRequest) e
 		_ = cmd.Wait()
 	}()
 
+	startTime := pidStartTime(cmd.Process.Pid)
+	if startTime == "" {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		return status.Errorf(codes.Internal, "record Drive9 mount process identity: missing pid start time for pid=%d", cmd.Process.Pid)
+	}
+
 	state := mountState{
 		PID:           cmd.Process.Pid,
-		PIDStartTime:  pidStartTime(cmd.Process.Pid),
+		PIDStartTime:  startTime,
 		VolumeID:      req.VolumeID,
 		RemoteRoot:    req.RemoteRoot,
 		StagingTarget: req.StagingTarget,
@@ -108,6 +114,9 @@ func (d *Driver) stopRecordedMount(ctx context.Context, volumeID string, staging
 	}
 	if state.PID <= 0 {
 		return nil
+	}
+	if state.PIDStartTime == "" {
+		return fmt.Errorf("stage state is missing process identity for volume %s", volumeID)
 	}
 	if !pidMatchesState(state) {
 		return nil

@@ -100,6 +100,20 @@ func TestValidateVolumeCapabilitiesRejectsRWX(t *testing.T) {
 	}
 }
 
+func TestValidateVolumeCapabilitiesRejectsNilAndBlock(t *testing.T) {
+	if err := validateVolumeCapabilities([]*csi.VolumeCapability{nil}); err == nil {
+		t.Fatal("expected nil capability to be rejected")
+	}
+	if err := validateVolumeCapabilities([]*csi.VolumeCapability{{
+		AccessType: &csi.VolumeCapability_Block{Block: &csi.VolumeCapability_BlockVolume{}},
+		AccessMode: &csi.VolumeCapability_AccessMode{
+			Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+		},
+	}}); err == nil {
+		t.Fatal("expected block capability to be rejected")
+	}
+}
+
 func TestValidateVolumeCapabilitiesAllowsSingleNodeWriter(t *testing.T) {
 	err := validateVolumeCapabilities([]*csi.VolumeCapability{
 		{
