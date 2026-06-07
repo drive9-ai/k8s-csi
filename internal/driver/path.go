@@ -21,6 +21,9 @@ func buildRemoteRoot(prefix string, volumeName string) (string, error) {
 	if prefix == "/" {
 		return "", errors.New("remoteRootPrefix must not be /")
 	}
+	if err := validateVolumePrefix(prefix); err != nil {
+		return "", err
+	}
 	base := safeFileName(volumeName)
 	if base == "" {
 		base = "volume"
@@ -73,6 +76,46 @@ func normalizeRemotePath(raw string) (string, error) {
 func validateRemoteRoot(raw string) error {
 	_, err := normalizeRemotePath(raw)
 	return err
+}
+
+func validateVolumePrefix(raw string) error {
+	prefix, err := normalizeRemotePath(raw)
+	if err != nil {
+		return err
+	}
+	if prefix == "/" {
+		return errors.New("prefix must not be /")
+	}
+	if !pathIsOrUnder(prefix, allowedVolumeRoot) {
+		return fmt.Errorf("prefix must be under %s", allowedVolumeRoot)
+	}
+	if pathIsOrUnder(prefix, metadataRoot) || pathIsOrUnder(metadataRoot, prefix) {
+		return fmt.Errorf("prefix must not overlap CSI metadata root %s", metadataRoot)
+	}
+	return nil
+}
+
+func validateSafeDeleteRoot(raw string) error {
+	remoteRoot, err := normalizeRemotePath(raw)
+	if err != nil {
+		return err
+	}
+	if remoteRoot == "/" {
+		return errors.New("refusing to delete /")
+	}
+	if !pathIsOrUnder(remoteRoot, allowedVolumeRoot) {
+		return fmt.Errorf("delete root must be under %s", allowedVolumeRoot)
+	}
+	if pathIsOrUnder(remoteRoot, metadataRoot) || pathIsOrUnder(metadataRoot, remoteRoot) {
+		return fmt.Errorf("delete root must not overlap CSI metadata root %s", metadataRoot)
+	}
+	return nil
+}
+
+func pathIsOrUnder(child string, parent string) bool {
+	child = path.Clean(child)
+	parent = path.Clean(parent)
+	return child == parent || strings.HasPrefix(child, strings.TrimRight(parent, "/")+"/")
 }
 
 func safeFileName(name string) string {

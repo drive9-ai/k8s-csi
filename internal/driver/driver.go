@@ -23,6 +23,7 @@ import (
 
 const (
 	defaultRemoteRootPrefix = "/k8s"
+	allowedVolumeRoot       = "/k8s"
 	metadataRoot            = "/k8s/.drive9-csi/volumes"
 	markerFileName          = ".drive9-csi-volume.json"
 )
@@ -158,6 +159,9 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	if prefix == "" {
 		prefix = defaultRemoteRootPrefix
 	}
+	if err := validateVolumePrefix(prefix); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "remoteRootPrefix: %v", err)
+	}
 	remoteRoot, err := buildRemoteRoot(prefix, name)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "remoteRootPrefix: %v", err)
@@ -229,8 +233,8 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 		return nil, status.Error(codes.FailedPrecondition, "refusing to delete Drive9 path without matching CSI index")
 	}
 	remoteRoot := marker.RemoteRoot
-	if err := validateRemoteRoot(remoteRoot); err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "remoteRoot: %v", err)
+	if err := validateSafeDeleteRoot(remoteRoot); err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "unsafe delete root: %v", err)
 	}
 
 	exists, err := client.exists(ctx, remoteRoot)
@@ -305,8 +309,12 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	if mounted, err := isMountPoint(stagingTarget); err != nil {
 		return nil, status.Errorf(codes.Internal, "check staging mount: %v", err)
 	} else if mounted {
+		if err := d.validateStagedMount(volumeID, remoteRoot, stagingTarget); err != nil {
+			return nil, err
+		}
 		return &csi.NodeStageVolumeResponse{}, nil
 	}
+	_ = os.Remove(d.mountStatePath(volumeID))
 
 	if err := os.MkdirAll(stagingTarget, 0o755); err != nil {
 		return nil, status.Errorf(codes.Internal, "create staging target: %v", err)
@@ -337,8 +345,12 @@ func (d *Driver) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolu
 	if err := unmountPath(stagingTarget); err != nil {
 		return nil, status.Errorf(codes.Internal, "unstage unmount: %v", err)
 	}
-	_ = d.stopRecordedMount(ctx, volumeID)
-	_ = os.Remove(d.mountStatePath(volumeID))
+	if err := d.stopRecordedMount(ctx, volumeID, stagingTarget); err != nil {
+		return nil, status.Errorf(codes.Internal, "wait for drive9 mount exit: %v", err)
+	}
+	if err := os.Remove(d.mountStatePath(volumeID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, status.Errorf(codes.Internal, "remove stage state: %v", err)
+	}
 	return &csi.NodeUnstageVolumeResponse{}, nil
 }
 
@@ -357,13 +369,29 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 	} else if !mounted {
 		return nil, status.Error(codes.FailedPrecondition, "staging target is not mounted")
 	}
+	if err := d.validateStagedMount(volumeID, "", stagingTarget); err != nil {
+		return nil, err
+	}
 	if mounted, err := isMountPoint(target); err != nil {
 		return nil, status.Errorf(codes.Internal, "check target mount: %v", err)
 	} else if mounted {
+		if err := d.validatePublishedMount(volumeID, stagingTarget, target, req.GetReadonly()); err != nil {
+			return nil, err
+		}
 		return &csi.NodePublishVolumeResponse{}, nil
 	}
 	if err := bindMount(stagingTarget, target, req.GetReadonly()); err != nil {
 		return nil, status.Errorf(codes.Internal, "bind mount publish target: %v", err)
+	}
+	if err := d.writePublishState(publishState{
+		VolumeID:      volumeID,
+		StagingTarget: filepath.Clean(stagingTarget),
+		Target:        filepath.Clean(target),
+		Readonly:      req.GetReadonly(),
+		PublishedAt:   time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		_ = unmountPath(target)
+		return nil, status.Errorf(codes.Internal, "write publish state: %v", err)
 	}
 	return &csi.NodePublishVolumeResponse{}, nil
 }
@@ -376,7 +404,49 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 	if err := unmountPath(target); err != nil {
 		return nil, status.Errorf(codes.Internal, "unpublish unmount: %v", err)
 	}
+	if err := os.Remove(d.publishStatePath(target)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, status.Errorf(codes.Internal, "remove publish state: %v", err)
+	}
 	return &csi.NodeUnpublishVolumeResponse{}, nil
+}
+
+func (d *Driver) validateStagedMount(volumeID string, remoteRoot string, stagingTarget string) error {
+	state, err := d.readMountState(volumeID)
+	if err != nil {
+		return status.Errorf(codes.FailedPrecondition, "staging target is mounted but no matching Drive9 state exists: %v", err)
+	}
+	if !mountStateMatches(state, volumeID, remoteRoot, stagingTarget) {
+		return status.Error(codes.FailedPrecondition, "staging target is mounted for a different Drive9 volume")
+	}
+	return nil
+}
+
+func (d *Driver) validatePublishedMount(volumeID string, stagingTarget string, target string, readonly bool) error {
+	state, err := d.readPublishState(target)
+	if err != nil {
+		return status.Errorf(codes.FailedPrecondition, "publish target is mounted but no matching Drive9 state exists: %v", err)
+	}
+	if !publishStateMatches(state, volumeID, stagingTarget, target, readonly) {
+		return status.Error(codes.FailedPrecondition, "publish target is mounted for a different Drive9 volume or access mode")
+	}
+	return nil
+}
+
+func mountStateMatches(state mountState, volumeID string, remoteRoot string, stagingTarget string) bool {
+	if state.VolumeID != volumeID {
+		return false
+	}
+	if remoteRoot != "" && state.RemoteRoot != remoteRoot {
+		return false
+	}
+	return filepath.Clean(state.StagingTarget) == filepath.Clean(stagingTarget)
+}
+
+func publishStateMatches(state publishState, volumeID string, stagingTarget string, target string, readonly bool) bool {
+	return state.VolumeID == volumeID &&
+		filepath.Clean(state.StagingTarget) == filepath.Clean(stagingTarget) &&
+		filepath.Clean(state.Target) == filepath.Clean(target) &&
+		state.Readonly == readonly
 }
 
 func validateVolumeCapabilities(caps []*csi.VolumeCapability) error {
@@ -420,6 +490,51 @@ func (d *Driver) mountStatePath(volumeID string) string {
 	return filepath.Join(d.cfg.StateDir, safeFileName(volumeID)+".json")
 }
 
+func (d *Driver) writeMountState(state mountState) error {
+	body, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(d.mountStatePath(state.VolumeID), body, 0o600)
+}
+
+func (d *Driver) readMountState(volumeID string) (mountState, error) {
+	body, err := os.ReadFile(d.mountStatePath(volumeID))
+	if err != nil {
+		return mountState{}, err
+	}
+	var state mountState
+	if err := json.Unmarshal(body, &state); err != nil {
+		return mountState{}, err
+	}
+	return state, nil
+}
+
+func (d *Driver) publishStatePath(target string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(target)))
+	return filepath.Join(d.cfg.StateDir, "published-"+hex.EncodeToString(sum[:])[:32]+".json")
+}
+
+func (d *Driver) writePublishState(state publishState) error {
+	body, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(d.publishStatePath(state.Target), body, 0o600)
+}
+
+func (d *Driver) readPublishState(target string) (publishState, error) {
+	body, err := os.ReadFile(d.publishStatePath(target))
+	if err != nil {
+		return publishState{}, err
+	}
+	var state publishState
+	if err := json.Unmarshal(body, &state); err != nil {
+		return publishState{}, err
+	}
+	return state, nil
+}
+
 func markerPath(remoteRoot string) string {
 	if remoteRoot == "/" {
 		return "/" + markerFileName
@@ -429,6 +544,23 @@ func markerPath(remoteRoot string) string {
 
 func indexPath(volumeID string) string {
 	return path.Join(metadataRoot, safeFileName(volumeID)+".json")
+}
+
+type publishState struct {
+	VolumeID      string `json:"volumeID"`
+	StagingTarget string `json:"stagingTarget"`
+	Target        string `json:"target"`
+	Readonly      bool   `json:"readonly"`
+	PublishedAt   string `json:"publishedAt"`
+}
+
+type mountState struct {
+	PID           int    `json:"pid"`
+	PIDStartTime  string `json:"pidStartTime"`
+	VolumeID      string `json:"volumeID"`
+	RemoteRoot    string `json:"remoteRoot"`
+	StagingTarget string `json:"stagingTarget"`
+	StartedAt     string `json:"startedAt"`
 }
 
 type volumeMarker struct {

@@ -4,7 +4,7 @@ package driver
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,14 +26,6 @@ type drive9MountRequest struct {
 	RemoteRoot    string
 	StagingTarget string
 	Profile       string
-}
-
-type mountState struct {
-	PID           int    `json:"pid"`
-	VolumeID      string `json:"volumeID"`
-	RemoteRoot    string `json:"remoteRoot"`
-	StagingTarget string `json:"stagingTarget"`
-	StartedAt     string `json:"startedAt"`
 }
 
 func (d *Driver) startDrive9Mount(ctx context.Context, req drive9MountRequest) error {
@@ -86,6 +78,7 @@ func (d *Driver) startDrive9Mount(ctx context.Context, req drive9MountRequest) e
 
 	state := mountState{
 		PID:           cmd.Process.Pid,
+		PIDStartTime:  pidStartTime(cmd.Process.Pid),
 		VolumeID:      req.VolumeID,
 		RemoteRoot:    req.RemoteRoot,
 		StagingTarget: req.StagingTarget,
@@ -102,37 +95,26 @@ func (d *Driver) startDrive9Mount(ctx context.Context, req drive9MountRequest) e
 	return nil
 }
 
-func (d *Driver) writeMountState(state mountState) error {
-	body, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(d.mountStatePath(state.VolumeID), body, 0o600)
-}
-
-func (d *Driver) readMountState(volumeID string) (mountState, error) {
-	body, err := os.ReadFile(d.mountStatePath(volumeID))
-	if err != nil {
-		return mountState{}, err
-	}
-	var state mountState
-	if err := json.Unmarshal(body, &state); err != nil {
-		return mountState{}, err
-	}
-	return state, nil
-}
-
-func (d *Driver) stopRecordedMount(ctx context.Context, volumeID string) error {
+func (d *Driver) stopRecordedMount(ctx context.Context, volumeID string, stagingTarget string) error {
 	state, err := d.readMountState(volumeID)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
 		return err
+	}
+	if filepath.Clean(state.StagingTarget) != filepath.Clean(stagingTarget) {
+		return fmt.Errorf("stage state target mismatch: state=%s request=%s", state.StagingTarget, stagingTarget)
 	}
 	if state.PID <= 0 {
 		return nil
 	}
-	deadline := time.Now().Add(10 * time.Second)
+	if !pidMatchesState(state) {
+		return nil
+	}
+	deadline := time.Now().Add(120 * time.Second)
 	for time.Now().Before(deadline) {
-		if !pidAlive(state.PID) {
+		if !pidMatchesState(state) {
 			return nil
 		}
 		select {
@@ -141,8 +123,7 @@ func (d *Driver) stopRecordedMount(ctx context.Context, volumeID string) error {
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
-	_ = syscall.Kill(-state.PID, syscall.SIGTERM)
-	return nil
+	return fmt.Errorf("drive9 mount process pid=%d did not exit before timeout", state.PID)
 }
 
 func waitForMount(ctx context.Context, target string, timeout time.Duration) error {
@@ -229,4 +210,28 @@ func pidAlive(pid int) bool {
 		return false
 	}
 	return syscall.Kill(pid, 0) == nil
+}
+
+func pidStartTime(pid int) string {
+	body, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return ""
+	}
+	text := string(body)
+	end := strings.LastIndex(text, ")")
+	if end < 0 || end+2 >= len(text) {
+		return ""
+	}
+	fields := strings.Fields(text[end+2:])
+	if len(fields) < 20 {
+		return ""
+	}
+	return fields[19]
+}
+
+func pidMatchesState(state mountState) bool {
+	if state.PID <= 0 || state.PIDStartTime == "" {
+		return false
+	}
+	return pidAlive(state.PID) && pidStartTime(state.PID) == state.PIDStartTime
 }

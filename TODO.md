@@ -17,7 +17,7 @@ Production-minimal means:
 - RWO only.
 - Secrets only for server/API key.
 - `CreateVolume` creates a Drive9 remote directory and marker file.
-- `DeleteVolume` deletes only a marked matching directory.
+- `DeleteVolume` deletes only a directory with both a matching metadata index entry and a matching root marker.
 - `NodeStageVolume` mounts Drive9 FUSE on the node.
 - `NodePublishVolume` bind-mounts the staged path into the pod.
 - No snapshots, expansion, RWX, or cross-node cache-consistency claims.

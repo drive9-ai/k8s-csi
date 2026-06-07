@@ -1,5 +1,5 @@
-IMAGE ?= ghcr.io/drive9-ai/drive9-csi:dev
-DRIVE9_REF ?= main
+IMAGE ?= ghcr.io/drive9-ai/drive9-csi:0.1.0
+DRIVE9_REF ?= 68ce029f889a1a6ac17b07fb9d6b5849ce39631b
 
 .PHONY: test
 test:

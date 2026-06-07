@@ -6,6 +6,6 @@ spec:
   attachRequired: false
   podInfoOnMount: false
   requiresRepublish: false
-  fsGroupPolicy: File
+  fsGroupPolicy: None
   volumeLifecycleModes:
     - Persistent

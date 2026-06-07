@@ -8,7 +8,7 @@ It intentionally ships a small stable surface first:
 - `ReadWriteOnce` only.
 - API key passed through Kubernetes CSI Secrets only.
 - `CreateVolume` writes a marker file.
-- `DeleteVolume` deletes only a path with a matching marker.
+- `DeleteVolume` deletes only a path with both a matching metadata index entry and a matching root marker.
 - `NodeStageVolume` runs `drive9 mount --mode=fuse`.
 - `NodePublishVolume` bind-mounts the staged path into the pod.
 - No snapshots, expansion, RWX, or automatic tenant provisioning.
@@ -32,7 +32,7 @@ metadata:
 type: Opaque
 stringData:
   server: https://drive9.example.com
-  apiKey: sk-redacted
+  apiKey: drive9_api_key_redacted
 ```
 
 For the CSI path, do not put API keys in `StorageClass.parameters`, PV attributes, pod env, or annotations. The example `StorageClass` uses CSI secret references so Kubernetes passes the secret to `CreateVolume`, `DeleteVolume`, and `NodeStageVolume`.
@@ -48,15 +48,14 @@ The first version stores CSI metadata under `/k8s/.drive9-csi/volumes`. If you u
 Build and publish the image:
 
 ```sh
-make image IMAGE=ghcr.io/drive9-ai/drive9-csi:dev
-docker push ghcr.io/drive9-ai/drive9-csi:dev
+make image IMAGE=ghcr.io/drive9-ai/drive9-csi:0.1.0
+docker push ghcr.io/drive9-ai/drive9-csi:0.1.0
 ```
 
-Edit `deploy/kubernetes/node.yaml` and `deploy/kubernetes/controller.yaml` to use your image, then:
+Edit `deploy/kubernetes/node.yaml` and `deploy/kubernetes/controller.yaml` to use your immutable image tag or digest, edit `deploy/kubernetes/secret.example.yaml`, then:
 
 ```sh
 kubectl apply -f deploy/kubernetes/namespace.yaml
-kubectl apply -f deploy/kubernetes/secret.example.yaml
 kubectl apply -f deploy/kubernetes/
 ```
 

@@ -20,7 +20,7 @@ func (d *Driver) startDrive9Mount(context.Context, drive9MountRequest) error {
 	return errors.New("Drive9 CSI node mounts are supported on Linux only")
 }
 
-func (d *Driver) stopRecordedMount(context.Context, string) error {
+func (d *Driver) stopRecordedMount(context.Context, string, string) error {
 	return nil
 }
 
