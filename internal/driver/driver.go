@@ -286,6 +286,9 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	if volumeID == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume id is required")
 	}
+	if err := validateVolumeCapabilities([]*csi.VolumeCapability{req.GetVolumeCapability()}); err != nil {
+		return nil, err
+	}
 	stagingTarget := strings.TrimSpace(req.GetStagingTargetPath())
 	if stagingTarget == "" {
 		return nil, status.Error(codes.InvalidArgument, "staging target path is required")

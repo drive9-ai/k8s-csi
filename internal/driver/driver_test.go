@@ -128,6 +128,42 @@ func TestValidateVolumeCapabilitiesAllowsSingleNodeWriter(t *testing.T) {
 	}
 }
 
+func TestNodeStageVolumeRejectsUnsupportedCapabilities(t *testing.T) {
+	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
+	tests := []struct {
+		name string
+		cap  *csi.VolumeCapability
+	}{
+		{name: "nil", cap: nil},
+		{name: "block", cap: &csi.VolumeCapability{
+			AccessType: &csi.VolumeCapability_Block{Block: &csi.VolumeCapability_BlockVolume{}},
+			AccessMode: &csi.VolumeCapability_AccessMode{
+				Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+			},
+		}},
+		{name: "rwx", cap: &csi.VolumeCapability{
+			AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
+			AccessMode: &csi.VolumeCapability_AccessMode{
+				Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
+			},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := d.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+				VolumeId:          "vol-" + tt.name,
+				StagingTargetPath: t.TempDir(),
+				VolumeContext:     map[string]string{"remoteRoot": "/k8s/pvc/demo"},
+				Secrets:           map[string]string{"server": "http://127.0.0.1", "apiKey": "test-key"},
+				VolumeCapability:  tt.cap,
+			})
+			if status.Code(err).String() != "InvalidArgument" {
+				t.Fatalf("NodeStageVolume status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+			}
+		})
+	}
+}
+
 func TestCreateDeleteVolumeWritesIndexAndMarker(t *testing.T) {
 	fake := newFakeDrive9(t)
 	defer fake.close()
