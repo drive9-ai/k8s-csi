@@ -21,7 +21,6 @@ permissions:
 env:
   IMAGE: ghcr.io/drive9-ai/drive9-csi
   DRIVE9_REF: 7fb7c58d0c99a27d75d0f7a78c904cef2018f799
-  DRIVE9_TAG: drive9-main-7fb7c58
 
 jobs:
   publish:
@@ -40,6 +39,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Compute image tags
+        id: image-tags
+        shell: bash
+        run: |
+          echo "drive9_short=${DRIVE9_REF::7}" >> "$GITHUB_OUTPUT"
+          echo "csi_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -51,7 +57,8 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/drive9-ai/k8s-csi
             org.opencontainers.image.description=Drive9 Kubernetes CSI driver
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=drive9-${{ steps.image-tags.outputs.drive9_short }}-csi-${{ steps.image-tags.outputs.csi_short }}
           tags: |
             ${{ env.IMAGE }}:0.1.0
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ env.DRIVE9_TAG }}
+            ${{ env.IMAGE }}:drive9-${{ steps.image-tags.outputs.drive9_short }}-csi-${{ steps.image-tags.outputs.csi_short }}
