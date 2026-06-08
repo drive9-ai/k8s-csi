@@ -41,7 +41,6 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["drive9-csi-secret"]
     verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

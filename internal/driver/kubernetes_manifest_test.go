@@ -7,13 +7,13 @@ import (
 	"testing"
 )
 
-func TestDefaultStorageClassUsesPVCNamespaceSecrets(t *testing.T) {
+func TestDefaultStorageClassUsesPerPVCNamespaceSecrets(t *testing.T) {
 	body := readRepoFile(t, "deploy/kubernetes/storageclass.yaml")
 
 	for _, want := range []string{
-		"csi.storage.k8s.io/provisioner-secret-name: drive9-csi-secret",
+		"csi.storage.k8s.io/provisioner-secret-name: drive9-csi-${pvc.name}",
 		"csi.storage.k8s.io/provisioner-secret-namespace: ${pvc.namespace}",
-		"csi.storage.k8s.io/node-stage-secret-name: drive9-csi-secret",
+		"csi.storage.k8s.io/node-stage-secret-name: drive9-csi-${pvc.name}",
 		"csi.storage.k8s.io/node-stage-secret-namespace: ${pvc.namespace}",
 	} {
 		if !strings.Contains(body, want) {
@@ -22,7 +22,9 @@ func TestDefaultStorageClassUsesPVCNamespaceSecrets(t *testing.T) {
 	}
 
 	for _, stale := range []string{
+		"csi.storage.k8s.io/provisioner-secret-name: drive9-csi-secret",
 		"csi.storage.k8s.io/provisioner-secret-namespace: drive9-csi",
+		"csi.storage.k8s.io/node-stage-secret-name: drive9-csi-secret",
 		"csi.storage.k8s.io/node-stage-secret-namespace: drive9-csi",
 	} {
 		if strings.Contains(body, stale) {
@@ -31,13 +33,12 @@ func TestDefaultStorageClassUsesPVCNamespaceSecrets(t *testing.T) {
 	}
 }
 
-func TestControllerRBACCanReadNamespaceLocalDrive9Secrets(t *testing.T) {
+func TestControllerRBACCanReadPerPVCNamespaceLocalDrive9Secrets(t *testing.T) {
 	body := readRepoFile(t, "deploy/kubernetes/rbac.yaml")
 
 	want := strings.Join([]string{
 		"  - apiGroups: [\"\"]",
 		"    resources: [\"secrets\"]",
-		"    resourceNames: [\"drive9-csi-secret\"]",
 		"    verbs: [\"get\"]",
 	}, "\n")
 	if !strings.Contains(body, want) {
@@ -51,23 +52,26 @@ func TestControllerRBACCanReadNamespaceLocalDrive9Secrets(t *testing.T) {
 			t.Fatalf("rbac.yaml still contains namespaced secret RBAC: %q", stale)
 		}
 	}
+	if strings.Contains(body, "resourceNames: [\"drive9-csi-secret\"]") {
+		t.Fatal("rbac.yaml still restricts secret reads to the old fixed secret name")
+	}
 }
 
-func TestKubernetesExamplesUseWorkloadNamespaceSecrets(t *testing.T) {
+func TestKubernetesExamplesUsePerPVCWorkloadNamespaceSecrets(t *testing.T) {
 	secret := readRepoFile(t, "deploy/examples/kubernetes/secret.example.yaml")
 	if strings.Contains(secret, "namespace: drive9-csi") {
 		t.Fatal("secret.example.yaml should not force credentials into the driver namespace")
 	}
-	if !strings.Contains(secret, "name: drive9-csi-secret") {
-		t.Fatal("secret.example.yaml must keep the expected CSI secret name")
+	if !strings.Contains(secret, "name: drive9-csi-drive9-workspace") {
+		t.Fatal("secret.example.yaml must use the default drive9-csi-<pvc-name> secret name")
 	}
 }
 
-func TestE2EUsesNamespaceLocalDrive9Secret(t *testing.T) {
+func TestE2EUsesPerPVCNamespaceLocalDrive9Secret(t *testing.T) {
 	body := readRepoFile(t, "hack/e2e-k8s.sh")
 
 	for _, want := range []string{
-		"kind: Secret\nmetadata:\n  name: drive9-csi-secret\n  namespace: $test_namespace",
+		"kind: Secret\nmetadata:\n  name: drive9-csi-drive9-workspace-e2e\n  namespace: $test_namespace",
 		"write_storageclass()",
 	} {
 		if !strings.Contains(body, want) {
