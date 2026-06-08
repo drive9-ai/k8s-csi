@@ -70,7 +70,7 @@ the volume prefix, for example `/k8s/pvc`, and the metadata index path
 The default manifests use the public customer image:
 
 ```text
-ghcr.io/drive9-ai/drive9-csi:drive9-6e2820e-csi-1f8e5cd
+ghcr.io/drive9-ai/drive9-csi:drive9-6e2820e-csi-126ff81
 ```
 
 Release images are also published with a traceable tag:
@@ -80,10 +80,10 @@ ghcr.io/drive9-ai/drive9-csi:drive9-<drive9-short-sha>-csi-<csi-short-sha>
 ```
 
 For example, the current default image was built from Drive9 CLI commit
-`6e2820e...` and CSI commit `1f8e5cd...`:
+`6e2820e...` and CSI commit `126ff81...`:
 
 ```text
-ghcr.io/drive9-ai/drive9-csi:drive9-6e2820e-csi-1f8e5cd
+ghcr.io/drive9-ai/drive9-csi:drive9-6e2820e-csi-126ff81
 ```
 
 The publish workflow does not publish `:latest` or `0.1.0`. Use a traceable tag
@@ -92,8 +92,8 @@ or a digest.
 To build and publish your own image instead:
 
 ```sh
-make image IMAGE=ghcr.io/drive9-ai/drive9-csi:drive9-6e2820e-csi-1f8e5cd
-docker push ghcr.io/drive9-ai/drive9-csi:drive9-6e2820e-csi-1f8e5cd
+make image IMAGE=ghcr.io/drive9-ai/drive9-csi:drive9-6e2820e-csi-126ff81
+docker push ghcr.io/drive9-ai/drive9-csi:drive9-6e2820e-csi-126ff81
 ```
 
 Install the CSI driver:
@@ -240,7 +240,7 @@ API key:
 ```sh
 export DRIVE9_SERVER=https://api.drive9.ai
 export DRIVE9_API_KEY=drive9_api_key_redacted
-export DRIVE9_CSI_IMAGE=ghcr.io/drive9-ai/drive9-csi:drive9-6e2820e-csi-1f8e5cd
+export DRIVE9_CSI_IMAGE=ghcr.io/drive9-ai/drive9-csi:drive9-6e2820e-csi-126ff81
 export DRIVE9_CSI_E2E_CONFIRM=1
 hack/e2e-k8s.sh
 ```
@@ -270,5 +270,5 @@ https://github.com/orgs/drive9-ai/packages/container/package/drive9-csi
 
 Then use package settings to change the package visibility to public. The image
 is anonymously pullable only after `docker manifest inspect
-ghcr.io/drive9-ai/drive9-csi:drive9-6e2820e-csi-1f8e5cd` works without
+ghcr.io/drive9-ai/drive9-csi:drive9-6e2820e-csi-126ff81` works without
 `docker login`.
