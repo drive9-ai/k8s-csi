@@ -51,6 +51,22 @@ The default manifests use the public customer image:
 ghcr.io/drive9-ai/drive9-csi:0.1.0
 ```
 
+Release images are also published with a traceable tag:
+
+```text
+ghcr.io/drive9-ai/drive9-csi:drive9-<drive9-short-sha>-csi-<csi-short-sha>
+```
+
+For example, a build from Drive9 CLI commit `7fb7c58...` and CSI commit
+`abcdef0...` is tagged:
+
+```text
+ghcr.io/drive9-ai/drive9-csi:drive9-7fb7c58-csi-abcdef0
+```
+
+The publish workflow does not publish `:latest`. Use `0.1.0`, a traceable tag,
+or a digest.
+
 To build and publish your own image instead:
 
 ```sh
@@ -186,3 +202,16 @@ PV to be deleted. It fails closed if either e2e namespace or cluster-scoped CSI
 resources already exist, because the e2e should run on a clean validation
 cluster. Do not use `:latest` for `DRIVE9_CSI_IMAGE`; use an immutable tag or
 digest for customer evidence.
+
+## GHCR Visibility
+
+The image package must be public before customers can pull it without a GitHub
+token. After the first successful publish, open:
+
+```text
+https://github.com/orgs/drive9-ai/packages/container/package/drive9-csi
+```
+
+Then use package settings to change the package visibility to public. The image
+is anonymously pullable only after `docker manifest inspect
+ghcr.io/drive9-ai/drive9-csi:0.1.0` works without `docker login`.
