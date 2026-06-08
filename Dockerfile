@@ -1,4 +1,8 @@
 FROM golang:1.25-bookworm AS csi-builder
+ARG GOPROXY=https://proxy.golang.org,direct
+ARG GOSUMDB=sum.golang.org
+ENV GOPROXY=${GOPROXY}
+ENV GOSUMDB=${GOSUMDB}
 WORKDIR /src/csi
 COPY go.mod go.sum ./
 RUN go mod download
@@ -7,6 +11,10 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/drive9-csi ./cmd/driv
 
 FROM golang:1.25-bookworm AS drive9-builder
 ARG DRIVE9_REF=68ce029f889a1a6ac17b07fb9d6b5849ce39631b
+ARG GOPROXY=https://proxy.golang.org,direct
+ARG GOSUMDB=sum.golang.org
+ENV GOPROXY=${GOPROXY}
+ENV GOSUMDB=${GOSUMDB}
 WORKDIR /src
 RUN git clone https://github.com/mem9-ai/drive9.git drive9 \
  && cd drive9 \
