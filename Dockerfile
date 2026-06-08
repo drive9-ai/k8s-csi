@@ -23,6 +23,8 @@ WORKDIR /src/drive9
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/drive9 ./cmd/drive9
 
 FROM debian:bookworm-slim
+LABEL org.opencontainers.image.source=https://github.com/drive9-ai/k8s-csi
+LABEL org.opencontainers.image.description="Drive9 Kubernetes CSI driver"
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates fuse3 tini util-linux \
  && rm -rf /var/lib/apt/lists/* \
