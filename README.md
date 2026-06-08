@@ -45,14 +45,20 @@ The first version stores CSI metadata under `/k8s/.drive9-csi/volumes`. If you u
 
 ## Install
 
-Build and publish the image:
+The default manifests use the public customer image:
+
+```text
+ghcr.io/drive9-ai/drive9-csi:0.1.0
+```
+
+To build and publish your own image instead:
 
 ```sh
 make image IMAGE=ghcr.io/drive9-ai/drive9-csi:0.1.0
 docker push ghcr.io/drive9-ai/drive9-csi:0.1.0
 ```
 
-Edit `deploy/kubernetes/node.yaml` and `deploy/kubernetes/controller.yaml` to use your immutable image tag or digest, then create the production Secret explicitly:
+Create the production Secret explicitly, then apply the CSI manifests:
 
 ```sh
 kubectl apply -f deploy/kubernetes/namespace.yaml
@@ -164,7 +170,7 @@ production-safe, run a real Kubernetes cluster against a real Drive9 server and
 API key:
 
 ```sh
-export DRIVE9_SERVER=https://drive9.example.com
+export DRIVE9_SERVER=https://api.drive9.ai
 export DRIVE9_API_KEY=drive9_api_key_redacted
 export DRIVE9_CSI_IMAGE=ghcr.io/drive9-ai/drive9-csi:0.1.0
 export DRIVE9_CSI_E2E_CONFIRM=1
