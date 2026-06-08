@@ -1,5 +1,5 @@
-IMAGE ?= ghcr.io/drive9-ai/drive9-csi:0.1.0
-DRIVE9_REF ?= 7fb7c58d0c99a27d75d0f7a78c904cef2018f799
+IMAGE ?= ghcr.io/drive9-ai/drive9-csi:drive9-9c464af-csi-f5255cb
+DRIVE9_REF ?= 9c464af94a9cab374c3841a297a0a1eefd047977
 GOPROXY ?= https://proxy.golang.org,direct
 GOSUMDB ?= sum.golang.org
 
