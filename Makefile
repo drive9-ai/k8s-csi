@@ -17,4 +17,4 @@ image:
 
 .PHONY: manifests
 manifests:
-	kubectl apply -f deploy/kubernetes/
+	kubectl apply -k deploy/kubernetes

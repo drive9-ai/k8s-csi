@@ -61,7 +61,7 @@ func (d *Driver) startDrive9Mount(ctx context.Context, req drive9MountRequest) e
 	}
 	args = append(args, ":"+req.RemoteRoot, req.StagingTarget)
 
-	cmd := exec.CommandContext(ctx, d.cfg.Drive9Binary, args...)
+	cmd := exec.Command(d.cfg.Drive9Binary, args...)
 	cmd.Env = append(os.Environ(),
 		"DRIVE9_SERVER="+req.Server,
 		"DRIVE9_API_KEY="+req.APIKey,
@@ -72,8 +72,9 @@ func (d *Driver) startDrive9Mount(ctx context.Context, req drive9MountRequest) e
 	if err := cmd.Start(); err != nil {
 		return status.Errorf(codes.Internal, "start drive9 mount: %v", err)
 	}
+	processDone := make(chan error, 1)
 	go func() {
-		_ = cmd.Wait()
+		processDone <- cmd.Wait()
 	}()
 
 	startTime := pidStartTime(cmd.Process.Pid)
@@ -94,7 +95,7 @@ func (d *Driver) startDrive9Mount(ctx context.Context, req drive9MountRequest) e
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 		return status.Errorf(codes.Internal, "write mount state: %v", err)
 	}
-	if err := waitForMount(ctx, req.StagingTarget, 90*time.Second); err != nil {
+	if err := waitForMount(ctx, req.StagingTarget, 90*time.Second, processDone); err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 		return status.Errorf(codes.Internal, "drive9 mount did not become ready: %v", err)
 	}
@@ -135,7 +136,7 @@ func (d *Driver) stopRecordedMount(ctx context.Context, volumeID string, staging
 	return fmt.Errorf("drive9 mount process pid=%d did not exit before timeout", state.PID)
 }
 
-func waitForMount(ctx context.Context, target string, timeout time.Duration) error {
+func waitForMount(ctx context.Context, target string, timeout time.Duration, processDone <-chan error) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		mounted, err := isMountPoint(target)
@@ -148,6 +149,11 @@ func waitForMount(ctx context.Context, target string, timeout time.Duration) err
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case err := <-processDone:
+			if err != nil {
+				return fmt.Errorf("drive9 mount process exited before mount became ready: %w", err)
+			}
+			return errors.New("drive9 mount process exited before mount became ready")
 		case <-time.After(500 * time.Millisecond):
 		}
 	}

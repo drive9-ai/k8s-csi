@@ -7,11 +7,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
@@ -43,6 +47,14 @@ func TestBuildRemoteRootRejectsMetadataOverlap(t *testing.T) {
 func TestValidateSafeDeleteRootRejectsRootAndMetadata(t *testing.T) {
 	for _, path := range []string{"/", "/k8s/.drive9-csi", "/k8s/.drive9-csi/volumes/x"} {
 		if err := validateSafeDeleteRoot(path); err == nil {
+			t.Fatalf("expected %q to be unsafe", path)
+		}
+	}
+}
+
+func TestValidateVolumeRootRejectsOutsideAllowedRoot(t *testing.T) {
+	for _, path := range []string{"/tmp/pvc", "/drive9/pvc", "/k8s/.drive9-csi/volumes/demo"} {
+		if err := validateVolumeRoot(path); err == nil {
 			t.Fatalf("expected %q to be unsafe", path)
 		}
 	}
@@ -114,6 +126,29 @@ func TestValidateVolumeCapabilitiesRejectsNilAndBlock(t *testing.T) {
 	}
 }
 
+func TestValidateVolumeCapabilitiesRejectsUnsupportedMountOptions(t *testing.T) {
+	tests := []struct {
+		name  string
+		mount *csi.VolumeCapability_MountVolume
+	}{
+		{name: "fsType", mount: &csi.VolumeCapability_MountVolume{FsType: "ext4"}},
+		{name: "mountFlags", mount: &csi.VolumeCapability_MountVolume{MountFlags: []string{"noexec"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateVolumeCapabilities([]*csi.VolumeCapability{{
+				AccessType: &csi.VolumeCapability_Mount{Mount: tt.mount},
+				AccessMode: &csi.VolumeCapability_AccessMode{
+					Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+				},
+			}})
+			if err == nil {
+				t.Fatal("expected unsupported mount option to be rejected")
+			}
+		})
+	}
+}
+
 func TestValidateVolumeCapabilitiesAllowsSingleNodeWriter(t *testing.T) {
 	err := validateVolumeCapabilities([]*csi.VolumeCapability{
 		{
@@ -125,6 +160,56 @@ func TestValidateVolumeCapabilitiesAllowsSingleNodeWriter(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("validateVolumeCapabilities error = %v", err)
+	}
+}
+
+func TestCreateVolumeRejectsUnsupportedRequestFields(t *testing.T) {
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	tests := []struct {
+		name   string
+		mutate func(*csi.CreateVolumeRequest)
+	}{
+		{
+			name: "content source",
+			mutate: func(req *csi.CreateVolumeRequest) {
+				req.VolumeContentSource = &csi.VolumeContentSource{
+					Type: &csi.VolumeContentSource_Volume{
+						Volume: &csi.VolumeContentSource_VolumeSource{VolumeId: "source-volume"},
+					},
+				}
+			},
+		},
+		{
+			name: "mutable parameters",
+			mutate: func(req *csi.CreateVolumeRequest) {
+				req.MutableParameters = map[string]string{"profile": "other"}
+			},
+		},
+		{
+			name: "negative capacity",
+			mutate: func(req *csi.CreateVolumeRequest) {
+				req.CapacityRange = &csi.CapacityRange{RequiredBytes: -1}
+			},
+		},
+		{
+			name: "required exceeds limit",
+			mutate: func(req *csi.CreateVolumeRequest) {
+				req.CapacityRange = &csi.CapacityRange{RequiredBytes: 2, LimitBytes: 1}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &csi.CreateVolumeRequest{
+				Name:               "pvc-demo",
+				VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+			}
+			tt.mutate(req)
+			_, err := d.CreateVolume(context.Background(), req)
+			if status.Code(err).String() != "InvalidArgument" {
+				t.Fatalf("CreateVolume status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+			}
+		})
 	}
 }
 
@@ -164,6 +249,345 @@ func TestNodeStageVolumeRejectsUnsupportedCapabilities(t *testing.T) {
 	}
 }
 
+func TestNodeStageVolumeRejectsRemoteRootOutsideAllowedRoot(t *testing.T) {
+	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
+	_, err := d.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+		VolumeId:          "vol-outside",
+		StagingTargetPath: t.TempDir(),
+		VolumeContext:     map[string]string{"remoteRoot": "/outside/pvc"},
+		Secrets:           map[string]string{"server": "http://127.0.0.1", "apiKey": "test-key"},
+		VolumeCapability:  singleNodeMountCapability(),
+	})
+	if status.Code(err).String() != "InvalidArgument" {
+		t.Fatalf("NodeStageVolume status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+	}
+}
+
+func TestNodeStageVolumeRejectsMismatchedVolumeID(t *testing.T) {
+	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
+	_, err := d.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+		VolumeId:          "drive9-00000000000000000000000000000000",
+		StagingTargetPath: t.TempDir(),
+		VolumeContext:     map[string]string{"remoteRoot": "/k8s/pvc/demo"},
+		Secrets:           map[string]string{"server": "http://127.0.0.1", "apiKey": "test-key"},
+		VolumeCapability:  singleNodeMountCapability(),
+	})
+	if status.Code(err).String() != "FailedPrecondition" {
+		t.Fatalf("NodeStageVolume status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
+	}
+}
+
+func TestNodeLocalPathsMustBeAbsolute(t *testing.T) {
+	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
+	remoteRoot := "/k8s/pvc/demo"
+	volumeID := volumeIDForRemoteRoot(remoteRoot)
+
+	stageReq := &csi.NodeStageVolumeRequest{
+		VolumeId:          volumeID,
+		StagingTargetPath: "relative-stage",
+		VolumeContext:     map[string]string{"remoteRoot": remoteRoot},
+		Secrets:           map[string]string{"server": "http://127.0.0.1", "apiKey": "test-key"},
+		VolumeCapability:  singleNodeMountCapability(),
+	}
+	if _, err := d.NodeStageVolume(context.Background(), stageReq); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("NodeStageVolume relative target status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+	}
+
+	if _, err := d.NodeUnstageVolume(context.Background(), &csi.NodeUnstageVolumeRequest{
+		VolumeId:          volumeID,
+		StagingTargetPath: "relative-stage",
+	}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("NodeUnstageVolume relative target status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+	}
+
+	if _, err := d.NodePublishVolume(context.Background(), &csi.NodePublishVolumeRequest{
+		VolumeId:          volumeID,
+		StagingTargetPath: t.TempDir(),
+		TargetPath:        "relative-target",
+		VolumeCapability:  singleNodeMountCapability(),
+	}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("NodePublishVolume relative target status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+	}
+
+	if _, err := d.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{
+		VolumeId:   volumeID,
+		TargetPath: "relative-target",
+	}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("NodeUnpublishVolume relative target status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+	}
+}
+
+func TestNodeStageVolumeRequiresMatchingRemoteMarker(t *testing.T) {
+	fake := newFakeDrive9(t)
+	defer fake.close()
+
+	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
+	remoteRoot := "/k8s/pvc/demo"
+	volumeID := volumeIDForRemoteRoot(remoteRoot)
+	req := &csi.NodeStageVolumeRequest{
+		VolumeId:          volumeID,
+		StagingTargetPath: t.TempDir(),
+		VolumeContext:     map[string]string{"remoteRoot": remoteRoot},
+		Secrets:           fake.secrets(),
+		VolumeCapability:  singleNodeMountCapability(),
+	}
+
+	_, err := d.NodeStageVolume(context.Background(), req)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("NodeStageVolume missing marker status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
+	}
+
+	fake.putJSON(markerPath(remoteRoot), volumeMarker{
+		Version:    1,
+		Driver:     "csi.drive9.ai",
+		VolumeID:   "other-volume",
+		RemoteRoot: remoteRoot,
+	})
+	_, err = d.NodeStageVolume(context.Background(), req)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("NodeStageVolume mismatched marker status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
+	}
+}
+
+func TestValidateRemoteVolumeMarkerAllowsMatchingMarker(t *testing.T) {
+	fake := newFakeDrive9(t)
+	defer fake.close()
+
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	remoteRoot := "/k8s/pvc/demo"
+	volumeID := volumeIDForRemoteRoot(remoteRoot)
+	fake.putJSON(markerPath(remoteRoot), volumeMarker{
+		Version:    1,
+		Driver:     "csi.drive9.ai",
+		VolumeID:   volumeID,
+		RemoteRoot: remoteRoot,
+	})
+
+	client := newDrive9Client(drive9Credentials{Server: fake.server.URL, APIKey: "test-key"})
+	if err := d.validateRemoteVolumeMarker(context.Background(), client, volumeID, remoteRoot); err != nil {
+		t.Fatalf("validateRemoteVolumeMarker error = %v", err)
+	}
+}
+
+func TestNodeUnstageVolumeIgnoresMismatchedStateWhenTargetAlreadyUnmounted(t *testing.T) {
+	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
+	volumeID := "vol"
+	if err := d.writeMountState(mountState{
+		VolumeID:      volumeID,
+		RemoteRoot:    "/k8s/pvc/demo",
+		StagingTarget: filepath.Join(t.TempDir(), "other-stage"),
+	}); err != nil {
+		t.Fatalf("writeMountState error = %v", err)
+	}
+	_, err := d.NodeUnstageVolume(context.Background(), &csi.NodeUnstageVolumeRequest{
+		VolumeId:          volumeID,
+		StagingTargetPath: filepath.Join(t.TempDir(), "requested-stage"),
+	})
+	if err != nil {
+		t.Fatalf("NodeUnstageVolume error = %v", err)
+	}
+	if _, statErr := os.Stat(d.mountStatePath(volumeID)); statErr != nil {
+		t.Fatalf("mismatched stage state should remain for the matching target cleanup, stat err = %v", statErr)
+	}
+}
+
+func TestNodeUnpublishVolumeRequiresVolumeID(t *testing.T) {
+	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
+	_, err := d.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{
+		TargetPath: t.TempDir(),
+	})
+	if status.Code(err).String() != "InvalidArgument" {
+		t.Fatalf("NodeUnpublishVolume status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+	}
+}
+
+func TestNodeUnpublishVolumeMissingStateIsIdempotentWhenTargetAlreadyUnmounted(t *testing.T) {
+	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
+	_, err := d.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{
+		VolumeId:   "vol",
+		TargetPath: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NodeUnpublishVolume error = %v", err)
+	}
+}
+
+func TestNodeUnpublishVolumeIgnoresMismatchedStateWhenTargetAlreadyUnmounted(t *testing.T) {
+	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
+	target := t.TempDir()
+	if err := d.writePublishState(publishState{
+		VolumeID:      "other-volume",
+		StagingTarget: "/stage",
+		Target:        target,
+	}); err != nil {
+		t.Fatalf("writePublishState error = %v", err)
+	}
+	_, err := d.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{
+		VolumeId:   "requested-volume",
+		TargetPath: target,
+	})
+	if err != nil {
+		t.Fatalf("NodeUnpublishVolume error = %v", err)
+	}
+	if _, statErr := os.Stat(d.publishStatePath(target)); statErr != nil {
+		t.Fatalf("mismatched publish state should remain for the matching volume cleanup, stat err = %v", statErr)
+	}
+}
+
+func TestNodeUnpublishVolumeRemovesMatchingStateWhenTargetAlreadyUnmounted(t *testing.T) {
+	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
+	target := t.TempDir()
+	if err := d.writePublishState(publishState{
+		VolumeID:      "vol",
+		StagingTarget: "/stage",
+		Target:        target,
+	}); err != nil {
+		t.Fatalf("writePublishState error = %v", err)
+	}
+	_, err := d.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{
+		VolumeId:   "vol",
+		TargetPath: target,
+	})
+	if err != nil {
+		t.Fatalf("NodeUnpublishVolume error = %v", err)
+	}
+	if _, statErr := os.Stat(d.publishStatePath(target)); !os.IsNotExist(statErr) {
+		t.Fatalf("publish state should be removed, stat err = %v", statErr)
+	}
+}
+
+func TestStageAndPublishStateStatus(t *testing.T) {
+	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
+	stageTarget := filepath.Join(t.TempDir(), "stage")
+	publishTarget := filepath.Join(t.TempDir(), "publish")
+
+	status, err := d.stageStateStatus("vol", stageTarget)
+	if err != nil {
+		t.Fatalf("stageStateStatus missing error = %v", err)
+	}
+	if status != stateMissing {
+		t.Fatalf("stageStateStatus missing = %v, want %v", status, stateMissing)
+	}
+	status, err = d.publishStateStatus("vol", publishTarget)
+	if err != nil {
+		t.Fatalf("publishStateStatus missing error = %v", err)
+	}
+	if status != stateMissing {
+		t.Fatalf("publishStateStatus missing = %v, want %v", status, stateMissing)
+	}
+
+	if err := d.writeMountState(mountState{VolumeID: "vol", StagingTarget: stageTarget}); err != nil {
+		t.Fatalf("writeMountState error = %v", err)
+	}
+	if err := d.writePublishState(publishState{VolumeID: "vol", Target: publishTarget}); err != nil {
+		t.Fatalf("writePublishState error = %v", err)
+	}
+	status, err = d.stageStateStatus("vol", stageTarget)
+	if err != nil {
+		t.Fatalf("stageStateStatus matching error = %v", err)
+	}
+	if status != stateMatching {
+		t.Fatalf("stageStateStatus matching = %v, want %v", status, stateMatching)
+	}
+	status, err = d.publishStateStatus("vol", publishTarget)
+	if err != nil {
+		t.Fatalf("publishStateStatus matching error = %v", err)
+	}
+	if status != stateMatching {
+		t.Fatalf("publishStateStatus matching = %v, want %v", status, stateMatching)
+	}
+
+	status, err = d.stageStateStatus("vol", filepath.Join(t.TempDir(), "other-stage"))
+	if err != nil {
+		t.Fatalf("stageStateStatus mismatched error = %v", err)
+	}
+	if status != stateMismatched {
+		t.Fatalf("stageStateStatus mismatched = %v, want %v", status, stateMismatched)
+	}
+	status, err = d.publishStateStatus("other-vol", publishTarget)
+	if err != nil {
+		t.Fatalf("publishStateStatus mismatched error = %v", err)
+	}
+	if status != stateMismatched {
+		t.Fatalf("publishStateStatus mismatched = %v, want %v", status, stateMismatched)
+	}
+}
+
+func TestListenCSIEndpointRefusesToRemoveNonSocket(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "csi.sock")
+	if err := os.WriteFile(socketPath, []byte("keep"), 0o600); err != nil {
+		t.Fatalf("write existing file: %v", err)
+	}
+	listener, cleanup, err := listenCSIEndpoint("unix://" + socketPath)
+	if err == nil {
+		if cleanup != nil {
+			cleanup()
+		}
+		if listener != nil {
+			_ = listener.Close()
+		}
+		t.Fatal("expected listenCSIEndpoint to reject existing non-socket path")
+	}
+	body, readErr := os.ReadFile(socketPath)
+	if readErr != nil {
+		t.Fatalf("existing file was removed or unreadable: %v", readErr)
+	}
+	if string(body) != "keep" {
+		t.Fatalf("existing file body = %q, want keep", string(body))
+	}
+}
+
+func TestCredentialsFromSecretsValidatesServerURL(t *testing.T) {
+	for _, server := range []string{"drive9.example.com", "ftp://drive9.example.com", "https://", "https://drive9.example.com?token=x"} {
+		t.Run(server, func(t *testing.T) {
+			_, err := credentialsFromSecrets(map[string]string{
+				"server": server,
+				"apiKey": "test-key",
+			})
+			if status.Code(err).String() != "InvalidArgument" {
+				t.Fatalf("credentialsFromSecrets status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+			}
+		})
+	}
+
+	creds, err := credentialsFromSecrets(map[string]string{
+		"server": "https://drive9.example.com/api/",
+		"apiKey": " test-key ",
+	})
+	if err != nil {
+		t.Fatalf("credentialsFromSecrets valid URL error = %v", err)
+	}
+	if creds.Server != "https://drive9.example.com/api" || creds.APIKey != "test-key" {
+		t.Fatalf("credentials = %+v", creds)
+	}
+}
+
+func TestGRPCHTTPErrorMapsClientAndRetryableStatuses(t *testing.T) {
+	tests := []struct {
+		statusCode int
+		want       codes.Code
+	}{
+		{statusCode: http.StatusBadRequest, want: codes.InvalidArgument},
+		{statusCode: http.StatusTooManyRequests, want: codes.Unavailable},
+		{statusCode: http.StatusBadGateway, want: codes.Unavailable},
+		{statusCode: http.StatusServiceUnavailable, want: codes.Unavailable},
+		{statusCode: http.StatusInternalServerError, want: codes.Unavailable},
+	}
+	for _, tt := range tests {
+		t.Run(http.StatusText(tt.statusCode), func(t *testing.T) {
+			resp := &http.Response{
+				StatusCode: tt.statusCode,
+				Status:     http.StatusText(tt.statusCode),
+				Body:       io.NopCloser(strings.NewReader("drive9 error")),
+			}
+			err := grpcHTTPError(resp, "test op")
+			if status.Code(err) != tt.want {
+				t.Fatalf("grpcHTTPError status = %s, want %s (err=%v)", status.Code(err), tt.want, err)
+			}
+		})
+	}
+}
+
 func TestCreateDeleteVolumeWritesIndexAndMarker(t *testing.T) {
 	fake := newFakeDrive9(t)
 	defer fake.close()
@@ -189,6 +613,9 @@ func TestCreateDeleteVolumeWritesIndexAndMarker(t *testing.T) {
 	if !fake.exists(indexPath(volumeID)) {
 		t.Fatalf("missing index marker %s", indexPath(volumeID))
 	}
+	if !fake.exists(nameIndexPath("pvc-demo")) {
+		t.Fatalf("missing name index marker %s", nameIndexPath("pvc-demo"))
+	}
 
 	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
@@ -201,6 +628,135 @@ func TestCreateDeleteVolumeWritesIndexAndMarker(t *testing.T) {
 	}
 	if fake.exists(indexPath(volumeID)) {
 		t.Fatalf("index still exists after delete: %s", indexPath(volumeID))
+	}
+	if fake.exists(nameIndexPath("pvc-demo")) {
+		t.Fatalf("name index still exists after delete: %s", nameIndexPath("pvc-demo"))
+	}
+}
+
+func TestCreateVolumeIsIdempotentByName(t *testing.T) {
+	fake := newFakeDrive9(t)
+	defer fake.close()
+
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	first, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-same-name",
+		Secrets:            fake.secrets(),
+		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("first CreateVolume error = %v", err)
+	}
+	second, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-same-name",
+		Secrets:            fake.secrets(),
+		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("idempotent CreateVolume error = %v", err)
+	}
+	if second.GetVolume().GetVolumeId() != first.GetVolume().GetVolumeId() {
+		t.Fatalf("idempotent CreateVolume volumeID = %q, want %q", second.GetVolume().GetVolumeId(), first.GetVolume().GetVolumeId())
+	}
+
+	conflictingRoot, err := buildRemoteRoot("/k8s/other", "pvc-same-name")
+	if err != nil {
+		t.Fatalf("build conflicting remote root: %v", err)
+	}
+	_, err = d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-same-name",
+		Secrets:            fake.secrets(),
+		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/other"},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("conflicting CreateVolume status = %s, want AlreadyExists (err=%v)", status.Code(err), err)
+	}
+	if fake.exists(conflictingRoot) {
+		t.Fatalf("conflicting CreateVolume created remote root: %s", conflictingRoot)
+	}
+}
+
+func TestCreateVolumeRecoversFromNameIndexOnly(t *testing.T) {
+	fake := newFakeDrive9(t)
+	defer fake.close()
+
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	name := "pvc-partial"
+	remoteRoot, err := buildRemoteRoot("/k8s/pvc", name)
+	if err != nil {
+		t.Fatalf("build remote root: %v", err)
+	}
+	volumeID := volumeIDForRemoteRoot(remoteRoot)
+	marker := volumeMarker{
+		Version:    1,
+		Driver:     "csi.drive9.ai",
+		VolumeID:   volumeID,
+		Name:       name,
+		RemoteRoot: remoteRoot,
+	}
+	fake.putJSON(nameIndexPath(name), marker)
+
+	resp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               name,
+		Secrets:            fake.secrets(),
+		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume recovery error = %v", err)
+	}
+	if resp.GetVolume().GetVolumeId() != volumeID {
+		t.Fatalf("recovered volumeID = %q, want %q", resp.GetVolume().GetVolumeId(), volumeID)
+	}
+	for _, remotePath := range []string{remoteRoot, markerPath(remoteRoot), indexPath(volumeID), nameIndexPath(name)} {
+		if !fake.exists(remotePath) {
+			t.Fatalf("CreateVolume recovery did not create %s", remotePath)
+		}
+	}
+}
+
+func TestCreateVolumeDefaultPrefixIsValid(t *testing.T) {
+	fake := newFakeDrive9(t)
+	defer fake.close()
+
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-default",
+		Secrets:            fake.secrets(),
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume with default prefix error = %v", err)
+	}
+	remoteRoot := createResp.GetVolume().GetVolumeContext()["remoteRoot"]
+	if !pathIsOrUnder(remoteRoot, defaultRemoteRootPrefix) {
+		t.Fatalf("default remote root = %q, want under %q", remoteRoot, defaultRemoteRootPrefix)
+	}
+}
+
+func TestCreateVolumeCreatesRemoteParents(t *testing.T) {
+	fake := newFakeDrive9(t)
+	fake.requireMkdirParents()
+	defer fake.close()
+
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-parent-demo",
+		Secrets:            fake.secrets(),
+		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	remoteRoot := createResp.GetVolume().GetVolumeContext()["remoteRoot"]
+	for _, remotePath := range []string{"/k8s", "/k8s/pvc", "/k8s/.drive9-csi", metadataRoot, nameIndexRoot, remoteRoot} {
+		if !fake.exists(remotePath) {
+			t.Fatalf("expected parent path to exist: %s", remotePath)
+		}
 	}
 }
 
@@ -226,6 +782,42 @@ func TestDeleteVolumeRejectsTamperedRootIndex(t *testing.T) {
 	}
 	if status.Code(err).String() != "FailedPrecondition" {
 		t.Fatalf("DeleteVolume status = %s, want FailedPrecondition", status.Code(err))
+	}
+}
+
+func TestDeleteVolumeRejectsTamperedRootMarkerName(t *testing.T) {
+	fake := newFakeDrive9(t)
+	defer fake.close()
+
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-delete-safe",
+		Secrets:            fake.secrets(),
+		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	volumeID := createResp.GetVolume().GetVolumeId()
+	remoteRoot := createResp.GetVolume().GetVolumeContext()["remoteRoot"]
+	fake.putJSON(markerPath(remoteRoot), volumeMarker{
+		Version:    1,
+		Driver:     "csi.drive9.ai",
+		VolumeID:   volumeID,
+		Name:       "other-name",
+		RemoteRoot: remoteRoot,
+	})
+
+	_, err = d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
+		VolumeId: volumeID,
+		Secrets:  fake.secrets(),
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("DeleteVolume status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
+	}
+	if !fake.exists(remoteRoot) {
+		t.Fatalf("DeleteVolume removed remote root despite tampered marker: %s", remoteRoot)
 	}
 }
 
@@ -272,11 +864,12 @@ func singleNodeMountCapability() *csi.VolumeCapability {
 }
 
 type fakeDrive9 struct {
-	t      *testing.T
-	server *httptest.Server
-	mu     sync.Mutex
-	dirs   map[string]bool
-	files  map[string][]byte
+	t                  *testing.T
+	server             *httptest.Server
+	mu                 sync.Mutex
+	dirs               map[string]bool
+	files              map[string][]byte
+	strictMkdirParents bool
 }
 
 func newFakeDrive9(t *testing.T) *fakeDrive9 {
@@ -288,6 +881,10 @@ func newFakeDrive9(t *testing.T) *fakeDrive9 {
 	}
 	f.server = httptest.NewServer(http.HandlerFunc(f.handle))
 	return f
+}
+
+func (f *fakeDrive9) requireMkdirParents() {
+	f.strictMkdirParents = true
 }
 
 func (f *fakeDrive9) close() {
@@ -346,6 +943,10 @@ func (f *fakeDrive9) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		http.NotFound(w, r)
 	case r.Method == http.MethodPost && r.URL.Query().Has("mkdir"):
+		if f.strictMkdirParents && remotePath != "/" && !f.dirs[path.Dir(remotePath)] {
+			http.Error(w, "missing parent directory", http.StatusNotFound)
+			return
+		}
 		f.dirs[remotePath] = true
 		w.WriteHeader(http.StatusOK)
 	case r.Method == http.MethodPut:
