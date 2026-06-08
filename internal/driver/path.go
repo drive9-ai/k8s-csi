@@ -78,6 +78,23 @@ func validateRemoteRoot(raw string) error {
 	return err
 }
 
+func validateVolumeRoot(raw string) error {
+	remoteRoot, err := normalizeRemotePath(raw)
+	if err != nil {
+		return err
+	}
+	if remoteRoot == "/" {
+		return errors.New("volume root must not be /")
+	}
+	if !pathIsOrUnder(remoteRoot, allowedVolumeRoot) {
+		return fmt.Errorf("volume root must be under %s", allowedVolumeRoot)
+	}
+	if pathIsOrUnder(remoteRoot, metadataRoot) || pathIsOrUnder(metadataRoot, remoteRoot) {
+		return fmt.Errorf("volume root must not overlap CSI metadata root %s", metadataRoot)
+	}
+	return nil
+}
+
 func validateVolumePrefix(raw string) error {
 	prefix, err := normalizeRemotePath(raw)
 	if err != nil {
@@ -96,20 +113,7 @@ func validateVolumePrefix(raw string) error {
 }
 
 func validateSafeDeleteRoot(raw string) error {
-	remoteRoot, err := normalizeRemotePath(raw)
-	if err != nil {
-		return err
-	}
-	if remoteRoot == "/" {
-		return errors.New("refusing to delete /")
-	}
-	if !pathIsOrUnder(remoteRoot, allowedVolumeRoot) {
-		return fmt.Errorf("delete root must be under %s", allowedVolumeRoot)
-	}
-	if pathIsOrUnder(remoteRoot, metadataRoot) || pathIsOrUnder(metadataRoot, remoteRoot) {
-		return fmt.Errorf("delete root must not overlap CSI metadata root %s", metadataRoot)
-	}
-	return nil
+	return validateVolumeRoot(raw)
 }
 
 func pathIsOrUnder(child string, parent string) bool {

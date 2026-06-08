@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -34,7 +36,11 @@ func credentialsFromSecrets(secrets map[string]string) (drive9Credentials, error
 	if apiKey == "" {
 		return drive9Credentials{}, status.Error(codes.InvalidArgument, "Drive9 apiKey secret is required")
 	}
-	return drive9Credentials{Server: strings.TrimRight(server, "/"), APIKey: apiKey}, nil
+	normalizedServer, err := normalizeDrive9ServerURL(server)
+	if err != nil {
+		return drive9Credentials{}, status.Errorf(codes.InvalidArgument, "Drive9 server secret: %v", err)
+	}
+	return drive9Credentials{Server: normalizedServer, APIKey: apiKey}, nil
 }
 
 func firstNonEmpty(values ...string) string {
@@ -44,6 +50,27 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func normalizeDrive9ServerURL(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", errors.New("must use http or https URL")
+	}
+	if u.Host == "" {
+		return "", errors.New("host is required")
+	}
+	if u.User != nil {
+		return "", errors.New("userinfo is not allowed")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("query and fragment are not allowed")
+	}
+	u.Path = strings.TrimRight(u.Path, "/")
+	return u.String(), nil
 }
 
 func newDrive9Client(creds drive9Credentials) *drive9Client {
@@ -78,6 +105,33 @@ func (c *drive9Client) mkdir(ctx context.Context, remotePath string) error {
 	defer closeBody(resp.Body)
 	if resp.StatusCode >= 300 {
 		return grpcHTTPError(resp, "mkdir Drive9 path")
+	}
+	return nil
+}
+
+func (c *drive9Client) mkdirAll(ctx context.Context, remotePath string) error {
+	normalized, err := normalizeRemotePath(remotePath)
+	if err != nil {
+		return status.Errorf(codes.InvalidArgument, "Drive9 path: %v", err)
+	}
+	if normalized == "/" {
+		return nil
+	}
+	err = c.mkdir(ctx, normalized)
+	switch status.Code(err) {
+	case codes.OK, codes.AlreadyExists:
+		return nil
+	case codes.NotFound:
+	default:
+		return err
+	}
+
+	current := "/"
+	for _, part := range strings.Split(strings.Trim(normalized, "/"), "/") {
+		current = path.Join(current, part)
+		if err := c.mkdir(ctx, current); err != nil && status.Code(err) != codes.AlreadyExists {
+			return err
+		}
 	}
 	return nil
 }
@@ -122,7 +176,7 @@ func (c *drive9Client) validateMarker(ctx context.Context, remotePath string, wa
 		}
 		return err
 	}
-	if got.VolumeID != want.VolumeID || got.RemoteRoot != want.RemoteRoot || got.Driver != want.Driver {
+	if got.VolumeID != want.VolumeID || got.RemoteRoot != want.RemoteRoot || got.Driver != want.Driver || got.Name != want.Name {
 		return status.Error(codes.AlreadyExists, "Drive9 path already exists and is owned by a different CSI volume")
 	}
 	return nil
@@ -190,13 +244,20 @@ func grpcHTTPError(resp *http.Response, op string) error {
 		msg = resp.Status
 	}
 	switch resp.StatusCode {
+	case http.StatusBadRequest:
+		return status.Errorf(codes.InvalidArgument, "%s: %s", op, msg)
 	case http.StatusNotFound:
 		return status.Errorf(codes.NotFound, "%s: %s", op, msg)
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return status.Errorf(codes.PermissionDenied, "%s: %s", op, msg)
 	case http.StatusConflict:
 		return status.Errorf(codes.AlreadyExists, "%s: %s", op, msg)
+	case http.StatusTooManyRequests:
+		return status.Errorf(codes.Unavailable, "%s: HTTP %d: %s", op, resp.StatusCode, msg)
 	default:
+		if resp.StatusCode >= 500 {
+			return status.Errorf(codes.Unavailable, "%s: HTTP %d: %s", op, resp.StatusCode, msg)
+		}
 		return status.Errorf(codes.Internal, "%s: HTTP %d: %s", op, resp.StatusCode, msg)
 	}
 }

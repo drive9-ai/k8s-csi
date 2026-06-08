@@ -22,9 +22,10 @@ import (
 )
 
 const (
-	defaultRemoteRootPrefix = "/k8s"
+	defaultRemoteRootPrefix = "/k8s/pvc"
 	allowedVolumeRoot       = "/k8s"
 	metadataRoot            = "/k8s/.drive9-csi/volumes"
+	nameIndexRoot           = "/k8s/.drive9-csi/volumes/by-name"
 	markerFileName          = ".drive9-csi-volume.json"
 )
 
@@ -87,19 +88,49 @@ func listenCSIEndpoint(endpoint string) (net.Listener, func(), error) {
 	if socketPath == "" {
 		return nil, nil, errors.New("unix socket path is empty")
 	}
+	if !filepath.IsAbs(socketPath) {
+		return nil, nil, fmt.Errorf("unix socket path must be absolute, got %q", socketPath)
+	}
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o755); err != nil {
 		return nil, nil, fmt.Errorf("create CSI socket dir: %w", err)
 	}
-	_ = os.Remove(socketPath)
+	if err := removeStaleSocket(socketPath); err != nil {
+		return nil, nil, err
+	}
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("listen on CSI socket: %w", err)
 	}
 	cleanup := func() {
 		_ = listener.Close()
-		_ = os.Remove(socketPath)
+		removeSocket(socketPath)
 	}
 	return listener, cleanup, nil
+}
+
+func removeStaleSocket(socketPath string) error {
+	info, err := os.Lstat(socketPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat CSI socket path: %w", err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("CSI socket path %q exists and is not a unix socket", socketPath)
+	}
+	if err := os.Remove(socketPath); err != nil {
+		return fmt.Errorf("remove stale CSI socket: %w", err)
+	}
+	return nil
+}
+
+func removeSocket(socketPath string) {
+	info, err := os.Lstat(socketPath)
+	if err != nil || info.Mode()&os.ModeSocket == 0 {
+		return
+	}
+	_ = os.Remove(socketPath)
 }
 
 func (d *Driver) GetPluginInfo(context.Context, *csi.GetPluginInfoRequest) (*csi.GetPluginInfoResponse, error) {
@@ -149,6 +180,15 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	if err := validateVolumeCapabilities(req.GetVolumeCapabilities()); err != nil {
 		return nil, err
 	}
+	if err := validateCapacityRange(req.GetCapacityRange()); err != nil {
+		return nil, err
+	}
+	if req.GetVolumeContentSource() != nil {
+		return nil, status.Error(codes.InvalidArgument, "volume content sources are not supported")
+	}
+	if len(req.GetMutableParameters()) > 0 {
+		return nil, status.Error(codes.InvalidArgument, "mutable parameters are not supported")
+	}
 	creds, err := credentialsFromSecrets(req.GetSecrets())
 	if err != nil {
 		return nil, err
@@ -177,7 +217,13 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	}
 
 	client := newDrive9Client(creds)
-	if err := client.mkdir(ctx, metadataRoot); err != nil {
+	if err := client.mkdirAll(ctx, nameIndexRoot); err != nil {
+		return nil, err
+	}
+	if err := d.validateVolumeNameIndex(ctx, client, name, marker); err != nil {
+		return nil, err
+	}
+	if err := client.upsertIndex(ctx, nameIndexPath(name), marker); err != nil {
 		return nil, err
 	}
 	exists, err := client.exists(ctx, remoteRoot)
@@ -189,7 +235,7 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 			return nil, err
 		}
 	} else {
-		if err := client.mkdir(ctx, remoteRoot); err != nil {
+		if err := client.mkdirAll(ctx, remoteRoot); err != nil {
 			return nil, err
 		}
 		if err := client.writeJSON(ctx, markerPath(remoteRoot), marker); err != nil {
@@ -245,13 +291,18 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 		if err := client.removeAll(ctx, indexPath(volumeID)); err != nil {
 			return nil, err
 		}
+		if marker.Name != "" {
+			if err := client.removeAll(ctx, nameIndexPath(marker.Name)); err != nil {
+				return nil, err
+			}
+		}
 		return &csi.DeleteVolumeResponse{}, nil
 	}
 	rootMarker, err := client.readMarker(ctx, markerPath(remoteRoot))
 	if err != nil {
 		return nil, err
 	}
-	if rootMarker.VolumeID != volumeID || rootMarker.RemoteRoot != remoteRoot || rootMarker.Driver != d.cfg.DriverName {
+	if rootMarker.VolumeID != volumeID || rootMarker.RemoteRoot != remoteRoot || rootMarker.Driver != d.cfg.DriverName || rootMarker.Name != marker.Name {
 		return nil, status.Error(codes.FailedPrecondition, "refusing to delete Drive9 path without matching CSI marker")
 	}
 	if err := client.removeAll(ctx, remoteRoot); err != nil {
@@ -259,6 +310,11 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 	}
 	if err := client.removeAll(ctx, indexPath(volumeID)); err != nil {
 		return nil, err
+	}
+	if marker.Name != "" {
+		if err := client.removeAll(ctx, nameIndexPath(marker.Name)); err != nil {
+			return nil, err
+		}
 	}
 	return &csi.DeleteVolumeResponse{}, nil
 }
@@ -293,6 +349,9 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	if stagingTarget == "" {
 		return nil, status.Error(codes.InvalidArgument, "staging target path is required")
 	}
+	if !filepath.IsAbs(stagingTarget) {
+		return nil, status.Error(codes.InvalidArgument, "staging target path must be absolute")
+	}
 	rawRemoteRoot := strings.TrimSpace(req.GetVolumeContext()["remoteRoot"])
 	if rawRemoteRoot == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume context remoteRoot is required")
@@ -300,6 +359,12 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	remoteRoot, err := normalizeRemotePath(rawRemoteRoot)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "remoteRoot: %v", err)
+	}
+	if err := validateVolumeRoot(remoteRoot); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "remoteRoot: %v", err)
+	}
+	if volumeIDForRemoteRoot(remoteRoot) != volumeID {
+		return nil, status.Error(codes.FailedPrecondition, "volume id does not match volume context remoteRoot")
 	}
 	creds, err := credentialsFromSecrets(req.GetSecrets())
 	if err != nil {
@@ -313,6 +378,13 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 			return nil, err
 		}
 		return &csi.NodeStageVolumeResponse{}, nil
+	}
+	client := newDrive9Client(creds)
+	if err := d.validateRemoteVolumeMarker(ctx, client, volumeID, remoteRoot); err != nil {
+		return nil, err
+	}
+	if err := d.prepareStageStateForMount(volumeID, stagingTarget); err != nil {
+		return nil, err
 	}
 	_ = os.Remove(d.mountStatePath(volumeID))
 
@@ -342,14 +414,32 @@ func (d *Driver) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolu
 	if stagingTarget == "" {
 		return nil, status.Error(codes.InvalidArgument, "staging target path is required")
 	}
-	if err := unmountPath(stagingTarget); err != nil {
-		return nil, status.Errorf(codes.Internal, "unstage unmount: %v", err)
+	if !filepath.IsAbs(stagingTarget) {
+		return nil, status.Error(codes.InvalidArgument, "staging target path must be absolute")
 	}
-	if err := d.stopRecordedMount(ctx, volumeID, stagingTarget); err != nil {
-		return nil, status.Errorf(codes.Internal, "wait for drive9 mount exit: %v", err)
+	stageStatus, err := d.stageStateStatus(volumeID, stagingTarget)
+	if err != nil {
+		return nil, err
 	}
-	if err := os.Remove(d.mountStatePath(volumeID)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, status.Errorf(codes.Internal, "remove stage state: %v", err)
+	mounted, err := isMountPoint(stagingTarget)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "check staging mount: %v", err)
+	}
+	if mounted && stageStatus == stateMismatched {
+		return nil, status.Error(codes.FailedPrecondition, "stage target state belongs to a different Drive9 volume or path")
+	}
+	if mounted {
+		if err := unmountPath(stagingTarget); err != nil {
+			return nil, status.Errorf(codes.Internal, "unstage unmount: %v", err)
+		}
+	}
+	if stageStatus == stateMatching {
+		if err := d.stopRecordedMount(ctx, volumeID, stagingTarget); err != nil {
+			return nil, status.Errorf(codes.Internal, "wait for drive9 mount exit: %v", err)
+		}
+		if err := os.Remove(d.mountStatePath(volumeID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, status.Errorf(codes.Internal, "remove stage state: %v", err)
+		}
 	}
 	return &csi.NodeUnstageVolumeResponse{}, nil
 }
@@ -366,6 +456,9 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 	target := strings.TrimSpace(req.GetTargetPath())
 	if stagingTarget == "" || target == "" {
 		return nil, status.Error(codes.InvalidArgument, "staging target path and target path are required")
+	}
+	if !filepath.IsAbs(stagingTarget) || !filepath.IsAbs(target) {
+		return nil, status.Error(codes.InvalidArgument, "staging target path and target path must be absolute")
 	}
 	if mounted, err := isMountPoint(stagingTarget); err != nil {
 		return nil, status.Errorf(codes.Internal, "check staging mount: %v", err)
@@ -400,15 +493,37 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 }
 
 func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
+	volumeID := strings.TrimSpace(req.GetVolumeId())
+	if volumeID == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume id is required")
+	}
 	target := strings.TrimSpace(req.GetTargetPath())
 	if target == "" {
 		return nil, status.Error(codes.InvalidArgument, "target path is required")
 	}
-	if err := unmountPath(target); err != nil {
-		return nil, status.Errorf(codes.Internal, "unpublish unmount: %v", err)
+	if !filepath.IsAbs(target) {
+		return nil, status.Error(codes.InvalidArgument, "target path must be absolute")
 	}
-	if err := os.Remove(d.publishStatePath(target)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, status.Errorf(codes.Internal, "remove publish state: %v", err)
+	publishStatus, err := d.publishStateStatus(volumeID, target)
+	if err != nil {
+		return nil, err
+	}
+	mounted, err := isMountPoint(target)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "check target mount: %v", err)
+	}
+	if mounted && publishStatus == stateMismatched {
+		return nil, status.Error(codes.FailedPrecondition, "publish target state belongs to a different Drive9 volume")
+	}
+	if mounted {
+		if err := unmountPath(target); err != nil {
+			return nil, status.Errorf(codes.Internal, "unpublish unmount: %v", err)
+		}
+	}
+	if publishStatus == stateMatching {
+		if err := os.Remove(d.publishStatePath(target)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, status.Errorf(codes.Internal, "remove publish state: %v", err)
+		}
 	}
 	return &csi.NodeUnpublishVolumeResponse{}, nil
 }
@@ -433,6 +548,97 @@ func (d *Driver) validatePublishedMount(volumeID string, stagingTarget string, t
 		return status.Error(codes.FailedPrecondition, "publish target is mounted for a different Drive9 volume or access mode")
 	}
 	return nil
+}
+
+func (d *Driver) validateRemoteVolumeMarker(ctx context.Context, client *drive9Client, volumeID string, remoteRoot string) error {
+	marker, err := client.readMarker(ctx, markerPath(remoteRoot))
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return status.Error(codes.FailedPrecondition, "Drive9 volume marker is missing")
+		}
+		return err
+	}
+	if marker.VolumeID != volumeID || marker.RemoteRoot != remoteRoot || marker.Driver != d.cfg.DriverName {
+		return status.Error(codes.FailedPrecondition, "Drive9 volume marker does not match requested volume")
+	}
+	return nil
+}
+
+func (d *Driver) validateVolumeNameIndex(ctx context.Context, client *drive9Client, name string, want volumeMarker) error {
+	got, err := client.readMarker(ctx, nameIndexPath(name))
+	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			return nil
+		}
+		return err
+	}
+	if got.Driver != d.cfg.DriverName || got.Name != name {
+		return status.Error(codes.AlreadyExists, "CSI volume name is owned by a different volume")
+	}
+	if got.VolumeID != want.VolumeID || got.RemoteRoot != want.RemoteRoot {
+		return status.Error(codes.AlreadyExists, "CSI volume name already exists with different parameters")
+	}
+	return nil
+}
+
+type stateStatus int
+
+const (
+	stateMissing stateStatus = iota
+	stateMatching
+	stateMismatched
+)
+
+func (d *Driver) prepareStageStateForMount(volumeID string, stagingTarget string) error {
+	state, err := d.readMountState(volumeID)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return status.Errorf(codes.FailedPrecondition, "read stage state: %v", err)
+	}
+	if state.VolumeID != volumeID {
+		return status.Error(codes.FailedPrecondition, "stage state belongs to a different Drive9 volume")
+	}
+	if filepath.Clean(state.StagingTarget) == filepath.Clean(stagingTarget) {
+		return nil
+	}
+	mounted, err := isMountPoint(state.StagingTarget)
+	if err != nil {
+		return status.Errorf(codes.Internal, "check previous staging mount: %v", err)
+	}
+	if mounted {
+		return status.Error(codes.FailedPrecondition, "volume is already staged at a different target")
+	}
+	return nil
+}
+
+func (d *Driver) stageStateStatus(volumeID string, stagingTarget string) (stateStatus, error) {
+	state, err := d.readMountState(volumeID)
+	if errors.Is(err, os.ErrNotExist) {
+		return stateMissing, nil
+	}
+	if err != nil {
+		return stateMissing, status.Errorf(codes.FailedPrecondition, "read stage state: %v", err)
+	}
+	if state.VolumeID != volumeID || filepath.Clean(state.StagingTarget) != filepath.Clean(stagingTarget) {
+		return stateMismatched, nil
+	}
+	return stateMatching, nil
+}
+
+func (d *Driver) publishStateStatus(volumeID string, target string) (stateStatus, error) {
+	state, err := d.readPublishState(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return stateMissing, nil
+	}
+	if err != nil {
+		return stateMissing, status.Errorf(codes.FailedPrecondition, "read publish state: %v", err)
+	}
+	if state.VolumeID != volumeID || filepath.Clean(state.Target) != filepath.Clean(target) {
+		return stateMismatched, nil
+	}
+	return stateMatching, nil
 }
 
 func mountStateMatches(state mountState, volumeID string, remoteRoot string, stagingTarget string) bool {
@@ -460,8 +666,15 @@ func validateVolumeCapabilities(caps []*csi.VolumeCapability) error {
 		if cap == nil {
 			return status.Error(codes.InvalidArgument, "nil volume capability")
 		}
-		if cap.GetMount() == nil {
+		mount := cap.GetMount()
+		if mount == nil {
 			return status.Error(codes.InvalidArgument, "only filesystem mount volumes are supported")
+		}
+		if strings.TrimSpace(mount.GetFsType()) != "" {
+			return status.Error(codes.InvalidArgument, "mount fs_type is not supported")
+		}
+		if len(mount.GetMountFlags()) > 0 {
+			return status.Error(codes.InvalidArgument, "mount flags are not supported")
 		}
 		mode := cap.GetAccessMode().GetMode()
 		switch mode {
@@ -470,6 +683,21 @@ func validateVolumeCapabilities(caps []*csi.VolumeCapability) error {
 		default:
 			return status.Errorf(codes.InvalidArgument, "only single-node writer access is supported, got %s", mode.String())
 		}
+	}
+	return nil
+}
+
+func validateCapacityRange(r *csi.CapacityRange) error {
+	if r == nil {
+		return nil
+	}
+	required := r.GetRequiredBytes()
+	limit := r.GetLimitBytes()
+	if required < 0 || limit < 0 {
+		return status.Error(codes.InvalidArgument, "capacity bytes must be non-negative")
+	}
+	if required > 0 && limit > 0 && required > limit {
+		return status.Error(codes.InvalidArgument, "required capacity must not exceed limit capacity")
 	}
 	return nil
 }
@@ -547,6 +775,15 @@ func markerPath(remoteRoot string) string {
 
 func indexPath(volumeID string) string {
 	return path.Join(metadataRoot, safeFileName(volumeID)+".json")
+}
+
+func nameIndexPath(name string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(name)))
+	base := safeFileName(name)
+	if base == "" {
+		base = "volume"
+	}
+	return path.Join(nameIndexRoot, base+"-"+hex.EncodeToString(sum[:])[:16]+".json")
 }
 
 type publishState struct {

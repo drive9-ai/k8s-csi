@@ -4,9 +4,12 @@ package driver
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestStopRecordedMountFailsClosedWithoutPIDIdentity(t *testing.T) {
@@ -30,5 +33,24 @@ func TestStopRecordedMountFailsClosedWithoutPIDIdentity(t *testing.T) {
 	}
 	if _, statErr := os.Stat(d.mountStatePath(volumeID)); statErr != nil {
 		t.Fatalf("state file should remain for retry, stat err = %v", statErr)
+	}
+}
+
+func TestWaitForMountReturnsWhenProcessExitsBeforeMount(t *testing.T) {
+	processDone := make(chan error, 1)
+	processDone <- errors.New("exit status 1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	err := waitForMount(ctx, filepath.Join(t.TempDir(), "stage"), time.Minute, processDone)
+	if err == nil {
+		t.Fatal("expected waitForMount to fail when process exits before mount")
+	}
+	if !strings.Contains(err.Error(), "exited before mount became ready") {
+		t.Fatalf("waitForMount error = %v", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("waitForMount waited too long after process exit: %s", time.Since(start))
 	}
 }
