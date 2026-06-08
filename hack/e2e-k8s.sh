@@ -134,7 +134,7 @@ metadata:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: drive9-csi-secret
+  name: drive9-csi-drive9-workspace-e2e
   namespace: $test_namespace
 type: Opaque
 stringData:
