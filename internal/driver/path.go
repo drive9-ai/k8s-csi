@@ -78,6 +78,23 @@ func validateRemoteRoot(raw string) error {
 	return err
 }
 
+func normalizeMountRoot(raw string) (string, error) {
+	remoteRoot, err := normalizeRemotePath(raw)
+	if err != nil {
+		return "", err
+	}
+	metadataBase := path.Dir(metadataRoot)
+	if pathIsOrUnder(remoteRoot, metadataBase) {
+		return "", fmt.Errorf("mount root must not be under CSI metadata root %s", metadataBase)
+	}
+	return remoteRoot, nil
+}
+
+func validateMountRoot(raw string) error {
+	_, err := normalizeMountRoot(raw)
+	return err
+}
+
 func validateVolumeRoot(raw string) error {
 	remoteRoot, err := normalizeRemotePath(raw)
 	if err != nil {

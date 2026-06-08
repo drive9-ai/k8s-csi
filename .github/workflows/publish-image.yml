@@ -20,7 +20,7 @@ permissions:
 
 env:
   IMAGE: ghcr.io/drive9-ai/drive9-csi
-  DRIVE9_REF: 9c464af94a9cab374c3841a297a0a1eefd047977
+  DRIVE9_REF: 03bec7ff71acf54118b801705ff5cfc19d08471c
 
 jobs:
   publish:

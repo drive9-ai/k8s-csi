@@ -4,7 +4,6 @@ metadata:
   name: drive9-rwo
 provisioner: csi.drive9.ai
 parameters:
-  remoteRootPrefix: /k8s/pvc
   profile: coding-agent
   csi.storage.k8s.io/provisioner-secret-name: drive9-csi-${pvc.name}
   csi.storage.k8s.io/provisioner-secret-namespace: ${pvc.namespace}

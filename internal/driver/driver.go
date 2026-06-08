@@ -22,11 +22,12 @@ import (
 )
 
 const (
-	defaultRemoteRootPrefix = "/k8s/pvc"
-	allowedVolumeRoot       = "/k8s"
-	metadataRoot            = "/k8s/.drive9-csi/volumes"
-	nameIndexRoot           = "/k8s/.drive9-csi/volumes/by-name"
-	markerFileName          = ".drive9-csi-volume.json"
+	defaultRemoteRoot           = "/"
+	workspaceRootVolumeIDPrefix = "drive9-root-"
+	allowedVolumeRoot           = "/k8s"
+	metadataRoot                = "/k8s/.drive9-csi/volumes"
+	nameIndexRoot               = "/k8s/.drive9-csi/volumes/by-name"
+	markerFileName              = ".drive9-csi-volume.json"
 )
 
 type Config struct {
@@ -195,17 +196,35 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	}
 
 	params := req.GetParameters()
-	prefix := params["remoteRootPrefix"]
-	if prefix == "" {
-		prefix = defaultRemoteRootPrefix
-	}
-	if err := validateVolumePrefix(prefix); err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "remoteRootPrefix: %v", err)
-	}
-	remoteRoot, err := buildRemoteRoot(prefix, name)
+	remoteRoot, managedVolume, err := resolveCreateVolumeRemoteRoot(name, params, req.GetSecrets())
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "remoteRootPrefix: %v", err)
+		return nil, err
 	}
+	if managedVolume {
+		return d.createManagedDirectoryVolume(ctx, req, creds, name, remoteRoot)
+	}
+
+	client := newDrive9Client(creds)
+	if err := ensureRemotePathExists(ctx, client, remoteRoot); err != nil {
+		return nil, err
+	}
+	volumeID := volumeIDForWorkspaceRoot(name, remoteRoot)
+	return &csi.CreateVolumeResponse{
+		Volume: &csi.Volume{
+			VolumeId:      volumeID,
+			CapacityBytes: requestedCapacity(req.GetCapacityRange()),
+			VolumeContext: map[string]string{
+				"drive9VolumeMode": "workspace-root",
+				"remoteRoot":       remoteRoot,
+				"volumeName":       name,
+				"profile":          params["profile"],
+			},
+		},
+	}, nil
+}
+
+func (d *Driver) createManagedDirectoryVolume(ctx context.Context, req *csi.CreateVolumeRequest, creds drive9Credentials, name string, remoteRoot string) (*csi.CreateVolumeResponse, error) {
+	params := req.GetParameters()
 	volumeID := volumeIDForRemoteRoot(remoteRoot)
 	marker := volumeMarker{
 		Version:    1,
@@ -266,6 +285,9 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 	creds, err := credentialsFromSecrets(req.GetSecrets())
 	if err != nil {
 		return nil, err
+	}
+	if isWorkspaceRootVolumeID(volumeID) {
+		return &csi.DeleteVolumeResponse{}, nil
 	}
 	client := newDrive9Client(creds)
 	marker, err := client.readMarker(ctx, indexPath(volumeID))
@@ -360,11 +382,25 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "remoteRoot: %v", err)
 	}
-	if err := validateVolumeRoot(remoteRoot); err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "remoteRoot: %v", err)
-	}
-	if volumeIDForRemoteRoot(remoteRoot) != volumeID {
-		return nil, status.Error(codes.FailedPrecondition, "volume id does not match volume context remoteRoot")
+	workspaceRootVolume := isWorkspaceRootVolumeID(volumeID)
+	if workspaceRootVolume {
+		if err := validateMountRoot(remoteRoot); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "remoteRoot: %v", err)
+		}
+		volumeName := strings.TrimSpace(req.GetVolumeContext()["volumeName"])
+		if volumeName == "" {
+			return nil, status.Error(codes.InvalidArgument, "volume context volumeName is required for workspace root volumes")
+		}
+		if volumeIDForWorkspaceRoot(volumeName, remoteRoot) != volumeID {
+			return nil, status.Error(codes.FailedPrecondition, "volume id does not match volume context")
+		}
+	} else {
+		if err := validateVolumeRoot(remoteRoot); err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "remoteRoot: %v", err)
+		}
+		if volumeIDForRemoteRoot(remoteRoot) != volumeID {
+			return nil, status.Error(codes.FailedPrecondition, "volume id does not match volume context remoteRoot")
+		}
 	}
 	creds, err := credentialsFromSecrets(req.GetSecrets())
 	if err != nil {
@@ -380,8 +416,14 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		return &csi.NodeStageVolumeResponse{}, nil
 	}
 	client := newDrive9Client(creds)
-	if err := d.validateRemoteVolumeMarker(ctx, client, volumeID, remoteRoot); err != nil {
-		return nil, err
+	if workspaceRootVolume {
+		if err := ensureRemotePathExists(ctx, client, remoteRoot); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := d.validateRemoteVolumeMarker(ctx, client, volumeID, remoteRoot); err != nil {
+			return nil, err
+		}
 	}
 	if err := d.prepareStageStateForMount(volumeID, stagingTarget); err != nil {
 		return nil, err
@@ -581,6 +623,64 @@ func (d *Driver) validateVolumeNameIndex(ctx context.Context, client *drive9Clie
 	return nil
 }
 
+func resolveCreateVolumeRemoteRoot(name string, params map[string]string, secrets map[string]string) (string, bool, error) {
+	prefix := strings.TrimSpace(params["remoteRootPrefix"])
+	paramRemoteRoot := strings.TrimSpace(params["remoteRoot"])
+	secretRemoteRoot := strings.TrimSpace(firstNonEmpty(
+		secrets["remoteRoot"],
+		secrets["remote_root"],
+		secrets["DRIVE9_REMOTE_ROOT"],
+	))
+
+	if prefix != "" {
+		if paramRemoteRoot != "" || secretRemoteRoot != "" {
+			return "", false, status.Error(codes.InvalidArgument, "remoteRootPrefix cannot be combined with remoteRoot")
+		}
+		remoteRoot, err := buildRemoteRoot(prefix, name)
+		if err != nil {
+			return "", false, status.Errorf(codes.InvalidArgument, "remoteRootPrefix: %v", err)
+		}
+		return remoteRoot, true, nil
+	}
+
+	rawRemoteRoot := defaultRemoteRoot
+	if paramRemoteRoot != "" && secretRemoteRoot != "" {
+		normalizedParam, err := normalizeMountRoot(paramRemoteRoot)
+		if err != nil {
+			return "", false, status.Errorf(codes.InvalidArgument, "remoteRoot: %v", err)
+		}
+		normalizedSecret, err := normalizeMountRoot(secretRemoteRoot)
+		if err != nil {
+			return "", false, status.Errorf(codes.InvalidArgument, "remoteRoot secret: %v", err)
+		}
+		if normalizedParam != normalizedSecret {
+			return "", false, status.Error(codes.InvalidArgument, "remoteRoot parameter and secret values differ")
+		}
+		rawRemoteRoot = normalizedParam
+	} else if paramRemoteRoot != "" {
+		rawRemoteRoot = paramRemoteRoot
+	} else if secretRemoteRoot != "" {
+		rawRemoteRoot = secretRemoteRoot
+	}
+
+	remoteRoot, err := normalizeMountRoot(rawRemoteRoot)
+	if err != nil {
+		return "", false, status.Errorf(codes.InvalidArgument, "remoteRoot: %v", err)
+	}
+	return remoteRoot, false, nil
+}
+
+func ensureRemotePathExists(ctx context.Context, client *drive9Client, remoteRoot string) error {
+	exists, err := client.exists(ctx, remoteRoot)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return status.Errorf(codes.FailedPrecondition, "Drive9 remote root %q does not exist", remoteRoot)
+	}
+	return nil
+}
+
 type stateStatus int
 
 const (
@@ -715,6 +815,24 @@ func requestedCapacity(r *csi.CapacityRange) int64 {
 func volumeIDForRemoteRoot(remoteRoot string) string {
 	sum := sha256.Sum256([]byte(remoteRoot))
 	return "drive9-" + hex.EncodeToString(sum[:])[:32]
+}
+
+func volumeIDForWorkspaceRoot(name string, remoteRoot string) string {
+	normalizedRoot, err := normalizeRemotePath(remoteRoot)
+	if err != nil {
+		normalizedRoot = strings.TrimSpace(remoteRoot)
+	}
+	sum := sha256.Sum256([]byte(strings.TrimSpace(name) + "\x00" + normalizedRoot))
+	return workspaceRootVolumeIDPrefix + hex.EncodeToString(sum[:])[:32]
+}
+
+func isWorkspaceRootVolumeID(volumeID string) bool {
+	suffix := strings.TrimPrefix(volumeID, workspaceRootVolumeIDPrefix)
+	if suffix == volumeID || len(suffix) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
+	return err == nil
 }
 
 func (d *Driver) mountStatePath(volumeID string) string {
