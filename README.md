@@ -59,7 +59,7 @@ The first version stores CSI metadata under `/k8s/.drive9-csi/volumes`. If you u
 The default manifests use the public customer image:
 
 ```text
-ghcr.io/drive9-ai/drive9-csi:0.1.0
+ghcr.io/drive9-ai/drive9-csi:drive9-9c464af-csi-f5255cb
 ```
 
 Release images are also published with a traceable tag:
@@ -68,21 +68,21 @@ Release images are also published with a traceable tag:
 ghcr.io/drive9-ai/drive9-csi:drive9-<drive9-short-sha>-csi-<csi-short-sha>
 ```
 
-For example, a build from Drive9 CLI commit `7fb7c58...` and CSI commit
-`abcdef0...` is tagged:
+For example, the current default image was built from Drive9 CLI commit
+`9c464af...` and CSI commit `f5255cb...`:
 
 ```text
-ghcr.io/drive9-ai/drive9-csi:drive9-7fb7c58-csi-abcdef0
+ghcr.io/drive9-ai/drive9-csi:drive9-9c464af-csi-f5255cb
 ```
 
-The publish workflow does not publish `:latest`. Use `0.1.0`, a traceable tag,
+The publish workflow does not publish `:latest` or `0.1.0`. Use a traceable tag
 or a digest.
 
 To build and publish your own image instead:
 
 ```sh
-make image IMAGE=ghcr.io/drive9-ai/drive9-csi:0.1.0
-docker push ghcr.io/drive9-ai/drive9-csi:0.1.0
+make image IMAGE=ghcr.io/drive9-ai/drive9-csi:drive9-9c464af-csi-f5255cb
+docker push ghcr.io/drive9-ai/drive9-csi:drive9-9c464af-csi-f5255cb
 ```
 
 Install the CSI driver:
@@ -214,7 +214,7 @@ API key:
 ```sh
 export DRIVE9_SERVER=https://api.drive9.ai
 export DRIVE9_API_KEY=drive9_api_key_redacted
-export DRIVE9_CSI_IMAGE=ghcr.io/drive9-ai/drive9-csi:0.1.0
+export DRIVE9_CSI_IMAGE=ghcr.io/drive9-ai/drive9-csi:drive9-9c464af-csi-f5255cb
 export DRIVE9_CSI_E2E_CONFIRM=1
 hack/e2e-k8s.sh
 ```
@@ -241,4 +241,5 @@ https://github.com/orgs/drive9-ai/packages/container/package/drive9-csi
 
 Then use package settings to change the package visibility to public. The image
 is anonymously pullable only after `docker manifest inspect
-ghcr.io/drive9-ai/drive9-csi:0.1.0` works without `docker login`.
+ghcr.io/drive9-ai/drive9-csi:drive9-9c464af-csi-f5255cb` works without
+`docker login`.
