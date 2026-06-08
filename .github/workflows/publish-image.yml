@@ -20,7 +20,7 @@ permissions:
 
 env:
   IMAGE: ghcr.io/drive9-ai/drive9-csi
-  DRIVE9_REF: 7fb7c58d0c99a27d75d0f7a78c904cef2018f799
+  DRIVE9_REF: 9c464af94a9cab374c3841a297a0a1eefd047977
 
 jobs:
   publish:
@@ -60,5 +60,4 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=drive9-${{ steps.image-tags.outputs.drive9_short }}-csi-${{ steps.image-tags.outputs.csi_short }}
           tags: |
-            ${{ env.IMAGE }}:0.1.0
             ${{ env.IMAGE }}:drive9-${{ steps.image-tags.outputs.drive9_short }}-csi-${{ steps.image-tags.outputs.csi_short }}
