@@ -60,6 +60,19 @@ func TestValidateVolumeRootRejectsOutsideAllowedRoot(t *testing.T) {
 	}
 }
 
+func TestValidateMountRootAllowsWorkspaceRootButRejectsMetadataPath(t *testing.T) {
+	for _, remotePath := range []string{"/", "/projects/team-a", "/k8s"} {
+		if err := validateMountRoot(remotePath); err != nil {
+			t.Fatalf("validateMountRoot(%q) error = %v", remotePath, err)
+		}
+	}
+	for _, remotePath := range []string{"/k8s/.drive9-csi", "/k8s/.drive9-csi/volumes/demo"} {
+		if err := validateMountRoot(remotePath); err == nil {
+			t.Fatalf("expected metadata path %q to be rejected", remotePath)
+		}
+	}
+}
+
 func TestEncodeDrive9FSPathEscapesSegments(t *testing.T) {
 	got, err := encodeDrive9FSPath("/team a/vol#1")
 	if err != nil {
@@ -80,6 +93,24 @@ func TestVolumeIDIsShortAndStable(t *testing.T) {
 	}
 	if len(first) > 64 {
 		t.Fatalf("volume id len = %d, want <= 64", len(first))
+	}
+}
+
+func TestWorkspaceRootVolumeIDIncludesVolumeName(t *testing.T) {
+	first := volumeIDForWorkspaceRoot("pvc-a", "/")
+	second := volumeIDForWorkspaceRoot("pvc-a", "/")
+	other := volumeIDForWorkspaceRoot("pvc-b", "/")
+	if first != second {
+		t.Fatalf("workspace root volume id is not stable: %q != %q", first, second)
+	}
+	if first == other {
+		t.Fatalf("workspace root volume id must include volume name: %q", first)
+	}
+	if !isWorkspaceRootVolumeID(first) {
+		t.Fatalf("workspace root volume id was not recognized: %q", first)
+	}
+	if len(first) > 64 {
+		t.Fatalf("workspace root volume id len = %d, want <= 64", len(first))
 	}
 }
 
@@ -273,6 +304,37 @@ func TestNodeStageVolumeRejectsMismatchedVolumeID(t *testing.T) {
 		VolumeCapability:  singleNodeMountCapability(),
 	})
 	if status.Code(err).String() != "FailedPrecondition" {
+		t.Fatalf("NodeStageVolume status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
+	}
+}
+
+func TestNodeStageVolumeRejectsWorkspaceRootWithoutVolumeName(t *testing.T) {
+	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
+	_, err := d.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+		VolumeId:          volumeIDForWorkspaceRoot("pvc-root", "/"),
+		StagingTargetPath: t.TempDir(),
+		VolumeContext:     map[string]string{"remoteRoot": "/"},
+		Secrets:           map[string]string{"server": "http://127.0.0.1", "apiKey": "test-key"},
+		VolumeCapability:  singleNodeMountCapability(),
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("NodeStageVolume status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+	}
+}
+
+func TestNodeStageVolumeRejectsWorkspaceRootMismatchedVolumeID(t *testing.T) {
+	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
+	_, err := d.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+		VolumeId:          volumeIDForWorkspaceRoot("pvc-root", "/"),
+		StagingTargetPath: t.TempDir(),
+		VolumeContext: map[string]string{
+			"remoteRoot": "/",
+			"volumeName": "other-pvc",
+		},
+		Secrets:          map[string]string{"server": "http://127.0.0.1", "apiKey": "test-key"},
+		VolumeCapability: singleNodeMountCapability(),
+	})
+	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("NodeStageVolume status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
 	}
 }
@@ -588,7 +650,134 @@ func TestGRPCHTTPErrorMapsClientAndRetryableStatuses(t *testing.T) {
 	}
 }
 
-func TestCreateDeleteVolumeWritesIndexAndMarker(t *testing.T) {
+func TestCreateVolumeDefaultsToWorkspaceRootWithoutMarkers(t *testing.T) {
+	fake := newFakeDrive9(t)
+	defer fake.close()
+
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-root",
+		Secrets:            fake.secrets(),
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	volumeID := createResp.GetVolume().GetVolumeId()
+	ctx := createResp.GetVolume().GetVolumeContext()
+	if !isWorkspaceRootVolumeID(volumeID) {
+		t.Fatalf("CreateVolume volumeID = %q, want workspace root volume id", volumeID)
+	}
+	if ctx["remoteRoot"] != "/" {
+		t.Fatalf("CreateVolume remoteRoot = %q, want workspace root", ctx["remoteRoot"])
+	}
+	if ctx["volumeName"] != "pvc-root" {
+		t.Fatalf("CreateVolume volumeName = %q, want pvc-root", ctx["volumeName"])
+	}
+	if ctx["drive9VolumeMode"] != "workspace-root" {
+		t.Fatalf("CreateVolume drive9VolumeMode = %q, want workspace-root", ctx["drive9VolumeMode"])
+	}
+	for _, remotePath := range []string{markerPath("/"), indexPath(volumeID), nameIndexPath("pvc-root")} {
+		if fake.exists(remotePath) {
+			t.Fatalf("workspace root mode should not write CSI metadata path %s", remotePath)
+		}
+	}
+
+	second, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-root",
+		Secrets:            fake.secrets(),
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("idempotent CreateVolume error = %v", err)
+	}
+	if second.GetVolume().GetVolumeId() != volumeID {
+		t.Fatalf("idempotent CreateVolume volumeID = %q, want %q", second.GetVolume().GetVolumeId(), volumeID)
+	}
+
+	other, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-other",
+		Secrets:            fake.secrets(),
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("second PVC CreateVolume error = %v", err)
+	}
+	if other.GetVolume().GetVolumeId() == volumeID {
+		t.Fatalf("different PVCs must not share a volumeID: %q", volumeID)
+	}
+
+	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
+		VolumeId: volumeID,
+		Secrets:  fake.secrets(),
+	}); err != nil {
+		t.Fatalf("DeleteVolume root mode error = %v", err)
+	}
+	if !fake.exists("/") {
+		t.Fatal("DeleteVolume root mode must not delete the Drive9 workspace root")
+	}
+}
+
+func TestCreateVolumeUsesRemoteRootFromSecret(t *testing.T) {
+	fake := newFakeDrive9(t)
+	defer fake.close()
+	fake.mkdir("/team/workspace")
+
+	secrets := fake.secrets()
+	secrets["remoteRoot"] = "/team/workspace"
+
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-team",
+		Secrets:            secrets,
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	if got := createResp.GetVolume().GetVolumeContext()["remoteRoot"]; got != "/team/workspace" {
+		t.Fatalf("CreateVolume remoteRoot = %q, want /team/workspace", got)
+	}
+}
+
+func TestCreateVolumeRejectsMissingWorkspaceRoot(t *testing.T) {
+	fake := newFakeDrive9(t)
+	defer fake.close()
+
+	secrets := fake.secrets()
+	secrets["remoteRoot"] = "/missing/workspace"
+
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-missing",
+		Secrets:            secrets,
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("CreateVolume status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
+	}
+}
+
+func TestCreateVolumeRejectsRemoteRootAndPrefixTogether(t *testing.T) {
+	fake := newFakeDrive9(t)
+	defer fake.close()
+
+	secrets := fake.secrets()
+	secrets["remoteRoot"] = "/"
+
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-conflict",
+		Secrets:            secrets,
+		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("CreateVolume status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+	}
+}
+
+func TestCreateDeleteManagedDirectoryVolumeWritesIndexAndMarker(t *testing.T) {
 	fake := newFakeDrive9(t)
 	defer fake.close()
 
@@ -718,7 +907,7 @@ func TestCreateVolumeRecoversFromNameIndexOnly(t *testing.T) {
 	}
 }
 
-func TestCreateVolumeDefaultPrefixIsValid(t *testing.T) {
+func TestCreateVolumeDefaultRemoteRootIsWorkspaceRoot(t *testing.T) {
 	fake := newFakeDrive9(t)
 	defer fake.close()
 
@@ -729,11 +918,11 @@ func TestCreateVolumeDefaultPrefixIsValid(t *testing.T) {
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
-		t.Fatalf("CreateVolume with default prefix error = %v", err)
+		t.Fatalf("CreateVolume with default remote root error = %v", err)
 	}
 	remoteRoot := createResp.GetVolume().GetVolumeContext()["remoteRoot"]
-	if !pathIsOrUnder(remoteRoot, defaultRemoteRootPrefix) {
-		t.Fatalf("default remote root = %q, want under %q", remoteRoot, defaultRemoteRootPrefix)
+	if remoteRoot != defaultRemoteRoot {
+		t.Fatalf("default remote root = %q, want %q", remoteRoot, defaultRemoteRoot)
 	}
 }
 
@@ -903,6 +1092,13 @@ func (f *fakeDrive9) exists(remotePath string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.dirs[remotePath] || f.files[remotePath] != nil
+}
+
+func (f *fakeDrive9) mkdir(remotePath string) {
+	remotePath = normalizeForTest(f.t, remotePath)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.dirs[remotePath] = true
 }
 
 func (f *fakeDrive9) putJSON(remotePath string, marker volumeMarker) {

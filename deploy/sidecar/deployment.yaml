@@ -21,7 +21,7 @@ spec:
               mountPath: /workspace
               mountPropagation: HostToContainer
         - name: drive9-mounter
-          image: ghcr.io/drive9-ai/drive9-csi:drive9-9c464af-csi-f5255cb
+          image: ghcr.io/drive9-ai/drive9-csi:drive9-03bec7f-csi-daf4e5e
           securityContext:
             privileged: true
             capabilities:
@@ -33,11 +33,7 @@ spec:
               set -u
               mkdir -p /mnt/drive9 /cache || exit 1
 
-              remote_root="${DRIVE9_REMOTE_ROOT%/}"
-              if [ -z "${remote_root}" ] || [ "${remote_root}" = "/" ]; then
-                echo "DRIVE9_REMOTE_ROOT must be an absolute non-root path" >&2
-                exit 1
-              fi
+              remote_root="${DRIVE9_REMOTE_ROOT:-/}"
               case "${remote_root}" in
                 /*) ;;
                 *)
@@ -45,29 +41,34 @@ spec:
                   exit 1
                   ;;
               esac
-
-              current=""
-              rest="${remote_root#/}"
-              while [ -n "${rest}" ]; do
-                case "${rest}" in
-                  */*)
-                    part="${rest%%/*}"
-                    rest="${rest#*/}"
-                    ;;
-                  *)
-                    part="${rest}"
-                    rest=""
-                    ;;
-                esac
-                if [ -z "${part}" ] || [ "${part}" = "." ] || [ "${part}" = ".." ]; then
-                  echo "DRIVE9_REMOTE_ROOT contains an unsafe path segment: ${remote_root}" >&2
-                  exit 1
-                fi
-                current="${current}/${part}"
-                if ! drive9 fs stat ":${current}" >/dev/null 2>&1; then
-                  drive9 fs mkdir ":${current}" || exit 1
-                fi
+              while [ "${remote_root}" != "/" ] && [ "${remote_root%/}" != "${remote_root}" ]; do
+                remote_root="${remote_root%/}"
               done
+
+              if [ "${remote_root}" != "/" ]; then
+                current=""
+                rest="${remote_root#/}"
+                while [ -n "${rest}" ]; do
+                  case "${rest}" in
+                    */*)
+                      part="${rest%%/*}"
+                      rest="${rest#*/}"
+                      ;;
+                    *)
+                      part="${rest}"
+                      rest=""
+                      ;;
+                  esac
+                  if [ -z "${part}" ] || [ "${part}" = "." ] || [ "${part}" = ".." ]; then
+                    echo "DRIVE9_REMOTE_ROOT contains an unsafe path segment: ${remote_root}" >&2
+                    exit 1
+                  fi
+                  current="${current}/${part}"
+                  if ! drive9 fs stat ":${current}" >/dev/null 2>&1; then
+                    drive9 fs mkdir ":${current}" || exit 1
+                  fi
+                done
+              fi
 
               exec drive9 mount --mode=fuse --allow-other --cache-dir /cache --profile "${DRIVE9_PROFILE}" ":${remote_root}" /mnt/drive9
           env:
@@ -82,7 +83,7 @@ spec:
                   name: drive9-sidecar-secret
                   key: apiKey
             - name: DRIVE9_REMOTE_ROOT
-              value: /k8s/sidecar-demo
+              value: /
             - name: DRIVE9_PROFILE
               value: coding-agent
           volumeMounts:

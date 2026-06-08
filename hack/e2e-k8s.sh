@@ -106,8 +106,14 @@ write_storageclass() {
 			print "  name: " storage_class
 			next
 		}
+		$0 == "parameters:" {
+			print
+			if (root_prefix != "") {
+				print "  remoteRootPrefix: " root_prefix
+			}
+			next
+		}
 		$0 ~ /^  remoteRootPrefix:/ {
-			print "  remoteRootPrefix: " root_prefix
 			next
 		}
 		$0 ~ /^  profile:/ {
@@ -218,7 +224,7 @@ if [[ "$DRIVE9_CSI_IMAGE" == *":latest" ]]; then
 	fail "DRIVE9_CSI_IMAGE must not use :latest"
 fi
 
-DRIVE9_REMOTE_ROOT_PREFIX="${DRIVE9_REMOTE_ROOT_PREFIX:-/k8s/pvc-e2e}"
+DRIVE9_REMOTE_ROOT_PREFIX="${DRIVE9_REMOTE_ROOT_PREFIX:-}"
 DRIVE9_PROFILE="${DRIVE9_PROFILE:-coding-agent}"
 
 if [[ "$driver_namespace" == "$test_namespace" ]]; then
@@ -243,6 +249,11 @@ info "using Kubernetes context: $(kubectl config current-context)"
 info "using image: $DRIVE9_CSI_IMAGE"
 info "using driver namespace: $driver_namespace"
 info "using e2e namespace: $test_namespace"
+if [[ "$DRIVE9_REMOTE_ROOT_PREFIX" == "" ]]; then
+	info "using Drive9 workspace root mode"
+else
+	info "using managed Drive9 remote root prefix: $DRIVE9_REMOTE_ROOT_PREFIX"
+fi
 
 cp "$repo_root/deploy/kubernetes/csidriver.yaml" \
 	"$manifest_dir/csidriver.yaml" || fail "copy csidriver"
@@ -254,6 +265,7 @@ write_storageclass
 write_test_workload
 write_test_pod drive9-csi-e2e-write "$tmp_dir/pod-write.yaml"
 write_test_pod drive9-csi-e2e-read "$tmp_dir/pod-read.yaml"
+write_test_pod drive9-csi-e2e-recreate-read "$tmp_dir/pod-recreate-read.yaml"
 
 kubectl apply -f "$manifest_dir" || fail "apply CSI manifests"
 kubectl -n "$driver_namespace" rollout status deployment/drive9-csi-controller \
@@ -267,11 +279,12 @@ kubectl -n "$test_namespace" wait pod/drive9-csi-e2e-write \
 	--for=condition=Ready --timeout=300s || fail "write pod ready"
 
 e2e_token="drive9-csi-e2e-$(date +%s)"
+e2e_file=".drive9-csi-e2e-$(date +%s).txt"
 kubectl -n "$test_namespace" exec drive9-csi-e2e-write -- \
-	sh -c "printf '%s\n' '$e2e_token' > /workspace/e2e.txt && sync" ||
+	sh -c "printf '%s\n' '$e2e_token' > '/workspace/$e2e_file' && sync" ||
 	fail "write through mounted volume"
 kubectl -n "$test_namespace" exec drive9-csi-e2e-write -- \
-	sh -c "test \"\$(cat /workspace/e2e.txt)\" = '$e2e_token'" ||
+	sh -c "test \"\$(cat '/workspace/$e2e_file')\" = '$e2e_token'" ||
 	fail "read through mounted volume"
 
 pv_name="$(kubectl -n "$test_namespace" get pvc drive9-workspace-e2e \
@@ -284,10 +297,39 @@ kubectl apply -f "$tmp_dir/pod-read.yaml" || fail "apply read pod"
 kubectl -n "$test_namespace" wait pod/drive9-csi-e2e-read \
 	--for=condition=Ready --timeout=300s || fail "read pod ready"
 kubectl -n "$test_namespace" exec drive9-csi-e2e-read -- \
-	sh -c "test \"\$(cat /workspace/e2e.txt)\" = '$e2e_token'" ||
+	sh -c "test \"\$(cat '/workspace/$e2e_file')\" = '$e2e_token'" ||
 	fail "read after pod remount"
-kubectl -n "$test_namespace" delete pod drive9-csi-e2e-read \
-	--wait=true || fail "delete read pod"
+
+if [[ "$DRIVE9_REMOTE_ROOT_PREFIX" == "" ]]; then
+	kubectl -n "$test_namespace" delete pod drive9-csi-e2e-read \
+		--wait=true || fail "delete read pod"
+	kubectl -n "$test_namespace" delete pvc drive9-workspace-e2e \
+		--wait=true || fail "delete test PVC before recreate"
+	wait_for_pv_deleted "$pv_name"
+
+	kubectl apply -f "$tmp_dir/workload.yaml" || fail "recreate test PVC"
+	kubectl apply -f "$tmp_dir/pod-recreate-read.yaml" ||
+		fail "apply recreate read pod"
+	kubectl -n "$test_namespace" wait pod/drive9-csi-e2e-recreate-read \
+		--for=condition=Ready --timeout=300s || fail "recreate read pod ready"
+	kubectl -n "$test_namespace" exec drive9-csi-e2e-recreate-read -- \
+		sh -c "test \"\$(cat '/workspace/$e2e_file')\" = '$e2e_token'" ||
+		fail "read after PVC recreate"
+	kubectl -n "$test_namespace" exec drive9-csi-e2e-recreate-read -- \
+		sh -c "rm -f '/workspace/$e2e_file' && sync" ||
+		fail "remove e2e file from workspace root"
+
+	pv_name="$(kubectl -n "$test_namespace" get pvc drive9-workspace-e2e \
+		-o jsonpath='{.spec.volumeName}')" || fail "read recreated bound PV name"
+	[[ "$pv_name" != "" ]] || fail "recreated PVC did not bind a PV"
+
+	kubectl -n "$test_namespace" delete pod drive9-csi-e2e-recreate-read \
+		--wait=true || fail "delete recreate read pod"
+else
+	kubectl -n "$test_namespace" delete pod drive9-csi-e2e-read \
+		--wait=true || fail "delete read pod"
+fi
+
 kubectl -n "$test_namespace" delete pvc drive9-workspace-e2e \
 	--wait=true || fail "delete test PVC"
 wait_for_pv_deleted "$pv_name"
