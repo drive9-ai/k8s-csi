@@ -4,11 +4,13 @@ This repository provides a minimal Kubernetes integration for `github.com/mem9-a
 
 It intentionally ships a small stable surface first:
 
-- Dynamic directory volumes backed by Drive9 remote paths.
+- PVCs mount the Drive9 workspace root selected by the per-PVC API key by default.
+- Optional managed directory volumes backed by Drive9 remote paths.
 - `ReadWriteOnce` only.
 - API key passed through Kubernetes CSI Secrets only.
-- `CreateVolume` writes a marker file.
-- `DeleteVolume` deletes only a path with both a matching metadata index entry and a matching root marker.
+- Default workspace-root volumes do not create or delete Drive9 workspace data.
+- Managed directory volumes write a marker file.
+- Managed directory `DeleteVolume` deletes only a path with both a matching metadata index entry and a matching root marker.
 - `NodeStageVolume` runs `drive9 mount --mode=fuse`.
 - `NodePublishVolume` bind-mounts the staged path into the pod.
 - No snapshots, expansion, RWX, or automatic tenant provisioning.
@@ -36,9 +38,13 @@ stringData:
 
 Create this Secret in the workload namespace before creating the matching PVC.
 With the default `StorageClass`, a PVC named `drive9-workspace` uses Secret
-`drive9-csi-drive9-workspace` in the same namespace. This lets one namespace
-create many PVCs backed by different Drive9 API keys or workspaces without
-requiring one cluster-scoped `StorageClass` per workspace.
+`drive9-csi-drive9-workspace` in the same namespace and mounts the root of the
+Drive9 workspace selected by that API key. This lets one namespace create many
+PVCs backed by different Drive9 API keys or workspaces without requiring one
+cluster-scoped `StorageClass` per workspace.
+
+The optional Secret key `remoteRoot` can mount an existing subpath of that
+workspace instead of `/`. Omit it for the normal workspace-root behavior.
 
 For the CSI path, do not put API keys in `StorageClass.parameters`, PV attributes, pod env, or annotations. The example `StorageClass` uses CSI secret references so Kubernetes passes the namespace-local secret to `CreateVolume`, `DeleteVolume`, and `NodeStageVolume`.
 
@@ -52,7 +58,12 @@ provisioner can resolve per-PVC credentials. Kubernetes RBAC cannot constrain
 does not grant `list` or `watch`, but it also cannot restrict reads to one fixed
 Secret name.
 
-The first version stores CSI metadata under `/k8s/.drive9-csi/volumes`. If you use a scoped Drive9 token instead of an owner key, its scope must cover both the volume prefix, for example `/k8s/pvc`, and the metadata index path `/k8s/.drive9-csi/volumes`.
+The default workspace-root mode does not write CSI metadata into the Drive9
+workspace and `DeleteVolume` is a no-op for Drive9 data. If you opt into managed
+directory mode with `remoteRootPrefix`, the driver stores CSI metadata under
+`/k8s/.drive9-csi/volumes`. A scoped Drive9 token for that mode must cover both
+the volume prefix, for example `/k8s/pvc`, and the metadata index path
+`/k8s/.drive9-csi/volumes`.
 
 ## Install
 
@@ -93,7 +104,8 @@ kubectl apply -k deploy/kubernetes
 ```
 
 Create a Drive9 Secret in the workload namespace before creating each PVC. The
-default Secret name is `drive9-csi-<pvc-name>`:
+default Secret name is `drive9-csi-<pvc-name>`. The API key selects the Drive9
+workspace, and the PVC mounts that workspace root:
 
 ```sh
 kubectl -n default create secret generic drive9-csi-drive9-workspace \
@@ -144,7 +156,9 @@ kubectl delete pod drive9-workspace-smoke
 kubectl delete pvc drive9-workspace
 ```
 
-The default example `StorageClass` uses `Retain`, so deleting the PVC keeps the PV and Drive9 remote directory for data safety. Use a separate `StorageClass` with `reclaimPolicy: Delete` only when automatic backend deletion is intended.
+The default example `StorageClass` uses `Retain`, so deleting the PVC keeps the
+PV and Drive9 workspace data for safety. Even with `reclaimPolicy: Delete`, the
+default workspace-root mode does not delete Drive9 workspace data.
 
 Example Secret, PVC, and smoke Pod manifests live under `deploy/examples/kubernetes/` so that applying `deploy/kubernetes/` does not create placeholder credentials or demo workloads in production clusters. Apply the example Secret with `kubectl -n <workload-namespace> apply -f deploy/examples/kubernetes/secret.example.yaml` after replacing the API key. For another PVC, copy the Secret and name it `drive9-csi-<pvc-name>`.
 
@@ -155,7 +169,6 @@ Default example:
 ```yaml
 provisioner: csi.drive9.ai
 parameters:
-  remoteRootPrefix: /k8s/pvc
   profile: coding-agent
   csi.storage.k8s.io/provisioner-secret-name: drive9-csi-${pvc.name}
   csi.storage.k8s.io/provisioner-secret-namespace: ${pvc.namespace}
@@ -165,18 +178,31 @@ reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer
 ```
 
-`Retain` is the default example because this is customer data. If a customer wants automatic deletion, they can switch to `Delete`; the driver still refuses to delete paths without both a matching metadata index entry and a matching `.drive9-csi-volume.json` marker.
+`Retain` is the default example because this is customer data. If a customer
+wants a PVC to mount a CSI-managed subdirectory instead of the Drive9 workspace
+root, create a separate `StorageClass` with `remoteRootPrefix`:
 
-If you use `reclaimPolicy: Delete`, keep the per-PVC workload namespace Secret
-in place until Kubernetes has deleted the PV. If the namespace or Secret is
-removed first, the CSI sidecar cannot pass credentials to `DeleteVolume`, and
-backend cleanup will require manual intervention.
+```yaml
+parameters:
+  remoteRootPrefix: /k8s/pvc
+  profile: coding-agent
+```
+
+In managed directory mode, `CreateVolume` creates a unique child directory under
+that prefix and writes CSI metadata. If that separate `StorageClass` uses
+`reclaimPolicy: Delete`, the driver still refuses to delete paths without both a
+matching metadata index entry and a matching `.drive9-csi-volume.json` marker.
+
+If you use `reclaimPolicy: Delete`, keep the per-PVC workload namespace Secret in
+place until Kubernetes has deleted the PV. If the namespace or Secret is removed
+first, the CSI sidecar cannot pass credentials to `DeleteVolume`, and backend
+cleanup will require manual intervention.
 
 ## Sidecar Fallback
 
 If a customer cannot install a CSI driver yet, use `deploy/sidecar/deployment.yaml` as a fallback. It runs a privileged Drive9 mounter sidecar and exposes the mounted directory to the app container.
 
-This is less clean than CSI because it requires privileged pods and hostPath mount propagation. Use it for pilots or constrained clusters, not as the default production path.
+This is less clean than CSI because it requires privileged pods and hostPath mount propagation. Use it for pilots or constrained clusters, not as the default production path. The fallback example also mounts the Drive9 workspace root by default; set `DRIVE9_REMOTE_ROOT` only when a subpath is intentional.
 
 Create the sidecar Secret in the target namespace before applying the fallback deployment:
 
@@ -225,10 +251,13 @@ the current Kubernetes context. It deploys the CSI driver into an isolated
 `drive9-csi-drive9-workspace-e2e` in `drive9-csi-e2e`, creates PVC
 `drive9-workspace-e2e`, mounts it into one pod, writes and reads a file, deletes
 that pod, remounts the same PVC into a second pod, reads the same token again,
-then deletes the pod and PVC and waits for the PV to be deleted. It fails closed
-if either e2e namespace or cluster-scoped CSI resources already exist, because
-the e2e should run on a clean validation cluster. Do not use `:latest` for
-`DRIVE9_CSI_IMAGE`; use an immutable tag or digest for customer evidence.
+deletes the PVC and PV, recreates the PVC, reads the same token from the Drive9
+workspace root, removes the temporary token file, then deletes the pod and PVC.
+It fails closed if either e2e namespace or cluster-scoped CSI resources already
+exist, because the e2e should run on a clean validation cluster. Set
+`DRIVE9_REMOTE_ROOT_PREFIX=/k8s/pvc-e2e` only when explicitly testing managed
+directory mode. Do not use `:latest` for `DRIVE9_CSI_IMAGE`; use an immutable tag
+or digest for customer evidence.
 
 ## GHCR Visibility
 

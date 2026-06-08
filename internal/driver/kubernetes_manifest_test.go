@@ -33,6 +33,17 @@ func TestDefaultStorageClassUsesPerPVCNamespaceSecrets(t *testing.T) {
 	}
 }
 
+func TestDefaultStorageClassMountsWorkspaceRoot(t *testing.T) {
+	body := readRepoFile(t, "deploy/kubernetes/storageclass.yaml")
+
+	if strings.Contains(body, "remoteRootPrefix:") {
+		t.Fatal("default StorageClass must not set remoteRootPrefix; it should mount the Drive9 workspace root")
+	}
+	if strings.Contains(body, "remoteRoot:") {
+		t.Fatal("default StorageClass must not force a remoteRoot; workspace root is the driver default")
+	}
+}
+
 func TestControllerRBACCanReadPerPVCNamespaceLocalDrive9Secrets(t *testing.T) {
 	body := readRepoFile(t, "deploy/kubernetes/rbac.yaml")
 
@@ -73,6 +84,8 @@ func TestE2EUsesPerPVCNamespaceLocalDrive9Secret(t *testing.T) {
 	for _, want := range []string{
 		"kind: Secret\nmetadata:\n  name: drive9-csi-drive9-workspace-e2e\n  namespace: $test_namespace",
 		"write_storageclass()",
+		"using Drive9 workspace root mode",
+		"read after PVC recreate",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("e2e script missing namespace-local secret evidence %q", want)
