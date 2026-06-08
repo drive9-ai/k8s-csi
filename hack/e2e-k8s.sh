@@ -97,35 +97,13 @@ write_rbac() {
 		fail "render rbac"
 }
 
-write_secret() {
-	cat > "$manifest_dir/secret.yaml" <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: drive9-csi-secret
-  namespace: $driver_namespace
-type: Opaque
-stringData:
-  server: |-
-    $DRIVE9_SERVER
-  apiKey: |-
-    $DRIVE9_API_KEY
-EOF
-}
-
 write_storageclass() {
 	awk \
 		-v storage_class="$storage_class" \
-		-v namespace="$driver_namespace" \
 		-v root_prefix="$DRIVE9_REMOTE_ROOT_PREFIX" \
 		-v profile="$DRIVE9_PROFILE" '
 		$0 == "  name: drive9-rwo" {
 			print "  name: " storage_class
-			next
-		}
-		$0 ~ /^  csi.storage.k8s.io\/.*-secret-namespace:/ {
-			sub(/: .*/, ": " namespace)
-			print
 			next
 		}
 		$0 ~ /^  remoteRootPrefix:/ {
@@ -152,6 +130,18 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: $test_namespace
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: drive9-csi-drive9-workspace-e2e
+  namespace: $test_namespace
+type: Opaque
+stringData:
+  server: |-
+    $DRIVE9_SERVER
+  apiKey: |-
+    $DRIVE9_API_KEY
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -260,7 +250,6 @@ write_namespace
 write_rbac
 copy_manifest controller.yaml controller.yaml
 copy_manifest node.yaml node.yaml
-write_secret
 write_storageclass
 write_test_workload
 write_test_pod drive9-csi-e2e-write "$tmp_dir/pod-write.yaml"

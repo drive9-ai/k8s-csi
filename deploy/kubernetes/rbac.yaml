@@ -39,6 +39,9 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -51,29 +54,4 @@ subjects:
 roleRef:
   kind: ClusterRole
   name: drive9-csi-controller
-  apiGroup: rbac.authorization.k8s.io
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: drive9-csi-controller-secrets
-  namespace: drive9-csi
-rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    resourceNames: ["drive9-csi-secret"]
-    verbs: ["get"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: drive9-csi-controller-secrets
-  namespace: drive9-csi
-subjects:
-  - kind: ServiceAccount
-    name: drive9-csi-controller
-    namespace: drive9-csi
-roleRef:
-  kind: Role
-  name: drive9-csi-controller-secrets
   apiGroup: rbac.authorization.k8s.io
