@@ -28,18 +28,22 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: drive9-csi-secret
-  namespace: drive9-csi
 type: Opaque
 stringData:
   server: https://api.drive9.ai
   apiKey: drive9_api_key_redacted
 ```
 
-For the CSI path, do not put API keys in `StorageClass.parameters`, PV attributes, pod env, or annotations. The example `StorageClass` uses CSI secret references so Kubernetes passes the secret to `CreateVolume`, `DeleteVolume`, and `NodeStageVolume`.
+Create this Secret in each workload namespace that will create Drive9 PVCs. The
+default `StorageClass` uses `${pvc.namespace}` in its CSI secret references, so
+PVCs in different namespaces can use different Drive9 API keys without requiring
+one cluster-scoped `StorageClass` per Drive9 workspace.
+
+For the CSI path, do not put API keys in `StorageClass.parameters`, PV attributes, pod env, or annotations. The example `StorageClass` uses CSI secret references so Kubernetes passes the namespace-local secret to `CreateVolume`, `DeleteVolume`, and `NodeStageVolume`.
 
 The sidecar fallback necessarily injects the secret into the mounter sidecar environment. Use CSI for production when the customer can install a node plugin.
 
-The node plugin needs privileged FUSE access. Treat it like other node storage plugins: restrict who can modify its DaemonSet and Secret.
+The node plugin needs privileged FUSE access. Treat it like other node storage plugins: restrict who can modify its DaemonSet and workload namespace Secrets.
 
 The first version stores CSI metadata under `/k8s/.drive9-csi/volumes`. If you use a scoped Drive9 token instead of an owner key, its scope must cover both the volume prefix, for example `/k8s/pvc`, and the metadata index path `/k8s/.drive9-csi/volumes`.
 
@@ -74,15 +78,20 @@ make image IMAGE=ghcr.io/drive9-ai/drive9-csi:0.1.0
 docker push ghcr.io/drive9-ai/drive9-csi:0.1.0
 ```
 
-Create the production Secret explicitly, then apply the CSI manifests:
+Install the CSI driver:
 
 ```sh
 kubectl apply -f deploy/kubernetes/namespace.yaml
-kubectl -n drive9-csi create secret generic drive9-csi-secret \
+kubectl apply -k deploy/kubernetes
+```
+
+Create a Drive9 Secret in the workload namespace before creating PVCs there:
+
+```sh
+kubectl -n default create secret generic drive9-csi-secret \
   --from-literal=server=https://api.drive9.ai \
   --from-literal=apiKey=drive9_api_key_redacted \
   --dry-run=client -o yaml | kubectl apply -f -
-kubectl apply -k deploy/kubernetes
 ```
 
 Create a PVC:
@@ -129,7 +138,7 @@ kubectl delete pvc drive9-workspace
 
 The default example `StorageClass` uses `Retain`, so deleting the PVC keeps the PV and Drive9 remote directory for data safety. Use a separate `StorageClass` with `reclaimPolicy: Delete` only when automatic backend deletion is intended.
 
-Example Secret, PVC, and smoke Pod manifests live under `deploy/examples/kubernetes/` so that applying `deploy/kubernetes/` does not create placeholder credentials or demo workloads in production clusters.
+Example Secret, PVC, and smoke Pod manifests live under `deploy/examples/kubernetes/` so that applying `deploy/kubernetes/` does not create placeholder credentials or demo workloads in production clusters. Apply the example Secret with `kubectl -n <workload-namespace> apply -f deploy/examples/kubernetes/secret.example.yaml` after replacing the API key.
 
 ## StorageClass
 
@@ -140,11 +149,20 @@ provisioner: csi.drive9.ai
 parameters:
   remoteRootPrefix: /k8s/pvc
   profile: coding-agent
+  csi.storage.k8s.io/provisioner-secret-name: drive9-csi-secret
+  csi.storage.k8s.io/provisioner-secret-namespace: ${pvc.namespace}
+  csi.storage.k8s.io/node-stage-secret-name: drive9-csi-secret
+  csi.storage.k8s.io/node-stage-secret-namespace: ${pvc.namespace}
 reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer
 ```
 
 `Retain` is the default example because this is customer data. If a customer wants automatic deletion, they can switch to `Delete`; the driver still refuses to delete paths without both a matching metadata index entry and a matching `.drive9-csi-volume.json` marker.
+
+If you use `reclaimPolicy: Delete`, keep the workload namespace Secret in place
+until Kubernetes has deleted the PV. If the namespace or Secret is removed first,
+the CSI sidecar cannot pass credentials to `DeleteVolume`, and backend cleanup
+will require manual intervention.
 
 ## Sidecar Fallback
 
@@ -195,7 +213,8 @@ hack/e2e-k8s.sh
 
 The script intentionally requires `DRIVE9_CSI_E2E_CONFIRM=1` because it mutates
 the current Kubernetes context. It deploys the CSI driver into an isolated
-`drive9-csi-e2e-driver` namespace, creates a PVC, mounts it into one pod,
+`drive9-csi-e2e-driver` namespace, creates a namespace-local
+`drive9-csi-secret` in `drive9-csi-e2e`, creates a PVC, mounts it into one pod,
 writes and reads a file, deletes that pod, remounts the same PVC into a second
 pod, reads the same token again, then deletes the pod and PVC and waits for the
 PV to be deleted. It fails closed if either e2e namespace or cluster-scoped CSI
