@@ -21,7 +21,7 @@ spec:
               mountPath: /workspace
               mountPropagation: HostToContainer
         - name: drive9-mounter
-          image: ghcr.io/drive9-ai/drive9-csi:drive9-6e2820e-csi-126ff81
+          image: ghcr.io/drive9-ai/drive9-csi:drive9-cbf73aa-csi-a163416
           securityContext:
             privileged: true
             capabilities:
