@@ -1075,6 +1075,59 @@ func TestDeleteVolumePreservesDataAndAllowsRecreate(t *testing.T) {
 	}
 }
 
+func TestDeleteVolumeRetryAfterPartialFailure(t *testing.T) {
+	// Simulate a previous DeleteVolume that removed the marker but crashed
+	// before removing the index/name-index.  A retry must succeed (not get
+	// stuck on missing marker) and clean up the remaining metadata.
+	fake := newFakeDrive9(t)
+	defer fake.close()
+
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-partial",
+		Secrets:            fake.secrets(),
+		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	volumeID := createResp.GetVolume().GetVolumeId()
+	remoteRoot := createResp.GetVolume().GetVolumeContext()["remoteRoot"]
+
+	// Simulate partial previous delete: marker removed, index/name-index still present.
+	fake.removeFile(markerPath(remoteRoot))
+	if fake.exists(markerPath(remoteRoot)) {
+		t.Fatal("precondition: marker should be gone")
+	}
+	if !fake.exists(indexPath(volumeID)) {
+		t.Fatal("precondition: index should still exist")
+	}
+	if !fake.exists(nameIndexPath("pvc-partial")) {
+		t.Fatal("precondition: name-index should still exist")
+	}
+	if !fake.exists(remoteRoot) {
+		t.Fatal("precondition: remoteRoot should still exist")
+	}
+
+	// Retry DeleteVolume — must succeed, not get stuck.
+	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
+		VolumeId: volumeID,
+		Secrets:  fake.secrets(),
+	}); err != nil {
+		t.Fatalf("retry DeleteVolume error = %v (stuck on missing marker)", err)
+	}
+	if fake.exists(indexPath(volumeID)) {
+		t.Fatal("index must be removed after retry")
+	}
+	if fake.exists(nameIndexPath("pvc-partial")) {
+		t.Fatal("name-index must be removed after retry")
+	}
+	if !fake.exists(remoteRoot) {
+		t.Fatal("remoteRoot must be preserved")
+	}
+}
+
 func TestStageAndPublishStateMatching(t *testing.T) {
 	if !mountStateMatches(mountState{
 		VolumeID:      "vol",
@@ -1171,6 +1224,13 @@ func (f *fakeDrive9) putFile(remotePath string, data []byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.files[remotePath] = data
+}
+
+func (f *fakeDrive9) removeFile(remotePath string) {
+	remotePath = normalizeForTest(f.t, remotePath)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.files, remotePath)
 }
 
 func (f *fakeDrive9) existsFile(remotePath string) bool {

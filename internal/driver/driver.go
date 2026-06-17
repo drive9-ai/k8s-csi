@@ -334,18 +334,21 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 		return &csi.DeleteVolumeResponse{}, nil
 	}
 	rootMarker, err := client.readMarker(ctx, markerPath(remoteRoot))
-	if err != nil {
+	switch {
+	case err != nil && status.Code(err) == codes.NotFound:
+		// Marker already removed by a previous partial DeleteVolume.
+		// Fall through to clean up the remaining index/name-index.
+	case err != nil:
 		return nil, err
-	}
-	if rootMarker.VolumeID != volumeID || rootMarker.RemoteRoot != remoteRoot || rootMarker.Driver != d.cfg.DriverName || rootMarker.Name != marker.Name {
+	case rootMarker.VolumeID != volumeID || rootMarker.RemoteRoot != remoteRoot || rootMarker.Driver != d.cfg.DriverName || rootMarker.Name != marker.Name:
 		return nil, status.Error(codes.FailedPrecondition, "refusing to delete Drive9 path without matching CSI marker")
 	}
+
 	// Detach CSI ownership only — never delete Drive9 workspace data.
-	// Remove the root marker file, volume index, and name index.
-	// The user's data under remoteRoot is preserved.
-	if err := client.removeAll(ctx, markerPath(remoteRoot)); err != nil {
-		log.Printf("drive9-csi: warning: failed to remove root marker %s: %v", markerPath(remoteRoot), err)
-	}
+	// Delete index and name-index first so that a retry after partial
+	// failure sees index NotFound and returns idempotent success.
+	// Marker is removed last (warning-only) — an orphan marker is
+	// harmless because CreateVolume handles it on recreate.
 	if err := client.removeAll(ctx, indexPath(volumeID)); err != nil {
 		return nil, err
 	}
@@ -353,6 +356,9 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 		if err := client.removeAll(ctx, nameIndexPath(marker.Name)); err != nil {
 			return nil, err
 		}
+	}
+	if err := client.removeAll(ctx, markerPath(remoteRoot)); err != nil {
+		log.Printf("drive9-csi: warning: failed to remove root marker %s: %v", markerPath(remoteRoot), err)
 	}
 	return &csi.DeleteVolumeResponse{}, nil
 }
