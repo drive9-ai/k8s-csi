@@ -6,7 +6,7 @@ It intentionally ships a small stable surface first:
 
 - PVCs mount the Drive9 workspace root selected by the per-PVC API key by default.
 - Optional managed directory volumes backed by Drive9 remote paths.
-- `ReadWriteOnce` only.
+- `ReadWriteOnce` by default. `SINGLE_NODE_MULTI_WRITER` supported for same-node multi-pod access.
 - API key passed through Kubernetes CSI Secrets only.
 - Default workspace-root volumes do not create or delete Drive9 workspace data.
 - Managed directory volumes write a marker file.
@@ -219,7 +219,7 @@ The sidecar Secret example lives under `deploy/examples/sidecar/` and is intenti
 ## Limitations
 
 - Linux only.
-- `ReadWriteOnce` only.
+- `ReadWriteOnce` by default. `SINGLE_NODE_MULTI_WRITER` supported for same-node multi-pod access.
 - One Drive9 principal per mounted volume lifecycle.
 - No volume expansion or quota enforcement.
 - No cross-node cache-consistency guarantee.
@@ -251,8 +251,12 @@ the current Kubernetes context. It deploys the CSI driver into an isolated
 `drive9-csi-drive9-workspace-e2e` in `drive9-csi-e2e`, creates PVC
 `drive9-workspace-e2e`, mounts it into one pod, writes and reads a file, deletes
 that pod, remounts the same PVC into a second pod, reads the same token again,
-deletes the PVC and PV, recreates the PVC, reads the same token from the Drive9
-workspace root, removes the temporary token file, then deletes the pod and PVC.
+then runs a multi-pod same-node concurrent test: keeps the second pod running,
+launches a third pod pinned to the same node, verifies cross-pod read, deletes
+the second pod, and confirms the third pod still works. After the multi-pod
+test, it deletes the PVC and PV, recreates the PVC, reads the same token from
+the Drive9 workspace root, removes the temporary token file, then deletes the
+pod and PVC.
 It fails closed if either e2e namespace or cluster-scoped CSI resources already
 exist, because the e2e should run on a clean validation cluster. Set
 `DRIVE9_REMOTE_ROOT_PREFIX=/k8s/pvc-e2e` only when explicitly testing managed
