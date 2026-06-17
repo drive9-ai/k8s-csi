@@ -10,7 +10,7 @@ It intentionally ships a small stable surface first:
 - API key passed through Kubernetes CSI Secrets only.
 - Default workspace-root volumes do not create or delete Drive9 workspace data.
 - Managed directory volumes write a marker file.
-- Managed directory `DeleteVolume` deletes only a path with both a matching metadata index entry and a matching root marker.
+- `DeleteVolume` detaches CSI ownership only: it removes CSI metadata (marker, index, name index) but never deletes Drive9 workspace data.
 - `NodeStageVolume` runs `drive9 mount --mode=fuse`.
 - `NodePublishVolume` bind-mounts the staged path into the pod.
 - No snapshots, expansion, RWX, or automatic tenant provisioning.

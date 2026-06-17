@@ -250,8 +250,21 @@ func (d *Driver) createManagedDirectoryVolume(ctx context.Context, req *csi.Crea
 		return nil, err
 	}
 	if exists {
-		if err := client.validateMarker(ctx, markerPath(remoteRoot), marker); err != nil {
-			return nil, err
+		got, readErr := client.readMarker(ctx, markerPath(remoteRoot))
+		switch {
+		case readErr != nil && status.Code(readErr) == codes.NotFound:
+			// Directory exists but marker is missing — orphaned after a
+			// previous DeleteVolume.  Adopt the directory by writing a
+			// fresh marker so the PVC can be recreated.
+			if err := client.writeJSON(ctx, markerPath(remoteRoot), marker); err != nil {
+				return nil, err
+			}
+		case readErr != nil:
+			return nil, readErr
+		case got.VolumeID != marker.VolumeID || got.RemoteRoot != marker.RemoteRoot || got.Driver != marker.Driver || got.Name != marker.Name:
+			return nil, status.Error(codes.AlreadyExists, "Drive9 path already exists and is owned by a different CSI volume")
+		default:
+			// Marker matches — idempotent create, nothing to do.
 		}
 	} else {
 		if err := client.mkdirAll(ctx, remoteRoot); err != nil {
@@ -327,8 +340,11 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 	if rootMarker.VolumeID != volumeID || rootMarker.RemoteRoot != remoteRoot || rootMarker.Driver != d.cfg.DriverName || rootMarker.Name != marker.Name {
 		return nil, status.Error(codes.FailedPrecondition, "refusing to delete Drive9 path without matching CSI marker")
 	}
-	if err := client.removeAll(ctx, remoteRoot); err != nil {
-		return nil, err
+	// Detach CSI ownership only — never delete Drive9 workspace data.
+	// Remove the root marker file, volume index, and name index.
+	// The user's data under remoteRoot is preserved.
+	if err := client.removeAll(ctx, markerPath(remoteRoot)); err != nil {
+		log.Printf("drive9-csi: warning: failed to remove root marker %s: %v", markerPath(remoteRoot), err)
 	}
 	if err := client.removeAll(ctx, indexPath(volumeID)); err != nil {
 		return nil, err

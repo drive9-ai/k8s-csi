@@ -806,20 +806,30 @@ func TestCreateDeleteManagedDirectoryVolumeWritesIndexAndMarker(t *testing.T) {
 		t.Fatalf("missing name index marker %s", nameIndexPath("pvc-demo"))
 	}
 
+	// Write a user file into the managed directory to verify data is preserved.
+	fake.putFile(remoteRoot+"/user-data.txt", []byte("keep me"))
+
 	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
 		Secrets:  fake.secrets(),
 	}); err != nil {
 		t.Fatalf("DeleteVolume error = %v", err)
 	}
-	if fake.exists(remoteRoot) {
-		t.Fatalf("remote root still exists after delete: %s", remoteRoot)
+	// DeleteVolume detaches CSI ownership but preserves Drive9 workspace data.
+	if !fake.exists(remoteRoot) {
+		t.Fatalf("remote root must be preserved after delete: %s", remoteRoot)
+	}
+	if !fake.existsFile(remoteRoot + "/user-data.txt") {
+		t.Fatal("user data must be preserved after delete")
+	}
+	if fake.exists(markerPath(remoteRoot)) {
+		t.Fatalf("root marker must be removed after delete: %s", markerPath(remoteRoot))
 	}
 	if fake.exists(indexPath(volumeID)) {
-		t.Fatalf("index still exists after delete: %s", indexPath(volumeID))
+		t.Fatalf("index must be removed after delete: %s", indexPath(volumeID))
 	}
 	if fake.exists(nameIndexPath("pvc-demo")) {
-		t.Fatalf("name index still exists after delete: %s", nameIndexPath("pvc-demo"))
+		t.Fatalf("name index must be removed after delete: %s", nameIndexPath("pvc-demo"))
 	}
 }
 
@@ -1010,6 +1020,61 @@ func TestDeleteVolumeRejectsTamperedRootMarkerName(t *testing.T) {
 	}
 }
 
+func TestDeleteVolumePreservesDataAndAllowsRecreate(t *testing.T) {
+	fake := newFakeDrive9(t)
+	defer fake.close()
+
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-lifecycle",
+		Secrets:            fake.secrets(),
+		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	volumeID := createResp.GetVolume().GetVolumeId()
+	remoteRoot := createResp.GetVolume().GetVolumeContext()["remoteRoot"]
+
+	// Simulate user writing data.
+	fake.putFile(remoteRoot+"/important.txt", []byte("do not delete"))
+
+	// Delete the volume — should only remove CSI metadata.
+	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
+		VolumeId: volumeID,
+		Secrets:  fake.secrets(),
+	}); err != nil {
+		t.Fatalf("DeleteVolume error = %v", err)
+	}
+	if !fake.existsFile(remoteRoot + "/important.txt") {
+		t.Fatal("user data must survive DeleteVolume")
+	}
+	if fake.exists(indexPath(volumeID)) {
+		t.Fatal("index must be removed after DeleteVolume")
+	}
+
+	// Recreate the same-name PVC — should succeed and restore CSI ownership.
+	recreateResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-lifecycle",
+		Secrets:            fake.secrets(),
+		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("recreate CreateVolume error = %v", err)
+	}
+	if recreateResp.GetVolume().GetVolumeId() != volumeID {
+		t.Fatalf("recreated volumeID = %q, want %q", recreateResp.GetVolume().GetVolumeId(), volumeID)
+	}
+	if !fake.exists(markerPath(remoteRoot)) {
+		t.Fatal("marker must be restored after recreate")
+	}
+	if !fake.existsFile(remoteRoot + "/important.txt") {
+		t.Fatal("user data must still exist after recreate")
+	}
+}
+
 func TestStageAndPublishStateMatching(t *testing.T) {
 	if !mountStateMatches(mountState{
 		VolumeID:      "vol",
@@ -1099,6 +1164,20 @@ func (f *fakeDrive9) mkdir(remotePath string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dirs[remotePath] = true
+}
+
+func (f *fakeDrive9) putFile(remotePath string, data []byte) {
+	remotePath = normalizeForTest(f.t, remotePath)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.files[remotePath] = data
+}
+
+func (f *fakeDrive9) existsFile(remotePath string) bool {
+	remotePath = normalizeForTest(f.t, remotePath)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.files[remotePath] != nil
 }
 
 func (f *fakeDrive9) putJSON(remotePath string, marker volumeMarker) {
