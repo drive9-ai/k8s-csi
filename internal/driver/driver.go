@@ -595,7 +595,7 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 	if mounted, err := isMountPoint(target); err != nil {
 		return nil, status.Errorf(codes.Internal, "check target mount: %v", err)
 	} else if mounted {
-		if err := d.validatePublishedMount(volumeID, stagingTarget, target, req.GetReadonly()); err != nil {
+		if err := d.validatePublishedMount(volumeID, stagingTarget, target, req.GetReadonly(), requestedMode.String()); err != nil {
 			return nil, err
 		}
 		return &csi.NodePublishVolumeResponse{}, nil
@@ -689,12 +689,12 @@ func (d *Driver) validateStagedMount(volumeID string, remoteRoot string, staging
 	return nil
 }
 
-func (d *Driver) validatePublishedMount(volumeID string, stagingTarget string, target string, readonly bool) error {
+func (d *Driver) validatePublishedMount(volumeID string, stagingTarget string, target string, readonly bool, accessMode string) error {
 	state, err := d.readPublishState(target)
 	if err != nil {
 		return status.Errorf(codes.FailedPrecondition, "publish target is mounted but no matching Drive9 state exists: %v", err)
 	}
-	if !publishStateMatches(state, volumeID, stagingTarget, target, readonly) {
+	if !publishStateMatches(state, volumeID, stagingTarget, target, readonly, accessMode) {
 		return status.Error(codes.FailedPrecondition, "publish target is mounted for a different Drive9 volume or access mode")
 	}
 	return nil
@@ -859,11 +859,12 @@ func mountStateMatches(state mountState, volumeID string, remoteRoot string, sta
 	return filepath.Clean(state.StagingTarget) == filepath.Clean(stagingTarget)
 }
 
-func publishStateMatches(state publishState, volumeID string, stagingTarget string, target string, readonly bool) bool {
+func publishStateMatches(state publishState, volumeID string, stagingTarget string, target string, readonly bool, accessMode string) bool {
 	return state.VolumeID == volumeID &&
 		filepath.Clean(state.StagingTarget) == filepath.Clean(stagingTarget) &&
 		filepath.Clean(state.Target) == filepath.Clean(target) &&
-		state.Readonly == readonly
+		state.Readonly == readonly &&
+		state.AccessMode == accessMode
 }
 
 func validateVolumeCapabilities(caps []*csi.VolumeCapability) error {
