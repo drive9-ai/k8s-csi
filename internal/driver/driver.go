@@ -323,13 +323,13 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 		return nil, err
 	}
 	if !exists {
-		if err := client.removeAll(ctx, indexPath(volumeID)); err != nil {
-			return nil, err
-		}
 		if marker.Name != "" {
 			if err := client.removeAll(ctx, nameIndexPath(marker.Name)); err != nil {
 				return nil, err
 			}
+		}
+		if err := client.removeAll(ctx, indexPath(volumeID)); err != nil {
+			return nil, err
 		}
 		return &csi.DeleteVolumeResponse{}, nil
 	}
@@ -345,17 +345,18 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 	}
 
 	// Detach CSI ownership only — never delete Drive9 workspace data.
-	// Delete index and name-index first so that a retry after partial
-	// failure sees index NotFound and returns idempotent success.
-	// Marker is removed last (warning-only) — an orphan marker is
-	// harmless because CreateVolume handles it on recreate.
-	if err := client.removeAll(ctx, indexPath(volumeID)); err != nil {
-		return nil, err
-	}
+	// Deletion order: name-index → index → marker (warning-only).
+	// Index is deleted last among hard-fail items so that a retry after
+	// partial failure still finds the index and can re-attempt
+	// name-index cleanup.  Marker is warning-only — an orphan marker
+	// is harmless because CreateVolume handles it on recreate.
 	if marker.Name != "" {
 		if err := client.removeAll(ctx, nameIndexPath(marker.Name)); err != nil {
 			return nil, err
 		}
+	}
+	if err := client.removeAll(ctx, indexPath(volumeID)); err != nil {
+		return nil, err
 	}
 	if err := client.removeAll(ctx, markerPath(remoteRoot)); err != nil {
 		log.Printf("drive9-csi: warning: failed to remove root marker %s: %v", markerPath(remoteRoot), err)
