@@ -1128,6 +1128,68 @@ func TestDeleteVolumeRetryAfterPartialFailure(t *testing.T) {
 	}
 }
 
+func TestDeleteVolumeTransientNameIndexFailureRetry(t *testing.T) {
+	// Regression test: proves the deletion order (name-index → index →
+	// marker) is correct.  With the old order (index → name-index), the
+	// first attempt would delete index successfully, then fail on
+	// name-index.  Retry would see index NotFound → idempotent success,
+	// leaving a stale name-index.  This test catches that.
+	fake := newFakeDrive9(t)
+	defer fake.close()
+
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-transient",
+		Secrets:            fake.secrets(),
+		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	volumeID := createResp.GetVolume().GetVolumeId()
+	remoteRoot := createResp.GetVolume().GetVolumeContext()["remoteRoot"]
+
+	fake.putFile(remoteRoot+"/data.txt", []byte("keep"))
+
+	// Inject a one-shot transient failure on name-index DELETE.
+	fake.failDeleteOnce(nameIndexPath("pvc-transient"), 1)
+
+	// First DeleteVolume attempt — should fail on name-index transient error.
+	_, err = d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
+		VolumeId: volumeID,
+		Secrets:  fake.secrets(),
+	})
+	if err == nil {
+		t.Fatal("expected DeleteVolume to fail on transient name-index error")
+	}
+	// With correct ordering (name-index first), index should still exist.
+	if !fake.exists(indexPath(volumeID)) {
+		t.Fatal("index must still exist after name-index transient failure — " +
+			"if index is gone, deletion order is wrong (index deleted before name-index)")
+	}
+
+	// Retry — transient error cleared, should succeed and clean everything.
+	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
+		VolumeId: volumeID,
+		Secrets:  fake.secrets(),
+	}); err != nil {
+		t.Fatalf("retry DeleteVolume error = %v", err)
+	}
+	if fake.exists(indexPath(volumeID)) {
+		t.Fatal("index must be removed after retry")
+	}
+	if fake.exists(nameIndexPath("pvc-transient")) {
+		t.Fatal("name-index must be removed after retry")
+	}
+	if !fake.existsFile(remoteRoot + "/data.txt") {
+		t.Fatal("user data must be preserved")
+	}
+	if !fake.exists(remoteRoot) {
+		t.Fatal("remoteRoot must be preserved")
+	}
+}
+
 func TestStageAndPublishStateMatching(t *testing.T) {
 	if !mountStateMatches(mountState{
 		VolumeID:      "vol",
@@ -1177,6 +1239,11 @@ type fakeDrive9 struct {
 	dirs               map[string]bool
 	files              map[string][]byte
 	strictMkdirParents bool
+	// deleteFailOnce maps normalized paths to remaining failure count.
+	// When a DELETE hits a path in this map with count > 0, the fake
+	// returns HTTP 500 and decrements the count.  Once count reaches 0
+	// the entry is removed and subsequent DELETEs succeed normally.
+	deleteFailOnce map[string]int
 }
 
 func newFakeDrive9(t *testing.T) *fakeDrive9 {
@@ -1192,6 +1259,18 @@ func newFakeDrive9(t *testing.T) *fakeDrive9 {
 
 func (f *fakeDrive9) requireMkdirParents() {
 	f.strictMkdirParents = true
+}
+
+// failDeleteOnce causes the next n DELETE requests for remotePath to
+// return HTTP 500, simulating a transient Drive9 error.
+func (f *fakeDrive9) failDeleteOnce(remotePath string, n int) {
+	remotePath = normalizeForTest(f.t, remotePath)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteFailOnce == nil {
+		f.deleteFailOnce = map[string]int{}
+	}
+	f.deleteFailOnce[remotePath] = n
 }
 
 func (f *fakeDrive9) close() {
@@ -1300,6 +1379,15 @@ func (f *fakeDrive9) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		_, _ = w.Write(body)
 	case r.Method == http.MethodDelete && r.URL.Query().Get("recursive") == "1":
+		if n, ok := f.deleteFailOnce[remotePath]; ok {
+			if n <= 1 {
+				delete(f.deleteFailOnce, remotePath)
+			} else {
+				f.deleteFailOnce[remotePath] = n - 1
+			}
+			http.Error(w, "simulated transient error", http.StatusInternalServerError)
+			return
+		}
 		for p := range f.files {
 			if pathIsOrUnder(p, remotePath) {
 				delete(f.files, p)
