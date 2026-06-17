@@ -806,20 +806,30 @@ func TestCreateDeleteManagedDirectoryVolumeWritesIndexAndMarker(t *testing.T) {
 		t.Fatalf("missing name index marker %s", nameIndexPath("pvc-demo"))
 	}
 
+	// Write a user file into the managed directory to verify data is preserved.
+	fake.putFile(remoteRoot+"/user-data.txt", []byte("keep me"))
+
 	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
 		Secrets:  fake.secrets(),
 	}); err != nil {
 		t.Fatalf("DeleteVolume error = %v", err)
 	}
-	if fake.exists(remoteRoot) {
-		t.Fatalf("remote root still exists after delete: %s", remoteRoot)
+	// DeleteVolume detaches CSI ownership but preserves Drive9 workspace data.
+	if !fake.exists(remoteRoot) {
+		t.Fatalf("remote root must be preserved after delete: %s", remoteRoot)
+	}
+	if !fake.existsFile(remoteRoot + "/user-data.txt") {
+		t.Fatal("user data must be preserved after delete")
+	}
+	if fake.exists(markerPath(remoteRoot)) {
+		t.Fatalf("root marker must be removed after delete: %s", markerPath(remoteRoot))
 	}
 	if fake.exists(indexPath(volumeID)) {
-		t.Fatalf("index still exists after delete: %s", indexPath(volumeID))
+		t.Fatalf("index must be removed after delete: %s", indexPath(volumeID))
 	}
 	if fake.exists(nameIndexPath("pvc-demo")) {
-		t.Fatalf("name index still exists after delete: %s", nameIndexPath("pvc-demo"))
+		t.Fatalf("name index must be removed after delete: %s", nameIndexPath("pvc-demo"))
 	}
 }
 
@@ -1010,6 +1020,176 @@ func TestDeleteVolumeRejectsTamperedRootMarkerName(t *testing.T) {
 	}
 }
 
+func TestDeleteVolumePreservesDataAndAllowsRecreate(t *testing.T) {
+	fake := newFakeDrive9(t)
+	defer fake.close()
+
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-lifecycle",
+		Secrets:            fake.secrets(),
+		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	volumeID := createResp.GetVolume().GetVolumeId()
+	remoteRoot := createResp.GetVolume().GetVolumeContext()["remoteRoot"]
+
+	// Simulate user writing data.
+	fake.putFile(remoteRoot+"/important.txt", []byte("do not delete"))
+
+	// Delete the volume — should only remove CSI metadata.
+	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
+		VolumeId: volumeID,
+		Secrets:  fake.secrets(),
+	}); err != nil {
+		t.Fatalf("DeleteVolume error = %v", err)
+	}
+	if !fake.existsFile(remoteRoot + "/important.txt") {
+		t.Fatal("user data must survive DeleteVolume")
+	}
+	if fake.exists(indexPath(volumeID)) {
+		t.Fatal("index must be removed after DeleteVolume")
+	}
+
+	// Recreate the same-name PVC — should succeed and restore CSI ownership.
+	recreateResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-lifecycle",
+		Secrets:            fake.secrets(),
+		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("recreate CreateVolume error = %v", err)
+	}
+	if recreateResp.GetVolume().GetVolumeId() != volumeID {
+		t.Fatalf("recreated volumeID = %q, want %q", recreateResp.GetVolume().GetVolumeId(), volumeID)
+	}
+	if !fake.exists(markerPath(remoteRoot)) {
+		t.Fatal("marker must be restored after recreate")
+	}
+	if !fake.existsFile(remoteRoot + "/important.txt") {
+		t.Fatal("user data must still exist after recreate")
+	}
+}
+
+func TestDeleteVolumeRetryAfterPartialFailure(t *testing.T) {
+	// Simulate a previous DeleteVolume that removed the marker but crashed
+	// before removing the index/name-index.  A retry must succeed (not get
+	// stuck on missing marker) and clean up the remaining metadata.
+	fake := newFakeDrive9(t)
+	defer fake.close()
+
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-partial",
+		Secrets:            fake.secrets(),
+		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	volumeID := createResp.GetVolume().GetVolumeId()
+	remoteRoot := createResp.GetVolume().GetVolumeContext()["remoteRoot"]
+
+	// Simulate partial previous delete: marker removed, index/name-index still present.
+	fake.removeFile(markerPath(remoteRoot))
+	if fake.exists(markerPath(remoteRoot)) {
+		t.Fatal("precondition: marker should be gone")
+	}
+	if !fake.exists(indexPath(volumeID)) {
+		t.Fatal("precondition: index should still exist")
+	}
+	if !fake.exists(nameIndexPath("pvc-partial")) {
+		t.Fatal("precondition: name-index should still exist")
+	}
+	if !fake.exists(remoteRoot) {
+		t.Fatal("precondition: remoteRoot should still exist")
+	}
+
+	// Retry DeleteVolume — must succeed, not get stuck.
+	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
+		VolumeId: volumeID,
+		Secrets:  fake.secrets(),
+	}); err != nil {
+		t.Fatalf("retry DeleteVolume error = %v (stuck on missing marker)", err)
+	}
+	if fake.exists(indexPath(volumeID)) {
+		t.Fatal("index must be removed after retry")
+	}
+	if fake.exists(nameIndexPath("pvc-partial")) {
+		t.Fatal("name-index must be removed after retry")
+	}
+	if !fake.exists(remoteRoot) {
+		t.Fatal("remoteRoot must be preserved")
+	}
+}
+
+func TestDeleteVolumeTransientNameIndexFailureRetry(t *testing.T) {
+	// Regression test: proves the deletion order (name-index → index →
+	// marker) is correct.  With the old order (index → name-index), the
+	// first attempt would delete index successfully, then fail on
+	// name-index.  Retry would see index NotFound → idempotent success,
+	// leaving a stale name-index.  This test catches that.
+	fake := newFakeDrive9(t)
+	defer fake.close()
+
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-transient",
+		Secrets:            fake.secrets(),
+		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	volumeID := createResp.GetVolume().GetVolumeId()
+	remoteRoot := createResp.GetVolume().GetVolumeContext()["remoteRoot"]
+
+	fake.putFile(remoteRoot+"/data.txt", []byte("keep"))
+
+	// Inject a one-shot transient failure on name-index DELETE.
+	fake.failDeleteOnce(nameIndexPath("pvc-transient"), 1)
+
+	// First DeleteVolume attempt — should fail on name-index transient error.
+	_, err = d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
+		VolumeId: volumeID,
+		Secrets:  fake.secrets(),
+	})
+	if err == nil {
+		t.Fatal("expected DeleteVolume to fail on transient name-index error")
+	}
+	// With correct ordering (name-index first), index should still exist.
+	if !fake.exists(indexPath(volumeID)) {
+		t.Fatal("index must still exist after name-index transient failure — " +
+			"if index is gone, deletion order is wrong (index deleted before name-index)")
+	}
+
+	// Retry — transient error cleared, should succeed and clean everything.
+	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
+		VolumeId: volumeID,
+		Secrets:  fake.secrets(),
+	}); err != nil {
+		t.Fatalf("retry DeleteVolume error = %v", err)
+	}
+	if fake.exists(indexPath(volumeID)) {
+		t.Fatal("index must be removed after retry")
+	}
+	if fake.exists(nameIndexPath("pvc-transient")) {
+		t.Fatal("name-index must be removed after retry")
+	}
+	if !fake.existsFile(remoteRoot + "/data.txt") {
+		t.Fatal("user data must be preserved")
+	}
+	if !fake.exists(remoteRoot) {
+		t.Fatal("remoteRoot must be preserved")
+	}
+}
+
 func TestStageAndPublishStateMatching(t *testing.T) {
 	if !mountStateMatches(mountState{
 		VolumeID:      "vol",
@@ -1059,6 +1239,11 @@ type fakeDrive9 struct {
 	dirs               map[string]bool
 	files              map[string][]byte
 	strictMkdirParents bool
+	// deleteFailOnce maps normalized paths to remaining failure count.
+	// When a DELETE hits a path in this map with count > 0, the fake
+	// returns HTTP 500 and decrements the count.  Once count reaches 0
+	// the entry is removed and subsequent DELETEs succeed normally.
+	deleteFailOnce map[string]int
 }
 
 func newFakeDrive9(t *testing.T) *fakeDrive9 {
@@ -1074,6 +1259,18 @@ func newFakeDrive9(t *testing.T) *fakeDrive9 {
 
 func (f *fakeDrive9) requireMkdirParents() {
 	f.strictMkdirParents = true
+}
+
+// failDeleteOnce causes the next n DELETE requests for remotePath to
+// return HTTP 500, simulating a transient Drive9 error.
+func (f *fakeDrive9) failDeleteOnce(remotePath string, n int) {
+	remotePath = normalizeForTest(f.t, remotePath)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteFailOnce == nil {
+		f.deleteFailOnce = map[string]int{}
+	}
+	f.deleteFailOnce[remotePath] = n
 }
 
 func (f *fakeDrive9) close() {
@@ -1099,6 +1296,27 @@ func (f *fakeDrive9) mkdir(remotePath string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.dirs[remotePath] = true
+}
+
+func (f *fakeDrive9) putFile(remotePath string, data []byte) {
+	remotePath = normalizeForTest(f.t, remotePath)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.files[remotePath] = data
+}
+
+func (f *fakeDrive9) removeFile(remotePath string) {
+	remotePath = normalizeForTest(f.t, remotePath)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.files, remotePath)
+}
+
+func (f *fakeDrive9) existsFile(remotePath string) bool {
+	remotePath = normalizeForTest(f.t, remotePath)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.files[remotePath] != nil
 }
 
 func (f *fakeDrive9) putJSON(remotePath string, marker volumeMarker) {
@@ -1161,6 +1379,15 @@ func (f *fakeDrive9) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		_, _ = w.Write(body)
 	case r.Method == http.MethodDelete && r.URL.Query().Get("recursive") == "1":
+		if n, ok := f.deleteFailOnce[remotePath]; ok {
+			if n <= 1 {
+				delete(f.deleteFailOnce, remotePath)
+			} else {
+				f.deleteFailOnce[remotePath] = n - 1
+			}
+			http.Error(w, "simulated transient error", http.StatusInternalServerError)
+			return
+		}
 		for p := range f.files {
 			if pathIsOrUnder(p, remotePath) {
 				delete(f.files, p)
