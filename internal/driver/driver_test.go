@@ -3,6 +3,7 @@ package driver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1421,4 +1422,239 @@ func jsonMarshal(v any) ([]byte, error) {
 		return m.MarshalJSON()
 	}
 	return json.Marshal(v)
+}
+
+// --- Multi-Pod Same PVC Tests ---
+
+func TestControllerGetCapabilitiesIncludesMultiWriter(t *testing.T) {
+	d := &Driver{}
+	resp, err := d.ControllerGetCapabilities(context.Background(), &csi.ControllerGetCapabilitiesRequest{})
+	if err != nil {
+		t.Fatalf("ControllerGetCapabilities error = %v", err)
+	}
+	found := false
+	for _, cap := range resp.GetCapabilities() {
+		if cap.GetRpc().GetType() == csi.ControllerServiceCapability_RPC_SINGLE_NODE_MULTI_WRITER {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("ControllerGetCapabilities must include SINGLE_NODE_MULTI_WRITER")
+	}
+}
+
+func TestNodeGetCapabilitiesIncludesMultiWriter(t *testing.T) {
+	d := &Driver{}
+	resp, err := d.NodeGetCapabilities(context.Background(), &csi.NodeGetCapabilitiesRequest{})
+	if err != nil {
+		t.Fatalf("NodeGetCapabilities error = %v", err)
+	}
+	found := false
+	for _, cap := range resp.GetCapabilities() {
+		if cap.GetRpc().GetType() == csi.NodeServiceCapability_RPC_SINGLE_NODE_MULTI_WRITER {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("NodeGetCapabilities must include SINGLE_NODE_MULTI_WRITER")
+	}
+}
+
+func TestValidateVolumeCapabilitiesRPC(t *testing.T) {
+	d := &Driver{}
+
+	// Supported capability — should confirm.
+	resp, err := d.ValidateVolumeCapabilities(context.Background(), &csi.ValidateVolumeCapabilitiesRequest{
+		VolumeId: "vol-1",
+		VolumeCapabilities: []*csi.VolumeCapability{
+			multiWriterMountCapability(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("ValidateVolumeCapabilities error = %v", err)
+	}
+	if resp.GetConfirmed() == nil {
+		t.Fatal("expected confirmed for SINGLE_NODE_MULTI_WRITER capability")
+	}
+
+	// Unsupported capability — should not confirm.
+	resp, err = d.ValidateVolumeCapabilities(context.Background(), &csi.ValidateVolumeCapabilitiesRequest{
+		VolumeId: "vol-1",
+		VolumeCapabilities: []*csi.VolumeCapability{
+			{
+				AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
+				AccessMode: &csi.VolumeCapability_AccessMode{
+					Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ValidateVolumeCapabilities error = %v", err)
+	}
+	if resp.GetConfirmed() != nil {
+		t.Fatal("MULTI_NODE_MULTI_WRITER should not be confirmed")
+	}
+	if resp.GetMessage() == "" {
+		t.Fatal("expected message for unsupported capability")
+	}
+
+	// Missing volume ID.
+	_, err = d.ValidateVolumeCapabilities(context.Background(), &csi.ValidateVolumeCapabilitiesRequest{
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument for missing volume id, got %v", err)
+	}
+}
+
+func TestValidateVolumeCapabilitiesAcceptsMultiWriter(t *testing.T) {
+	err := validateVolumeCapabilities([]*csi.VolumeCapability{multiWriterMountCapability()})
+	if err != nil {
+		t.Fatalf("expected SINGLE_NODE_MULTI_WRITER to be accepted, got %v", err)
+	}
+}
+
+func TestPublishStateLegacyDefaults(t *testing.T) {
+	s := publishState{
+		VolumeID:      "vol-1",
+		StagingTarget: "/stage",
+		Target:        "/target",
+	}
+	s.applyLegacyDefaults()
+	if s.Status != publishStatusPublished {
+		t.Fatalf("legacy Status = %q, want %q", s.Status, publishStatusPublished)
+	}
+	if s.AccessMode != csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER.String() {
+		t.Fatalf("legacy AccessMode = %q, want SINGLE_NODE_WRITER", s.AccessMode)
+	}
+}
+
+func TestPublishStateLegacyDefaultsDoNotOverwrite(t *testing.T) {
+	s := publishState{
+		VolumeID:   "vol-1",
+		Status:     publishStatusPending,
+		AccessMode: csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER.String(),
+	}
+	s.applyLegacyDefaults()
+	if s.Status != publishStatusPending {
+		t.Fatalf("Status should not be overwritten, got %q", s.Status)
+	}
+	if s.AccessMode != csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER.String() {
+		t.Fatalf("AccessMode should not be overwritten, got %q", s.AccessMode)
+	}
+}
+
+func TestHasActivePublishTargetsStaleCleanup(t *testing.T) {
+	stateDir := t.TempDir()
+	d := &Driver{cfg: Config{StateDir: stateDir}}
+
+	// Write a publish state for a target that is NOT mounted (stale).
+	state := publishState{
+		VolumeID:      "vol-1",
+		StagingTarget: "/staging",
+		Target:        "/target-not-mounted",
+		Status:        publishStatusPublished,
+		AccessMode:    csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER.String(),
+	}
+	body, _ := json.MarshalIndent(state, "", "  ")
+	statePath := d.publishStatePath("/target-not-mounted")
+	if err := os.WriteFile(statePath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	active, err := d.hasActivePublishTargets("vol-1", "/staging")
+	if err != nil {
+		t.Fatalf("hasActivePublishTargets error = %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("expected 0 active targets (stale cleaned), got %d", len(active))
+	}
+	// State file should be removed.
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("stale state file should be removed")
+	}
+}
+
+func TestHasActivePublishTargetsMalformedConservative(t *testing.T) {
+	stateDir := t.TempDir()
+	d := &Driver{cfg: Config{StateDir: stateDir}}
+
+	// Write a malformed state file.
+	statePath := filepath.Join(stateDir, "published-deadbeef.json")
+	if err := os.WriteFile(statePath, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := d.hasActivePublishTargets("vol-1", "/staging")
+	if err == nil {
+		t.Fatal("expected error for malformed state file")
+	}
+	// File should be preserved (not cleaned).
+	if _, statErr := os.Stat(statePath); errors.Is(statErr, os.ErrNotExist) {
+		t.Fatal("malformed state file should be preserved, not cleaned")
+	}
+}
+
+func TestHasActivePublishTargetsMatchesStagingTarget(t *testing.T) {
+	stateDir := t.TempDir()
+	d := &Driver{cfg: Config{StateDir: stateDir}}
+
+	// Write a state for a DIFFERENT staging target — should not match.
+	state := publishState{
+		VolumeID:      "vol-1",
+		StagingTarget: "/old-staging",
+		Target:        "/target-not-mounted",
+		Status:        publishStatusPublished,
+		AccessMode:    csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER.String(),
+	}
+	body, _ := json.MarshalIndent(state, "", "  ")
+	if err := os.WriteFile(d.publishStatePath("/target-not-mounted"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	active, err := d.hasActivePublishTargets("vol-1", "/current-staging")
+	if err != nil {
+		t.Fatalf("hasActivePublishTargets error = %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("expected 0 active targets (different stagingTarget), got %d", len(active))
+	}
+}
+
+func TestHasActivePublishTargetsLegacyState(t *testing.T) {
+	stateDir := t.TempDir()
+	d := &Driver{cfg: Config{StateDir: stateDir}}
+
+	// Write a legacy state (no Status, no AccessMode).
+	state := publishState{
+		VolumeID:      "vol-1",
+		StagingTarget: "/staging",
+		Target:        "/target-not-mounted",
+		PublishedAt:   "2026-01-01T00:00:00Z",
+	}
+	body, _ := json.MarshalIndent(state, "", "  ")
+	if err := os.WriteFile(d.publishStatePath("/target-not-mounted"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	active, err := d.hasActivePublishTargets("vol-1", "/staging")
+	if err != nil {
+		t.Fatalf("hasActivePublishTargets error = %v", err)
+	}
+	// Target not mounted → stale, should be cleaned up.
+	if len(active) != 0 {
+		t.Fatalf("expected 0 active targets (legacy stale), got %d", len(active))
+	}
+}
+
+func multiWriterMountCapability() *csi.VolumeCapability {
+	return &csi.VolumeCapability{
+		AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
+		AccessMode: &csi.VolumeCapability_AccessMode{
+			Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER,
+		},
+	}
 }
