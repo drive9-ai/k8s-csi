@@ -190,6 +190,34 @@ spec:
 EOF
 }
 
+write_test_pod_on_node() {
+	local pod_name="$1"
+	local target="$2"
+	local node_name="$3"
+
+	cat > "$target" <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $pod_name
+  namespace: $test_namespace
+spec:
+  restartPolicy: Never
+  nodeName: $node_name
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["/bin/sh", "-c", "sleep 3600"]
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+  volumes:
+    - name: workspace
+      persistentVolumeClaim:
+        claimName: drive9-workspace-e2e
+EOF
+}
+
 wait_for_pv_deleted() {
 	local pv_name="$1"
 	local attempt
@@ -300,9 +328,53 @@ kubectl -n "$test_namespace" exec drive9-csi-e2e-read -- \
 	sh -c "test \"\$(cat '/workspace/$e2e_file')\" = '$e2e_token'" ||
 	fail "read after pod remount"
 
+# --- Multi-pod same-node concurrent test ---
+# Pod1 (read pod) is still running. Get the node it landed on, then launch
+# Pod2 pinned to the same node so both pods mount the same PVC concurrently.
+pod1_node="$(kubectl -n "$test_namespace" get pod drive9-csi-e2e-read \
+	-o jsonpath='{.spec.nodeName}')" || fail "read pod1 node name"
+[[ "$pod1_node" != "" ]] || fail "pod1 has no node assignment"
+info "multi-pod test: pod1 on node $pod1_node"
+
+multi_token="drive9-csi-multi-$(date +%s)"
+multi_file=".drive9-csi-multi-$(date +%s).txt"
+
+write_test_pod_on_node drive9-csi-e2e-multi "$tmp_dir/pod-multi.yaml" "$pod1_node"
+kubectl apply -f "$tmp_dir/pod-multi.yaml" || fail "apply multi pod"
+kubectl -n "$test_namespace" wait pod/drive9-csi-e2e-multi \
+	--for=condition=Ready --timeout=300s || fail "multi pod ready"
+
+# Pod1 writes a file, Pod2 reads it.
+kubectl -n "$test_namespace" exec drive9-csi-e2e-read -- \
+	sh -c "printf '%s\n' '$multi_token' > '/workspace/$multi_file' && sync" ||
+	fail "pod1 write for multi-pod test"
+kubectl -n "$test_namespace" exec drive9-csi-e2e-multi -- \
+	sh -c "test \"\$(cat '/workspace/$multi_file')\" = '$multi_token'" ||
+	fail "pod2 read file written by pod1"
+
+# Delete Pod1, verify Pod2 still works (unstage must not fire while Pod2
+# still has a publish reference).
+kubectl -n "$test_namespace" delete pod drive9-csi-e2e-read \
+	--wait=true || fail "delete pod1 while pod2 still running"
+
+second_token="drive9-csi-multi2-$(date +%s)"
+kubectl -n "$test_namespace" exec drive9-csi-e2e-multi -- \
+	sh -c "printf '%s\n' '$second_token' > '/workspace/$multi_file' && sync" ||
+	fail "pod2 write after pod1 deletion"
+kubectl -n "$test_namespace" exec drive9-csi-e2e-multi -- \
+	sh -c "test \"\$(cat '/workspace/$multi_file')\" = '$second_token'" ||
+	fail "pod2 read-back after pod1 deletion"
+
+# Clean up multi-pod test files and pod.
+kubectl -n "$test_namespace" exec drive9-csi-e2e-multi -- \
+	sh -c "rm -f '/workspace/$multi_file' && sync" ||
+	fail "remove multi-pod e2e file"
+kubectl -n "$test_namespace" delete pod drive9-csi-e2e-multi \
+	--wait=true || fail "delete multi pod"
+info "passed: multi-pod same-node concurrent mount"
+# --- End multi-pod test ---
+
 if [[ "$DRIVE9_REMOTE_ROOT_PREFIX" == "" ]]; then
-	kubectl -n "$test_namespace" delete pod drive9-csi-e2e-read \
-		--wait=true || fail "delete read pod"
 	kubectl -n "$test_namespace" delete pvc drive9-workspace-e2e \
 		--wait=true || fail "delete test PVC before recreate"
 	wait_for_pv_deleted "$pv_name"
@@ -325,13 +397,10 @@ if [[ "$DRIVE9_REMOTE_ROOT_PREFIX" == "" ]]; then
 
 	kubectl -n "$test_namespace" delete pod drive9-csi-e2e-recreate-read \
 		--wait=true || fail "delete recreate read pod"
-else
-	kubectl -n "$test_namespace" delete pod drive9-csi-e2e-read \
-		--wait=true || fail "delete read pod"
 fi
 
 kubectl -n "$test_namespace" delete pvc drive9-workspace-e2e \
 	--wait=true || fail "delete test PVC"
 wait_for_pv_deleted "$pv_name"
 
-info "passed: mount/write/read/remount/unpublish/unstage/delete"
+info "passed: mount/write/read/remount/multi-pod/unpublish/unstage/delete"

@@ -6,7 +6,7 @@ It intentionally ships a small stable surface first:
 
 - PVCs mount the Drive9 workspace root selected by the per-PVC API key by default.
 - Optional managed directory volumes backed by Drive9 remote paths.
-- `ReadWriteOnce` only.
+- `ReadWriteOnce` by default. `SINGLE_NODE_MULTI_WRITER` supported for same-node multi-pod access.
 - API key passed through Kubernetes CSI Secrets only.
 - Default workspace-root volumes do not create or delete Drive9 workspace data.
 - Managed directory volumes write a marker file.
@@ -219,7 +219,7 @@ The sidecar Secret example lives under `deploy/examples/sidecar/` and is intenti
 ## Limitations
 
 - Linux only.
-- `ReadWriteOnce` only.
+- `ReadWriteOnce` by default. `SINGLE_NODE_MULTI_WRITER` supported for same-node multi-pod access.
 - One Drive9 principal per mounted volume lifecycle.
 - No volume expansion or quota enforcement.
 - No cross-node cache-consistency guarantee.

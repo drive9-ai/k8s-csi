@@ -1211,7 +1211,8 @@ func TestStageAndPublishStateMatching(t *testing.T) {
 		StagingTarget: "/stage",
 		Target:        "/target",
 		Readonly:      true,
-	}, "vol", "/stage", "/target", true) {
+		AccessMode:    csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER.String(),
+	}, "vol", "/stage", "/target", true, csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER.String()) {
 		t.Fatal("expected matching publish state")
 	}
 	if publishStateMatches(publishState{
@@ -1219,8 +1220,18 @@ func TestStageAndPublishStateMatching(t *testing.T) {
 		StagingTarget: "/stage",
 		Target:        "/target",
 		Readonly:      false,
-	}, "vol", "/stage", "/target", true) {
+		AccessMode:    csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER.String(),
+	}, "vol", "/stage", "/target", true, csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER.String()) {
 		t.Fatal("expected readonly mismatch to fail")
+	}
+	if publishStateMatches(publishState{
+		VolumeID:      "vol",
+		StagingTarget: "/stage",
+		Target:        "/target",
+		Readonly:      true,
+		AccessMode:    csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER.String(),
+	}, "vol", "/stage", "/target", true, csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER.String()) {
+		t.Fatal("expected access mode mismatch to fail")
 	}
 }
 
