@@ -605,19 +605,10 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 	// allows publishing to a second target for the same volume.
 	active, scanErr := d.hasActivePublishTargets(volumeID, stagingTarget)
 	if scanErr != nil {
-		return nil, status.Errorf(codes.Internal, "publish state scan: %v", scanErr)
+		return nil, status.Errorf(codes.FailedPrecondition, "publish state scan: %v", scanErr)
 	}
-	if len(active) > 0 {
-		if requestedMode != csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER {
-			return nil, status.Error(codes.FailedPrecondition,
-				"volume already published; SINGLE_NODE_MULTI_WRITER access mode required for multi-target")
-		}
-		for _, a := range active {
-			if a.AccessMode != csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER.String() {
-				return nil, status.Error(codes.FailedPrecondition,
-					"volume already published with incompatible access mode; all targets must use SINGLE_NODE_MULTI_WRITER")
-			}
-		}
+	if err := checkMultiTargetAccess(active, requestedMode); err != nil {
+		return nil, err
 	}
 
 	// Write-before-bind: write pending state first for crash safety.
@@ -1088,6 +1079,26 @@ type publishState struct {
 	AccessMode    string `json:"accessMode,omitempty"` // e.g. "SINGLE_NODE_MULTI_WRITER"
 	Status        string `json:"status,omitempty"`     // "pending" or "published"
 	PublishedAt   string `json:"publishedAt"`
+}
+
+// checkMultiTargetAccess decides whether a new publish target is allowed
+// given the currently active publish states and the requested access mode.
+// Returns nil if allowed, or a FailedPrecondition error if not.
+func checkMultiTargetAccess(active []publishState, requestedMode csi.VolumeCapability_AccessMode_Mode) error {
+	if len(active) == 0 {
+		return nil
+	}
+	if requestedMode != csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER {
+		return status.Error(codes.FailedPrecondition,
+			"volume already published; SINGLE_NODE_MULTI_WRITER access mode required for multi-target")
+	}
+	for _, a := range active {
+		if a.AccessMode != csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER.String() {
+			return status.Error(codes.FailedPrecondition,
+				"volume already published with incompatible access mode; all targets must use SINGLE_NODE_MULTI_WRITER")
+		}
+	}
+	return nil
 }
 
 // applyLegacyDefaults fills in zero-value fields from pre-multi-pod

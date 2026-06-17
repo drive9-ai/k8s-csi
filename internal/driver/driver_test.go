@@ -1650,6 +1650,82 @@ func TestHasActivePublishTargetsLegacyState(t *testing.T) {
 	}
 }
 
+func TestCheckMultiTargetAccessNoActiveAllowed(t *testing.T) {
+	// No active targets — any mode is fine.
+	for _, mode := range []csi.VolumeCapability_AccessMode_Mode{
+		csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+		csi.VolumeCapability_AccessMode_SINGLE_NODE_SINGLE_WRITER,
+		csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER,
+	} {
+		if err := checkMultiTargetAccess(nil, mode); err != nil {
+			t.Fatalf("mode %s with no active: unexpected error %v", mode, err)
+		}
+	}
+}
+
+func TestCheckMultiTargetAccessSingleWriterRejectsSecondTarget(t *testing.T) {
+	active := []publishState{{
+		VolumeID:   "vol-1",
+		AccessMode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER.String(),
+		Status:     publishStatusPublished,
+	}}
+	// Request with SINGLE_NODE_WRITER → reject.
+	err := checkMultiTargetAccess(active, csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("expected FailedPrecondition, got %v", err)
+	}
+}
+
+func TestCheckMultiTargetAccessSingleSingleWriterRejectsSecondTarget(t *testing.T) {
+	active := []publishState{{
+		VolumeID:   "vol-1",
+		AccessMode: csi.VolumeCapability_AccessMode_SINGLE_NODE_SINGLE_WRITER.String(),
+		Status:     publishStatusPublished,
+	}}
+	err := checkMultiTargetAccess(active, csi.VolumeCapability_AccessMode_SINGLE_NODE_SINGLE_WRITER)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("expected FailedPrecondition, got %v", err)
+	}
+}
+
+func TestCheckMultiTargetAccessMultiWriterAllowsSecondTarget(t *testing.T) {
+	active := []publishState{{
+		VolumeID:   "vol-1",
+		AccessMode: csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER.String(),
+		Status:     publishStatusPublished,
+	}}
+	err := checkMultiTargetAccess(active, csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER)
+	if err != nil {
+		t.Fatalf("expected multi-writer to allow second target, got %v", err)
+	}
+}
+
+func TestCheckMultiTargetAccessMixedModesReject(t *testing.T) {
+	// Existing active is SINGLE_NODE_WRITER, request is MULTI_WRITER → reject.
+	active := []publishState{{
+		VolumeID:   "vol-1",
+		AccessMode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER.String(),
+		Status:     publishStatusPublished,
+	}}
+	err := checkMultiTargetAccess(active, csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("expected FailedPrecondition for mixed modes, got %v", err)
+	}
+}
+
+func TestCheckMultiTargetAccessLegacyStateBlocksMultiTarget(t *testing.T) {
+	// Legacy state: AccessMode="" → after applyLegacyDefaults → SINGLE_NODE_WRITER.
+	legacy := publishState{VolumeID: "vol-1"}
+	legacy.applyLegacyDefaults()
+	active := []publishState{legacy}
+
+	// Even with MULTI_WRITER request, legacy state blocks.
+	err := checkMultiTargetAccess(active, csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("expected FailedPrecondition for legacy state blocking multi-target, got %v", err)
+	}
+}
+
 func multiWriterMountCapability() *csi.VolumeCapability {
 	return &csi.VolumeCapability{
 		AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
