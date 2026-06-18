@@ -18,6 +18,10 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
 func TestBuildRemoteRoot(t *testing.T) {
@@ -652,13 +656,19 @@ func TestGRPCHTTPErrorMapsClientAndRetryableStatuses(t *testing.T) {
 }
 
 func TestCreateVolumeDefaultsToWorkspaceRootWithoutMarkers(t *testing.T) {
-	fake := newFakeDrive9(t)
-	defer fake.close()
+	fd := newFakeDrive9(t)
+	defer fd.close()
 
-	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-root", "default", "drive9-secret"),
+		fd.k8sPVC("pvc-other", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
 	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-root",
-		Secrets:            fake.secrets(),
+		Parameters:         pvcParams("pvc-root", "default", nil),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -678,15 +688,22 @@ func TestCreateVolumeDefaultsToWorkspaceRootWithoutMarkers(t *testing.T) {
 	if ctx["drive9VolumeMode"] != "workspace-root" {
 		t.Fatalf("CreateVolume drive9VolumeMode = %q, want workspace-root", ctx["drive9VolumeMode"])
 	}
+	// Verify secret ref is fixated in volume attributes.
+	if ctx[attrSecretName] != "drive9-secret" {
+		t.Fatalf("CreateVolume secretName = %q, want drive9-secret", ctx[attrSecretName])
+	}
+	if ctx[attrSecretNamespace] != "default" {
+		t.Fatalf("CreateVolume secretNamespace = %q, want default", ctx[attrSecretNamespace])
+	}
 	for _, remotePath := range []string{markerPath("/"), indexPath(volumeID), nameIndexPath("pvc-root")} {
-		if fake.exists(remotePath) {
+		if fd.exists(remotePath) {
 			t.Fatalf("workspace root mode should not write CSI metadata path %s", remotePath)
 		}
 	}
 
 	second, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-root",
-		Secrets:            fake.secrets(),
+		Parameters:         pvcParams("pvc-root", "default", nil),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -698,7 +715,7 @@ func TestCreateVolumeDefaultsToWorkspaceRootWithoutMarkers(t *testing.T) {
 
 	other, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-other",
-		Secrets:            fake.secrets(),
+		Parameters:         pvcParams("pvc-other", "default", nil),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -710,27 +727,29 @@ func TestCreateVolumeDefaultsToWorkspaceRootWithoutMarkers(t *testing.T) {
 
 	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
-		Secrets:  fake.secrets(),
+		Secrets:  fd.secrets(),
 	}); err != nil {
 		t.Fatalf("DeleteVolume root mode error = %v", err)
 	}
-	if !fake.exists("/") {
+	if !fd.exists("/") {
 		t.Fatal("DeleteVolume root mode must not delete the Drive9 workspace root")
 	}
 }
 
-func TestCreateVolumeUsesRemoteRootFromSecret(t *testing.T) {
-	fake := newFakeDrive9(t)
-	defer fake.close()
-	fake.mkdir("/team/workspace")
+func TestCreateVolumeUsesRemoteRootFromAnnotation(t *testing.T) {
+	fd := newFakeDrive9(t)
+	defer fd.close()
+	fd.mkdir("/team/workspace")
 
-	secrets := fake.secrets()
-	secrets["remoteRoot"] = "/team/workspace"
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVCWithRemoteRoot("pvc-team", "default", "drive9-secret", "/team/workspace"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
 
-	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
 	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-team",
-		Secrets:            secrets,
+		Parameters:         pvcParams("pvc-team", "default", nil),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -742,16 +761,18 @@ func TestCreateVolumeUsesRemoteRootFromSecret(t *testing.T) {
 }
 
 func TestCreateVolumeRejectsMissingWorkspaceRoot(t *testing.T) {
-	fake := newFakeDrive9(t)
-	defer fake.close()
+	fd := newFakeDrive9(t)
+	defer fd.close()
 
-	secrets := fake.secrets()
-	secrets["remoteRoot"] = "/missing/workspace"
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVCWithRemoteRoot("pvc-missing", "default", "drive9-secret", "/missing/workspace"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
 
-	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
 	_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-missing",
-		Secrets:            secrets,
+		Parameters:         pvcParams("pvc-missing", "default", nil),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if status.Code(err) != codes.FailedPrecondition {
@@ -760,17 +781,18 @@ func TestCreateVolumeRejectsMissingWorkspaceRoot(t *testing.T) {
 }
 
 func TestCreateVolumeRejectsRemoteRootAndPrefixTogether(t *testing.T) {
-	fake := newFakeDrive9(t)
-	defer fake.close()
+	fd := newFakeDrive9(t)
+	defer fd.close()
 
-	secrets := fake.secrets()
-	secrets["remoteRoot"] = "/"
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVCWithRemoteRoot("pvc-conflict", "default", "drive9-secret", "/custom/root"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
 
-	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
 	_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-conflict",
-		Secrets:            secrets,
-		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		Parameters:         pvcParams("pvc-conflict", "default", map[string]string{"remoteRootPrefix": "/k8s/pvc"}),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if status.Code(err) != codes.InvalidArgument {
@@ -779,14 +801,18 @@ func TestCreateVolumeRejectsRemoteRootAndPrefixTogether(t *testing.T) {
 }
 
 func TestCreateDeleteManagedDirectoryVolumeWritesIndexAndMarker(t *testing.T) {
-	fake := newFakeDrive9(t)
-	defer fake.close()
+	fd := newFakeDrive9(t)
+	defer fd.close()
 
-	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-demo", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
 	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-demo",
-		Secrets:            fake.secrets(),
-		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		Parameters:         pvcParams("pvc-demo", "default", map[string]string{"remoteRootPrefix": "/k8s/pvc"}),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -797,52 +823,56 @@ func TestCreateDeleteManagedDirectoryVolumeWritesIndexAndMarker(t *testing.T) {
 	if volumeID == "" || remoteRoot == "" {
 		t.Fatalf("CreateVolume returned volumeID=%q remoteRoot=%q", volumeID, remoteRoot)
 	}
-	if !fake.exists(markerPath(remoteRoot)) {
+	if !fd.exists(markerPath(remoteRoot)) {
 		t.Fatalf("missing root marker %s", markerPath(remoteRoot))
 	}
-	if !fake.exists(indexPath(volumeID)) {
+	if !fd.exists(indexPath(volumeID)) {
 		t.Fatalf("missing index marker %s", indexPath(volumeID))
 	}
-	if !fake.exists(nameIndexPath("pvc-demo")) {
+	if !fd.exists(nameIndexPath("pvc-demo")) {
 		t.Fatalf("missing name index marker %s", nameIndexPath("pvc-demo"))
 	}
 
 	// Write a user file into the managed directory to verify data is preserved.
-	fake.putFile(remoteRoot+"/user-data.txt", []byte("keep me"))
+	fd.putFile(remoteRoot+"/user-data.txt", []byte("keep me"))
 
 	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
-		Secrets:  fake.secrets(),
+		Secrets:  fd.secrets(),
 	}); err != nil {
 		t.Fatalf("DeleteVolume error = %v", err)
 	}
 	// DeleteVolume detaches CSI ownership but preserves Drive9 workspace data.
-	if !fake.exists(remoteRoot) {
+	if !fd.exists(remoteRoot) {
 		t.Fatalf("remote root must be preserved after delete: %s", remoteRoot)
 	}
-	if !fake.existsFile(remoteRoot + "/user-data.txt") {
+	if !fd.existsFile(remoteRoot + "/user-data.txt") {
 		t.Fatal("user data must be preserved after delete")
 	}
-	if fake.exists(markerPath(remoteRoot)) {
+	if fd.exists(markerPath(remoteRoot)) {
 		t.Fatalf("root marker must be removed after delete: %s", markerPath(remoteRoot))
 	}
-	if fake.exists(indexPath(volumeID)) {
+	if fd.exists(indexPath(volumeID)) {
 		t.Fatalf("index must be removed after delete: %s", indexPath(volumeID))
 	}
-	if fake.exists(nameIndexPath("pvc-demo")) {
+	if fd.exists(nameIndexPath("pvc-demo")) {
 		t.Fatalf("name index must be removed after delete: %s", nameIndexPath("pvc-demo"))
 	}
 }
 
 func TestCreateVolumeIsIdempotentByName(t *testing.T) {
-	fake := newFakeDrive9(t)
-	defer fake.close()
+	fd := newFakeDrive9(t)
+	defer fd.close()
 
-	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-same-name", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
 	first, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-same-name",
-		Secrets:            fake.secrets(),
-		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		Parameters:         pvcParams("pvc-same-name", "default", map[string]string{"remoteRootPrefix": "/k8s/pvc"}),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -850,8 +880,7 @@ func TestCreateVolumeIsIdempotentByName(t *testing.T) {
 	}
 	second, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-same-name",
-		Secrets:            fake.secrets(),
-		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		Parameters:         pvcParams("pvc-same-name", "default", map[string]string{"remoteRootPrefix": "/k8s/pvc"}),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -867,24 +896,28 @@ func TestCreateVolumeIsIdempotentByName(t *testing.T) {
 	}
 	_, err = d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-same-name",
-		Secrets:            fake.secrets(),
-		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/other"},
+		Parameters:         pvcParams("pvc-same-name", "default", map[string]string{"remoteRootPrefix": "/k8s/other"}),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if status.Code(err) != codes.AlreadyExists {
 		t.Fatalf("conflicting CreateVolume status = %s, want AlreadyExists (err=%v)", status.Code(err), err)
 	}
-	if fake.exists(conflictingRoot) {
+	if fd.exists(conflictingRoot) {
 		t.Fatalf("conflicting CreateVolume created remote root: %s", conflictingRoot)
 	}
 }
 
 func TestCreateVolumeRecoversFromNameIndexOnly(t *testing.T) {
-	fake := newFakeDrive9(t)
-	defer fake.close()
+	fd := newFakeDrive9(t)
+	defer fd.close()
 
-	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
 	name := "pvc-partial"
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC(name, "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
 	remoteRoot, err := buildRemoteRoot("/k8s/pvc", name)
 	if err != nil {
 		t.Fatalf("build remote root: %v", err)
@@ -897,12 +930,11 @@ func TestCreateVolumeRecoversFromNameIndexOnly(t *testing.T) {
 		Name:       name,
 		RemoteRoot: remoteRoot,
 	}
-	fake.putJSON(nameIndexPath(name), marker)
+	fd.putJSON(nameIndexPath(name), marker)
 
 	resp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               name,
-		Secrets:            fake.secrets(),
-		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		Parameters:         pvcParams(name, "default", map[string]string{"remoteRootPrefix": "/k8s/pvc"}),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -912,20 +944,25 @@ func TestCreateVolumeRecoversFromNameIndexOnly(t *testing.T) {
 		t.Fatalf("recovered volumeID = %q, want %q", resp.GetVolume().GetVolumeId(), volumeID)
 	}
 	for _, remotePath := range []string{remoteRoot, markerPath(remoteRoot), indexPath(volumeID), nameIndexPath(name)} {
-		if !fake.exists(remotePath) {
+		if !fd.exists(remotePath) {
 			t.Fatalf("CreateVolume recovery did not create %s", remotePath)
 		}
 	}
 }
 
 func TestCreateVolumeDefaultRemoteRootIsWorkspaceRoot(t *testing.T) {
-	fake := newFakeDrive9(t)
-	defer fake.close()
+	fd := newFakeDrive9(t)
+	defer fd.close()
 
-	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-default", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
 	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-default",
-		Secrets:            fake.secrets(),
+		Parameters:         pvcParams("pvc-default", "default", nil),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -938,15 +975,19 @@ func TestCreateVolumeDefaultRemoteRootIsWorkspaceRoot(t *testing.T) {
 }
 
 func TestCreateVolumeCreatesRemoteParents(t *testing.T) {
-	fake := newFakeDrive9(t)
-	fake.requireMkdirParents()
-	defer fake.close()
+	fd := newFakeDrive9(t)
+	fd.requireMkdirParents()
+	defer fd.close()
 
-	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-parent-demo", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
 	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-parent-demo",
-		Secrets:            fake.secrets(),
-		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		Parameters:         pvcParams("pvc-parent-demo", "default", map[string]string{"remoteRootPrefix": "/k8s/pvc"}),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -954,19 +995,20 @@ func TestCreateVolumeCreatesRemoteParents(t *testing.T) {
 	}
 	remoteRoot := createResp.GetVolume().GetVolumeContext()["remoteRoot"]
 	for _, remotePath := range []string{"/k8s", "/k8s/pvc", "/k8s/.drive9-csi", metadataRoot, nameIndexRoot, remoteRoot} {
-		if !fake.exists(remotePath) {
+		if !fd.exists(remotePath) {
 			t.Fatalf("expected parent path to exist: %s", remotePath)
 		}
 	}
 }
 
 func TestDeleteVolumeRejectsTamperedRootIndex(t *testing.T) {
-	fake := newFakeDrive9(t)
-	defer fake.close()
+	fd := newFakeDrive9(t)
+	defer fd.close()
 
-	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	k8s := k8sfake.NewSimpleClientset()
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
 	volumeID := volumeIDForRemoteRoot("/")
-	fake.putJSON(indexPath(volumeID), volumeMarker{
+	fd.putJSON(indexPath(volumeID), volumeMarker{
 		Version:    1,
 		Driver:     "csi.drive9.ai",
 		VolumeID:   volumeID,
@@ -975,7 +1017,7 @@ func TestDeleteVolumeRejectsTamperedRootIndex(t *testing.T) {
 	})
 	_, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
-		Secrets:  fake.secrets(),
+		Secrets:  fd.secrets(),
 	})
 	if err == nil {
 		t.Fatal("expected DeleteVolume to reject tampered root index")
@@ -986,14 +1028,18 @@ func TestDeleteVolumeRejectsTamperedRootIndex(t *testing.T) {
 }
 
 func TestDeleteVolumeRejectsTamperedRootMarkerName(t *testing.T) {
-	fake := newFakeDrive9(t)
-	defer fake.close()
+	fd := newFakeDrive9(t)
+	defer fd.close()
 
-	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-delete-safe", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
 	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-delete-safe",
-		Secrets:            fake.secrets(),
-		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		Parameters:         pvcParams("pvc-delete-safe", "default", map[string]string{"remoteRootPrefix": "/k8s/pvc"}),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -1001,7 +1047,7 @@ func TestDeleteVolumeRejectsTamperedRootMarkerName(t *testing.T) {
 	}
 	volumeID := createResp.GetVolume().GetVolumeId()
 	remoteRoot := createResp.GetVolume().GetVolumeContext()["remoteRoot"]
-	fake.putJSON(markerPath(remoteRoot), volumeMarker{
+	fd.putJSON(markerPath(remoteRoot), volumeMarker{
 		Version:    1,
 		Driver:     "csi.drive9.ai",
 		VolumeID:   volumeID,
@@ -1011,25 +1057,29 @@ func TestDeleteVolumeRejectsTamperedRootMarkerName(t *testing.T) {
 
 	_, err = d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
-		Secrets:  fake.secrets(),
+		Secrets:  fd.secrets(),
 	})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("DeleteVolume status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
 	}
-	if !fake.exists(remoteRoot) {
+	if !fd.exists(remoteRoot) {
 		t.Fatalf("DeleteVolume removed remote root despite tampered marker: %s", remoteRoot)
 	}
 }
 
 func TestDeleteVolumePreservesDataAndAllowsRecreate(t *testing.T) {
-	fake := newFakeDrive9(t)
-	defer fake.close()
+	fd := newFakeDrive9(t)
+	defer fd.close()
 
-	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-lifecycle", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
 	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-lifecycle",
-		Secrets:            fake.secrets(),
-		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		Parameters:         pvcParams("pvc-lifecycle", "default", map[string]string{"remoteRootPrefix": "/k8s/pvc"}),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -1039,27 +1089,26 @@ func TestDeleteVolumePreservesDataAndAllowsRecreate(t *testing.T) {
 	remoteRoot := createResp.GetVolume().GetVolumeContext()["remoteRoot"]
 
 	// Simulate user writing data.
-	fake.putFile(remoteRoot+"/important.txt", []byte("do not delete"))
+	fd.putFile(remoteRoot+"/important.txt", []byte("do not delete"))
 
 	// Delete the volume — should only remove CSI metadata.
 	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
-		Secrets:  fake.secrets(),
+		Secrets:  fd.secrets(),
 	}); err != nil {
 		t.Fatalf("DeleteVolume error = %v", err)
 	}
-	if !fake.existsFile(remoteRoot + "/important.txt") {
+	if !fd.existsFile(remoteRoot + "/important.txt") {
 		t.Fatal("user data must survive DeleteVolume")
 	}
-	if fake.exists(indexPath(volumeID)) {
+	if fd.exists(indexPath(volumeID)) {
 		t.Fatal("index must be removed after DeleteVolume")
 	}
 
 	// Recreate the same-name PVC — should succeed and restore CSI ownership.
 	recreateResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-lifecycle",
-		Secrets:            fake.secrets(),
-		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		Parameters:         pvcParams("pvc-lifecycle", "default", map[string]string{"remoteRootPrefix": "/k8s/pvc"}),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -1068,26 +1117,27 @@ func TestDeleteVolumePreservesDataAndAllowsRecreate(t *testing.T) {
 	if recreateResp.GetVolume().GetVolumeId() != volumeID {
 		t.Fatalf("recreated volumeID = %q, want %q", recreateResp.GetVolume().GetVolumeId(), volumeID)
 	}
-	if !fake.exists(markerPath(remoteRoot)) {
+	if !fd.exists(markerPath(remoteRoot)) {
 		t.Fatal("marker must be restored after recreate")
 	}
-	if !fake.existsFile(remoteRoot + "/important.txt") {
+	if !fd.existsFile(remoteRoot + "/important.txt") {
 		t.Fatal("user data must still exist after recreate")
 	}
 }
 
 func TestDeleteVolumeRetryAfterPartialFailure(t *testing.T) {
-	// Simulate a previous DeleteVolume that removed the marker but crashed
-	// before removing the index/name-index.  A retry must succeed (not get
-	// stuck on missing marker) and clean up the remaining metadata.
-	fake := newFakeDrive9(t)
-	defer fake.close()
+	fd := newFakeDrive9(t)
+	defer fd.close()
 
-	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-partial", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
 	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-partial",
-		Secrets:            fake.secrets(),
-		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		Parameters:         pvcParams("pvc-partial", "default", map[string]string{"remoteRootPrefix": "/k8s/pvc"}),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -1097,52 +1147,51 @@ func TestDeleteVolumeRetryAfterPartialFailure(t *testing.T) {
 	remoteRoot := createResp.GetVolume().GetVolumeContext()["remoteRoot"]
 
 	// Simulate partial previous delete: marker removed, index/name-index still present.
-	fake.removeFile(markerPath(remoteRoot))
-	if fake.exists(markerPath(remoteRoot)) {
+	fd.removeFile(markerPath(remoteRoot))
+	if fd.exists(markerPath(remoteRoot)) {
 		t.Fatal("precondition: marker should be gone")
 	}
-	if !fake.exists(indexPath(volumeID)) {
+	if !fd.exists(indexPath(volumeID)) {
 		t.Fatal("precondition: index should still exist")
 	}
-	if !fake.exists(nameIndexPath("pvc-partial")) {
+	if !fd.exists(nameIndexPath("pvc-partial")) {
 		t.Fatal("precondition: name-index should still exist")
 	}
-	if !fake.exists(remoteRoot) {
+	if !fd.exists(remoteRoot) {
 		t.Fatal("precondition: remoteRoot should still exist")
 	}
 
 	// Retry DeleteVolume — must succeed, not get stuck.
 	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
-		Secrets:  fake.secrets(),
+		Secrets:  fd.secrets(),
 	}); err != nil {
 		t.Fatalf("retry DeleteVolume error = %v (stuck on missing marker)", err)
 	}
-	if fake.exists(indexPath(volumeID)) {
+	if fd.exists(indexPath(volumeID)) {
 		t.Fatal("index must be removed after retry")
 	}
-	if fake.exists(nameIndexPath("pvc-partial")) {
+	if fd.exists(nameIndexPath("pvc-partial")) {
 		t.Fatal("name-index must be removed after retry")
 	}
-	if !fake.exists(remoteRoot) {
+	if !fd.exists(remoteRoot) {
 		t.Fatal("remoteRoot must be preserved")
 	}
 }
 
 func TestDeleteVolumeTransientNameIndexFailureRetry(t *testing.T) {
-	// Regression test: proves the deletion order (name-index → index →
-	// marker) is correct.  With the old order (index → name-index), the
-	// first attempt would delete index successfully, then fail on
-	// name-index.  Retry would see index NotFound → idempotent success,
-	// leaving a stale name-index.  This test catches that.
-	fake := newFakeDrive9(t)
-	defer fake.close()
+	fd := newFakeDrive9(t)
+	defer fd.close()
 
-	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-transient", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
 	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-transient",
-		Secrets:            fake.secrets(),
-		Parameters:         map[string]string{"remoteRootPrefix": "/k8s/pvc"},
+		Parameters:         pvcParams("pvc-transient", "default", map[string]string{"remoteRootPrefix": "/k8s/pvc"}),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -1151,21 +1200,21 @@ func TestDeleteVolumeTransientNameIndexFailureRetry(t *testing.T) {
 	volumeID := createResp.GetVolume().GetVolumeId()
 	remoteRoot := createResp.GetVolume().GetVolumeContext()["remoteRoot"]
 
-	fake.putFile(remoteRoot+"/data.txt", []byte("keep"))
+	fd.putFile(remoteRoot+"/data.txt", []byte("keep"))
 
 	// Inject a one-shot transient failure on name-index DELETE.
-	fake.failDeleteOnce(nameIndexPath("pvc-transient"), 1)
+	fd.failDeleteOnce(nameIndexPath("pvc-transient"), 1)
 
 	// First DeleteVolume attempt — should fail on name-index transient error.
 	_, err = d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
-		Secrets:  fake.secrets(),
+		Secrets:  fd.secrets(),
 	})
 	if err == nil {
 		t.Fatal("expected DeleteVolume to fail on transient name-index error")
 	}
 	// With correct ordering (name-index first), index should still exist.
-	if !fake.exists(indexPath(volumeID)) {
+	if !fd.exists(indexPath(volumeID)) {
 		t.Fatal("index must still exist after name-index transient failure — " +
 			"if index is gone, deletion order is wrong (index deleted before name-index)")
 	}
@@ -1173,20 +1222,20 @@ func TestDeleteVolumeTransientNameIndexFailureRetry(t *testing.T) {
 	// Retry — transient error cleared, should succeed and clean everything.
 	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
-		Secrets:  fake.secrets(),
+		Secrets:  fd.secrets(),
 	}); err != nil {
 		t.Fatalf("retry DeleteVolume error = %v", err)
 	}
-	if fake.exists(indexPath(volumeID)) {
+	if fd.exists(indexPath(volumeID)) {
 		t.Fatal("index must be removed after retry")
 	}
-	if fake.exists(nameIndexPath("pvc-transient")) {
+	if fd.exists(nameIndexPath("pvc-transient")) {
 		t.Fatal("name-index must be removed after retry")
 	}
-	if !fake.existsFile(remoteRoot + "/data.txt") {
+	if !fd.existsFile(remoteRoot + "/data.txt") {
 		t.Fatal("user data must be preserved")
 	}
-	if !fake.exists(remoteRoot) {
+	if !fd.exists(remoteRoot) {
 		t.Fatal("remoteRoot must be preserved")
 	}
 }
@@ -1294,6 +1343,59 @@ func (f *fakeDrive9) secrets() map[string]string {
 		"server": f.server.URL,
 		"apiKey": "test-key",
 	}
+}
+
+// k8sSecret returns a Kubernetes Secret object containing Drive9 credentials.
+func (f *fakeDrive9) k8sSecret(name, namespace string) *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Data: map[string][]byte{
+			"server": []byte(f.server.URL),
+			"apiKey": []byte("test-key"),
+		},
+	}
+}
+
+// k8sPVC returns a PVC with drive9.ai/secret-name annotation.
+func (f *fakeDrive9) k8sPVC(pvcName, namespace, secretName string) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: namespace,
+			Annotations: map[string]string{
+				annotationSecretName: secretName,
+			},
+		},
+	}
+}
+
+// k8sPVCWithRemoteRoot returns a PVC with both secret-name and remote-root annotations.
+func (f *fakeDrive9) k8sPVCWithRemoteRoot(pvcName, namespace, secretName, remoteRoot string) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: namespace,
+			Annotations: map[string]string{
+				annotationSecretName: secretName,
+				annotationRemoteRoot: remoteRoot,
+			},
+		},
+	}
+}
+
+// pvcParams returns CreateVolume parameters with PVC metadata for the given PVC.
+func pvcParams(pvcName, namespace string, extra map[string]string) map[string]string {
+	params := map[string]string{
+		paramPVCName:      pvcName,
+		paramPVCNamespace: namespace,
+	}
+	for k, v := range extra {
+		params[k] = v
+	}
+	return params
 }
 
 func (f *fakeDrive9) exists(remotePath string) bool {
@@ -1742,15 +1844,21 @@ func TestCheckMultiTargetAccessLegacyStateBlocksMultiTarget(t *testing.T) {
 // independent volumes with independent delete lifecycles.  This is the
 // unit-level analog of the one-pod multi-PVC e2e test.
 func TestCreateVolumeTwoPVCsIndependentLifecycle(t *testing.T) {
-	fake := newFakeDrive9(t)
-	defer fake.close()
+	fd := newFakeDrive9(t)
+	defer fd.close()
 
-	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("workspace-a", "default", "secret-a"),
+		fd.k8sPVC("workspace-b", "default", "secret-b"),
+		fd.k8sSecret("secret-a", "default"),
+		fd.k8sSecret("secret-b", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
 
 	// Create two workspace-root PVCs (different names, same workspace root).
 	respA, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "workspace-a",
-		Secrets:            fake.secrets(),
+		Parameters:         pvcParams("workspace-a", "default", nil),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -1758,7 +1866,7 @@ func TestCreateVolumeTwoPVCsIndependentLifecycle(t *testing.T) {
 	}
 	respB, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "workspace-b",
-		Secrets:            fake.secrets(),
+		Parameters:         pvcParams("workspace-b", "default", nil),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -1773,11 +1881,18 @@ func TestCreateVolumeTwoPVCsIndependentLifecycle(t *testing.T) {
 	if !isWorkspaceRootVolumeID(volA) || !isWorkspaceRootVolumeID(volB) {
 		t.Fatalf("both must be workspace root volumes: A=%q B=%q", volA, volB)
 	}
+	// Verify different Secrets are fixated.
+	if respA.GetVolume().GetVolumeContext()[attrSecretName] != "secret-a" {
+		t.Fatalf("workspace-a secretName = %q, want secret-a", respA.GetVolume().GetVolumeContext()[attrSecretName])
+	}
+	if respB.GetVolume().GetVolumeContext()[attrSecretName] != "secret-b" {
+		t.Fatalf("workspace-b secretName = %q, want secret-b", respB.GetVolume().GetVolumeContext()[attrSecretName])
+	}
 
 	// Delete A — B must remain functional.
 	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volA,
-		Secrets:  fake.secrets(),
+		Secrets:  fd.secrets(),
 	}); err != nil {
 		t.Fatalf("DeleteVolume workspace-a error = %v", err)
 	}
@@ -1785,7 +1900,7 @@ func TestCreateVolumeTwoPVCsIndependentLifecycle(t *testing.T) {
 	// Idempotent re-create of B must succeed with the same volumeID.
 	respB2, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "workspace-b",
-		Secrets:            fake.secrets(),
+		Parameters:         pvcParams("workspace-b", "default", nil),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -1798,13 +1913,13 @@ func TestCreateVolumeTwoPVCsIndependentLifecycle(t *testing.T) {
 	// Delete B.
 	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volB,
-		Secrets:  fake.secrets(),
+		Secrets:  fd.secrets(),
 	}); err != nil {
 		t.Fatalf("DeleteVolume workspace-b error = %v", err)
 	}
 
 	// Workspace root must survive both deletions.
-	if !fake.exists("/") {
+	if !fd.exists("/") {
 		t.Fatal("workspace root must not be deleted after both PVCs are removed")
 	}
 }
@@ -1813,29 +1928,30 @@ func TestCreateVolumeTwoPVCsIndependentLifecycle(t *testing.T) {
 // the same API key but different remoteRoot values produce volumes that
 // point to different mount paths.
 func TestCreateVolumeTwoPVCsDifferentRemoteRoots(t *testing.T) {
-	fake := newFakeDrive9(t)
-	defer fake.close()
-	fake.mkdir("/projects/alpha")
-	fake.mkdir("/projects/beta")
+	fd := newFakeDrive9(t)
+	defer fd.close()
+	fd.mkdir("/projects/alpha")
+	fd.mkdir("/projects/beta")
 
-	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVCWithRemoteRoot("pvc-alpha", "default", "drive9-secret", "/projects/alpha"),
+		fd.k8sPVCWithRemoteRoot("pvc-beta", "default", "drive9-secret", "/projects/beta"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
 
-	secretsA := fake.secrets()
-	secretsA["remoteRoot"] = "/projects/alpha"
 	respA, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-alpha",
-		Secrets:            secretsA,
+		Parameters:         pvcParams("pvc-alpha", "default", nil),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
 		t.Fatalf("CreateVolume alpha error = %v", err)
 	}
 
-	secretsB := fake.secrets()
-	secretsB["remoteRoot"] = "/projects/beta"
 	respB, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name:               "pvc-beta",
-		Secrets:            secretsB,
+		Parameters:         pvcParams("pvc-beta", "default", nil),
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
 	if err != nil {
@@ -1852,6 +1968,97 @@ func TestCreateVolumeTwoPVCsDifferentRemoteRoots(t *testing.T) {
 	}
 	if respB.GetVolume().GetVolumeContext()["remoteRoot"] != "/projects/beta" {
 		t.Fatalf("beta remoteRoot = %q, want /projects/beta", respB.GetVolume().GetVolumeContext()["remoteRoot"])
+	}
+}
+
+// --- PVC Annotation Tests ---
+
+func TestCreateVolumeRejectsMissingAnnotation(t *testing.T) {
+	fd := newFakeDrive9(t)
+	defer fd.close()
+
+	// PVC without drive9.ai/secret-name annotation.
+	k8s := k8sfake.NewSimpleClientset(&corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pvc-no-ann",
+			Namespace: "default",
+		},
+	})
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
+	_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-no-ann",
+		Parameters:         pvcParams("pvc-no-ann", "default", nil),
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument for missing annotation, got %v", err)
+	}
+	msg := status.Convert(err).Message()
+	if !strings.Contains(msg, annotationSecretName) {
+		t.Fatalf("error message should mention %q, got: %s", annotationSecretName, msg)
+	}
+}
+
+func TestCreateVolumeRejectsSecretNotFound(t *testing.T) {
+	fd := newFakeDrive9(t)
+	defer fd.close()
+
+	// PVC references a Secret that doesn't exist.
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-bad-secret", "default", "nonexistent-secret"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
+	_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-bad-secret",
+		Parameters:         pvcParams("pvc-bad-secret", "default", nil),
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err == nil {
+		t.Fatal("expected error for missing Secret")
+	}
+}
+
+func TestCreateVolumeRejectsMissingPVCMetadata(t *testing.T) {
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8sfake.NewSimpleClientset()}
+
+	// No PVC metadata params (no --extra-create-metadata).
+	_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-no-meta",
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument for missing PVC metadata, got %v", err)
+	}
+}
+
+func TestCreateVolumePVAttributesNoAPIKey(t *testing.T) {
+	fd := newFakeDrive9(t)
+	defer fd.close()
+
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-safe", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-safe",
+		Parameters:         pvcParams("pvc-safe", "default", nil),
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	ctx := createResp.GetVolume().GetVolumeContext()
+	// Verify no credential data leaked into PV attributes.
+	if err := validateNoAPIKeyInAttributes(ctx); err != nil {
+		t.Fatalf("PV attributes contain credentials: %v", err)
+	}
+	// Verify secret reference IS present.
+	if ctx[attrSecretName] == "" || ctx[attrSecretNamespace] == "" {
+		t.Fatal("PV attributes must contain secretName and secretNamespace")
 	}
 }
 

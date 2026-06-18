@@ -55,3 +55,25 @@ roleRef:
   kind: ClusterRole
   name: drive9-csi-controller
   apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: drive9-csi-node
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: drive9-csi-node
+subjects:
+  - kind: ServiceAccount
+    name: drive9-csi-node
+    namespace: drive9-csi
+roleRef:
+  kind: ClusterRole
+  name: drive9-csi-node
+  apiGroup: rbac.authorization.k8s.io
