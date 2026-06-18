@@ -154,6 +154,8 @@ kind: PersistentVolumeClaim
 metadata:
   name: drive9-workspace-e2e
   namespace: $test_namespace
+  annotations:
+    drive9.ai/secret-name: drive9-csi-drive9-workspace-e2e
 spec:
   accessModes:
     - ReadWriteOnce
@@ -237,6 +239,8 @@ kind: PersistentVolumeClaim
 metadata:
   name: drive9-workspace-e2e-b
   namespace: $test_namespace
+  annotations:
+    drive9.ai/secret-name: drive9-csi-drive9-workspace-e2e-b
 spec:
   accessModes:
     - ReadWriteOnce
