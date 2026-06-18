@@ -105,21 +105,28 @@ func extractPVCRef(params map[string]string) (name, namespace string, err error)
 	return name, namespace, nil
 }
 
-// remoteRootFromAnnotationOrSecret returns the remote root to use for
-// volume creation. Priority: PVC annotation > Secret > default "/".
-func remoteRootFromAnnotationOrSecret(ref pvcSecretRef, secrets map[string]string) string {
-	if ref.RemoteRoot != "" && ref.RemoteRoot != defaultRemoteRoot {
-		return ref.RemoteRoot
+// resolveSecretRefFromPV looks up a PersistentVolume by its CSI volumeHandle
+// and returns the Secret reference stored in its volumeAttributes. This is
+// used by DeleteVolume, which only receives volumeID — no volumeContext.
+func resolveSecretRefFromPV(ctx context.Context, k8s kubernetes.Interface, volumeID string) (secretName, secretNamespace string, err error) {
+	pvList, err := k8s.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return "", "", status.Errorf(codes.Internal, "list PVs to resolve Secret for volume %s: %v", volumeID, err)
 	}
-	fromSecret := strings.TrimSpace(firstNonEmpty(
-		secrets["remoteRoot"],
-		secrets["remote_root"],
-		secrets["DRIVE9_REMOTE_ROOT"],
-	))
-	if fromSecret != "" {
-		return fromSecret
+	for i := range pvList.Items {
+		pv := &pvList.Items[i]
+		csiSource := pv.Spec.CSI
+		if csiSource == nil || csiSource.VolumeHandle != volumeID {
+			continue
+		}
+		name := strings.TrimSpace(csiSource.VolumeAttributes[attrSecretName])
+		ns := strings.TrimSpace(csiSource.VolumeAttributes[attrSecretNamespace])
+		if name != "" && ns != "" {
+			return name, ns, nil
+		}
 	}
-	return ref.RemoteRoot
+	return "", "", status.Errorf(codes.FailedPrecondition,
+		"no PV with CSI volumeHandle %q found with Secret reference in volumeAttributes", volumeID)
 }
 
 // validateNoAPIKeyInAttributes checks that volumeAttributes do not

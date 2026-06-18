@@ -7,7 +7,7 @@ It intentionally ships a small stable surface first:
 - PVCs mount the Drive9 workspace root selected by the per-PVC API key by default.
 - Optional managed directory volumes backed by Drive9 remote paths.
 - `ReadWriteOnce` by default. `SINGLE_NODE_MULTI_WRITER` supported for same-node multi-pod access.
-- API key passed through Kubernetes CSI Secrets only.
+- Credentials are resolved from PVC annotation `drive9.ai/secret-name` → Kubernetes Secret.
 - Default workspace-root volumes do not create or delete Drive9 workspace data.
 - Managed directory volumes write a marker file.
 - `DeleteVolume` detaches CSI ownership only: it removes CSI metadata (marker, index, name index) but never deletes Drive9 workspace data.
@@ -29,7 +29,7 @@ Put Drive9 credentials in a Kubernetes Secret:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: drive9-csi-drive9-workspace
+  name: drive9-workspace-secret
 type: Opaque
 stringData:
   server: https://api.drive9.ai
@@ -37,26 +37,33 @@ stringData:
 ```
 
 Create this Secret in the workload namespace before creating the matching PVC.
-With the default `StorageClass`, a PVC named `drive9-workspace` uses Secret
-`drive9-csi-drive9-workspace` in the same namespace and mounts the root of the
-Drive9 workspace selected by that API key. This lets one namespace create many
-PVCs backed by different Drive9 API keys or workspaces without requiring one
-cluster-scoped `StorageClass` per workspace.
+Each PVC specifies which Secret to use via the `drive9.ai/secret-name`
+annotation. The PVC and Secret must be in the same namespace. This lets one
+namespace create many PVCs backed by different Drive9 API keys or workspaces
+without requiring one cluster-scoped `StorageClass` per workspace.
 
-The optional Secret key `remoteRoot` can mount an existing subpath of that
-workspace instead of `/`. Omit it for the normal workspace-root behavior.
+The optional PVC annotation `drive9.ai/remote-root` can mount an existing
+subpath of that workspace instead of `/`. Omit it for the normal workspace-root
+behavior.
 
-For the CSI path, do not put API keys in `StorageClass.parameters`, PV attributes, pod env, or annotations. The example `StorageClass` uses CSI secret references so Kubernetes passes the namespace-local secret to `CreateVolume`, `DeleteVolume`, and `NodeStageVolume`.
+Credentials are never stored in StorageClass parameters, PV attributes, pod env,
+or volume parameters. The driver resolves them at runtime:
+- `CreateVolume`: reads PVC annotation → fetches Secret via K8s client
+- `NodeStageVolume`: reads Secret reference from PV volumeAttributes (fixated
+  during CreateVolume, contains only Secret name/namespace — not the API key)
+- `DeleteVolume`: looks up PV by volumeHandle → reads Secret reference from
+  volumeAttributes → fetches Secret
+
+If the required `drive9.ai/secret-name` annotation is missing, `CreateVolume`
+fails closed with `InvalidArgument` — there is no implicit fallback.
 
 The sidecar fallback necessarily injects the secret into the mounter sidecar environment. Use CSI for production when the customer can install a node plugin.
 
 The node plugin needs privileged FUSE access. Treat it like other node storage plugins: restrict who can modify its DaemonSet and workload namespace Secrets.
 
-The controller service account needs `get` access to Secrets so the CSI
-provisioner can resolve per-PVC credentials. Kubernetes RBAC cannot constrain
-`resourceNames` with the `drive9-csi-${pvc.name}` template, so the default RBAC
-does not grant `list` or `watch`, but it also cannot restrict reads to one fixed
-Secret name.
+Both the controller and node service accounts need `get` access to Secrets so
+the driver can resolve per-PVC credentials at provision and mount time. The
+default RBAC does not grant `list` or `watch` beyond what is needed.
 
 The default workspace-root mode does not write CSI metadata into the Drive9
 workspace and `DeleteVolume` is a no-op for Drive9 data. If you opt into managed
@@ -103,18 +110,16 @@ kubectl apply -f deploy/kubernetes/namespace.yaml
 kubectl apply -k deploy/kubernetes
 ```
 
-Create a Drive9 Secret in the workload namespace before creating each PVC. The
-default Secret name is `drive9-csi-<pvc-name>`. The API key selects the Drive9
-workspace, and the PVC mounts that workspace root:
+Create a Drive9 Secret in the workload namespace before creating each PVC:
 
 ```sh
-kubectl -n default create secret generic drive9-csi-drive9-workspace \
+kubectl -n default create secret generic drive9-workspace-secret \
   --from-literal=server=https://api.drive9.ai \
   --from-literal=apiKey=drive9_api_key_redacted \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Create a PVC:
+Create a PVC with the `drive9.ai/secret-name` annotation pointing to the Secret:
 
 ```sh
 kubectl apply -f deploy/examples/kubernetes/pvc.example.yaml
@@ -160,7 +165,7 @@ The default example `StorageClass` uses `Retain`, so deleting the PVC keeps the
 PV and Drive9 workspace data for safety. Even with `reclaimPolicy: Delete`, the
 default workspace-root mode does not delete Drive9 workspace data.
 
-Example Secret, PVC, and smoke Pod manifests live under `deploy/examples/kubernetes/` so that applying `deploy/kubernetes/` does not create placeholder credentials or demo workloads in production clusters. Apply the example Secret with `kubectl -n <workload-namespace> apply -f deploy/examples/kubernetes/secret.example.yaml` after replacing the API key. For another PVC, copy the Secret and name it `drive9-csi-<pvc-name>`.
+Example Secret, PVC, and smoke Pod manifests live under `deploy/examples/kubernetes/` so that applying `deploy/kubernetes/` does not create placeholder credentials or demo workloads in production clusters. Apply the example Secret with `kubectl -n <workload-namespace> apply -f deploy/examples/kubernetes/secret.example.yaml` after replacing the API key. Each PVC references its Secret via the `drive9.ai/secret-name` annotation — multiple PVCs can share a Secret or use different ones.
 
 ## StorageClass
 
@@ -170,13 +175,14 @@ Default example:
 provisioner: csi.drive9.ai
 parameters:
   profile: coding-agent
-  csi.storage.k8s.io/provisioner-secret-name: drive9-csi-${pvc.name}
-  csi.storage.k8s.io/provisioner-secret-namespace: ${pvc.namespace}
-  csi.storage.k8s.io/node-stage-secret-name: drive9-csi-${pvc.name}
-  csi.storage.k8s.io/node-stage-secret-namespace: ${pvc.namespace}
 reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer
 ```
+
+The StorageClass does **not** contain any secret template parameters. Credentials
+are resolved from PVC annotations, not StorageClass templates. This avoids the
+implicit `drive9-csi-${pvc.name}` naming convention and makes the Secret binding
+explicit and auditable.
 
 `Retain` is the default example because this is customer data. If a customer
 wants a PVC to mount a CSI-managed subdirectory instead of the Drive9 workspace
@@ -194,9 +200,9 @@ that prefix and writes CSI metadata. If that separate `StorageClass` uses
 matching metadata index entry and a matching `.drive9-csi-volume.json` marker.
 
 If you use `reclaimPolicy: Delete`, keep the per-PVC workload namespace Secret in
-place until Kubernetes has deleted the PV. If the namespace or Secret is removed
-first, the CSI sidecar cannot pass credentials to `DeleteVolume`, and backend
-cleanup will require manual intervention.
+place until Kubernetes has deleted the PV. If the Secret is removed first,
+`DeleteVolume` cannot resolve credentials and backend cleanup will require manual
+intervention.
 
 ## Sidecar Fallback
 
@@ -247,9 +253,9 @@ hack/e2e-k8s.sh
 
 The script intentionally requires `DRIVE9_CSI_E2E_CONFIRM=1` because it mutates
 the current Kubernetes context. It deploys the CSI driver into an isolated
-`drive9-csi-e2e-driver` namespace, creates Secret
-`drive9-csi-drive9-workspace-e2e` in `drive9-csi-e2e`, creates PVC
-`drive9-workspace-e2e`, mounts it into one pod, writes and reads a file, deletes
+`drive9-csi-e2e-driver` namespace, creates a Secret in `drive9-csi-e2e`, creates
+PVC `drive9-workspace-e2e` with the `drive9.ai/secret-name` annotation, mounts
+it into one pod, writes and reads a file, deletes
 that pod, remounts the same PVC into a second pod, reads the same token again,
 then runs a multi-pod same-node concurrent test: keeps the second pod running,
 launches a third pod pinned to the same node, verifies cross-pod read, deletes
@@ -271,18 +277,16 @@ or digest for customer evidence.
 
 ## Multiple Workspaces per Namespace
 
-The default `StorageClass` uses `drive9-csi-${pvc.name}` to resolve per-PVC
-credentials. Each PVC maps to exactly one Drive9 workspace via its own Secret.
-This is intentional for multi-workspace scenarios: different PVCs can use
-different API keys (and therefore different workspaces) without requiring
-multiple StorageClasses.
+Each PVC maps to exactly one Drive9 workspace via its `drive9.ai/secret-name`
+annotation. Different PVCs can point to different Secrets (and therefore
+different API keys / workspaces) without requiring multiple StorageClasses.
 
 To mount multiple workspaces in one namespace, create one Secret + PVC pair per
 workspace:
 
 ```sh
-# Workspace A
-kubectl -n myapp create secret generic drive9-csi-workspace-a \
+# Secret for workspace A
+kubectl -n myapp create secret generic secret-workspace-a \
   --from-literal=server=https://api.drive9.ai \
   --from-literal=apiKey=<api-key-for-workspace-a>
 
@@ -292,6 +296,8 @@ kind: PersistentVolumeClaim
 metadata:
   name: workspace-a
   namespace: myapp
+  annotations:
+    drive9.ai/secret-name: secret-workspace-a
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: drive9-rwo
@@ -300,8 +306,8 @@ spec:
       storage: 1Gi
 EOF
 
-# Workspace B
-kubectl -n myapp create secret generic drive9-csi-workspace-b \
+# Secret for workspace B
+kubectl -n myapp create secret generic secret-workspace-b \
   --from-literal=server=https://api.drive9.ai \
   --from-literal=apiKey=<api-key-for-workspace-b>
 
@@ -311,6 +317,8 @@ kind: PersistentVolumeClaim
 metadata:
   name: workspace-b
   namespace: myapp
+  annotations:
+    drive9.ai/secret-name: secret-workspace-b
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: drive9-rwo
@@ -319,6 +327,8 @@ spec:
       storage: 1Gi
 EOF
 ```
+
+Multiple PVCs can also share the same Secret if they use the same API key.
 
 A single pod can mount both PVCs:
 
@@ -341,31 +351,31 @@ volumes:
 
 ## Troubleshooting
 
-**PVC stuck in Pending with `failed to provision volume` or Secret not found:**
+**PVC stuck in Pending with `failed to provision volume` or `missing required annotation`:**
 
-The CSI provisioner resolves the Secret name from the StorageClass template
-`drive9-csi-${pvc.name}`. If you created a PVC named `my-data`, the provisioner
-looks for Secret `drive9-csi-my-data` in the PVC's namespace. Create it:
+The driver reads the `drive9.ai/secret-name` annotation from the PVC. If your
+PVC does not have this annotation, `CreateVolume` will reject it. Add the
+annotation:
+
+```yaml
+metadata:
+  annotations:
+    drive9.ai/secret-name: my-drive9-secret
+```
+
+Then make sure the named Secret exists in the same namespace:
 
 ```sh
-kubectl -n <namespace> create secret generic drive9-csi-my-data \
+kubectl -n <namespace> create secret generic my-drive9-secret \
   --from-literal=server=https://api.drive9.ai \
   --from-literal=apiKey=<your-api-key>
 ```
 
 **Multiple PVCs sharing the same API key:**
 
-Each PVC still needs its own Secret (e.g. `drive9-csi-pvc-1`, `drive9-csi-pvc-2`)
-even if the API key is identical. This is a CSI StorageClass template limitation.
-For scripted provisioning, loop over PVC names:
-
-```sh
-for name in pvc-1 pvc-2 pvc-3; do
-  kubectl -n myapp create secret generic "drive9-csi-$name" \
-    --from-literal=server=https://api.drive9.ai \
-    --from-literal=apiKey="$DRIVE9_API_KEY"
-done
-```
+Multiple PVCs can reference the same Secret by name. Just set the same
+`drive9.ai/secret-name` annotation value on each PVC. No per-PVC Secret naming
+convention is required.
 
 ## GHCR Visibility
 

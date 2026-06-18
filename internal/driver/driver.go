@@ -247,6 +247,11 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 		return nil, err
 	}
 
+	// Safety check: credentials must never leak into volume parameters.
+	if err := validateNoAPIKeyInAttributes(params); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	}
+
 	remoteRoot, managedVolume, err := resolveCreateVolumeRemoteRoot(name, params, ref)
 	if err != nil {
 		return nil, err
@@ -265,11 +270,11 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 			VolumeId:      volumeID,
 			CapacityBytes: requestedCapacity(req.GetCapacityRange()),
 			VolumeContext: map[string]string{
-				"drive9VolumeMode": "workspace-root",
-				"remoteRoot":       remoteRoot,
-				"volumeName":       name,
-				"profile":          params["profile"],
-				attrSecretName:     ref.SecretName,
+				"drive9VolumeMode":  "workspace-root",
+				"remoteRoot":        remoteRoot,
+				"volumeName":        name,
+				"profile":           params["profile"],
+				attrSecretName:      ref.SecretName,
 				attrSecretNamespace: ref.SecretNamespace,
 			},
 		},
@@ -350,14 +355,17 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 	if volumeID == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume id is required")
 	}
-	// Resolve credentials: try req.GetSecrets() first (StorageClass delete-secret),
-	// then fall back to PV volumeAttributes Secret reference via K8s client.
+	// Workspace-root volumes have no CSI metadata — DeleteVolume is a no-op.
+	if isWorkspaceRootVolumeID(volumeID) {
+		return &csi.DeleteVolumeResponse{}, nil
+	}
+
+	// Resolve credentials: try req.GetSecrets() first (legacy StorageClass
+	// delete-secret template), then look up the PV by volumeHandle to read
+	// the Secret reference from volumeAttributes.
 	creds, err := d.resolveDeleteCredentials(ctx, req)
 	if err != nil {
 		return nil, err
-	}
-	if isWorkspaceRootVolumeID(volumeID) {
-		return &csi.DeleteVolumeResponse{}, nil
 	}
 	client := newDrive9Client(creds)
 	marker, err := client.readMarker(ctx, indexPath(volumeID))
@@ -798,25 +806,22 @@ func resolveCreateVolumeRemoteRoot(name string, params map[string]string, ref pv
 }
 
 // resolveDeleteCredentials resolves Drive9 credentials for DeleteVolume.
-// It reads the Secret referenced in the volume's PV attributes. Falls back
-// to req.GetSecrets() if the PV attributes are unavailable (e.g. legacy PVs).
+// It first tries req.GetSecrets() (legacy StorageClass delete-secret template),
+// then looks up the PV by volumeHandle to read the Secret reference from
+// volumeAttributes (the annotation-based flow).
 func (d *Driver) resolveDeleteCredentials(ctx context.Context, req *csi.DeleteVolumeRequest) (drive9Credentials, error) {
-	secretName := strings.TrimSpace(req.GetSecrets()[attrSecretName])
-	secretNamespace := strings.TrimSpace(req.GetSecrets()[attrSecretNamespace])
-
-	// If secrets were provided directly (e.g. legacy StorageClass template),
-	// try to parse them as credentials first.
+	// Legacy path: StorageClass delete-secret template provided credentials directly.
 	if creds, err := credentialsFromSecrets(req.GetSecrets()); err == nil {
 		return creds, nil
 	}
 
-	// Otherwise, use the Secret reference if provided as secrets metadata.
-	if secretName != "" && secretNamespace != "" {
-		return readCredentialsFromSecret(ctx, d.k8s, secretName, secretNamespace)
+	// Annotation-based path: look up PV by volumeHandle to get the Secret
+	// reference from volumeAttributes (fixated during CreateVolume).
+	secretName, secretNamespace, err := resolveSecretRefFromPV(ctx, d.k8s, req.GetVolumeId())
+	if err != nil {
+		return drive9Credentials{}, err
 	}
-
-	return drive9Credentials{}, status.Error(codes.InvalidArgument,
-		"DeleteVolume requires Drive9 credentials: provide via StorageClass delete-secret template or ensure the Secret still exists")
+	return readCredentialsFromSecret(ctx, d.k8s, secretName, secretNamespace)
 }
 
 // resolveNodeStageCredentials resolves Drive9 credentials for NodeStageVolume.
@@ -828,9 +833,8 @@ func (d *Driver) resolveNodeStageCredentials(ctx context.Context, req *csi.NodeS
 	secretNamespace := strings.TrimSpace(volCtx[attrSecretNamespace])
 
 	if secretName == "" || secretNamespace == "" {
-		// Fall back to req.GetSecrets() for backwards compatibility with
-		// volumes created before the annotation-based flow.
-		return credentialsFromSecrets(req.GetSecrets())
+		return drive9Credentials{}, status.Error(codes.InvalidArgument,
+			"volume context missing secretName/secretNamespace; PV was not provisioned with annotation-based Secret binding")
 	}
 
 	return readCredentialsFromSecret(ctx, d.k8s, secretName, secretNamespace)
