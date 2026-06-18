@@ -218,6 +218,66 @@ spec:
 EOF
 }
 
+write_second_pvc() {
+	cat > "$tmp_dir/workload-b.yaml" <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: drive9-csi-drive9-workspace-e2e-b
+  namespace: $test_namespace
+type: Opaque
+stringData:
+  server: |-
+    $DRIVE9_SERVER
+  apiKey: |-
+    $DRIVE9_API_KEY
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: drive9-workspace-e2e-b
+  namespace: $test_namespace
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: $storage_class
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+}
+
+write_multi_pvc_pod() {
+	local pod_name="$1"
+	local target="$2"
+
+	cat > "$target" <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $pod_name
+  namespace: $test_namespace
+spec:
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["/bin/sh", "-c", "sleep 3600"]
+      volumeMounts:
+        - name: workspace-a
+          mountPath: /workspace-a
+        - name: workspace-b
+          mountPath: /workspace-b
+  volumes:
+    - name: workspace-a
+      persistentVolumeClaim:
+        claimName: drive9-workspace-e2e
+    - name: workspace-b
+      persistentVolumeClaim:
+        claimName: drive9-workspace-e2e-b
+EOF
+}
+
 wait_for_pv_deleted() {
 	local pv_name="$1"
 	local attempt
@@ -374,6 +434,56 @@ kubectl -n "$test_namespace" delete pod drive9-csi-e2e-multi \
 info "passed: multi-pod same-node concurrent mount"
 # --- End multi-pod test ---
 
+# --- One-pod multi-PVC test ---
+# One pod mounts two different PVCs backed by two different Secrets
+# (same API key, same workspace root). This validates that the CSI
+# driver handles multiple independent volumes in a single pod.
+info "starting one-pod multi-PVC test"
+
+write_second_pvc
+kubectl apply -f "$tmp_dir/workload-b.yaml" || fail "apply second PVC"
+write_multi_pvc_pod drive9-csi-e2e-multi-pvc "$tmp_dir/pod-multi-pvc.yaml"
+kubectl apply -f "$tmp_dir/pod-multi-pvc.yaml" || fail "apply multi-PVC pod"
+kubectl -n "$test_namespace" wait pod/drive9-csi-e2e-multi-pvc \
+	--for=condition=Ready --timeout=300s || fail "multi-PVC pod ready"
+
+multi_pvc_token_a="drive9-csi-mpvc-a-$(date +%s)"
+multi_pvc_token_b="drive9-csi-mpvc-b-$(date +%s)"
+multi_pvc_file_a=".drive9-csi-mpvc-a-$(date +%s).txt"
+multi_pvc_file_b=".drive9-csi-mpvc-b-$(date +%s).txt"
+
+# Write through PVC-A, read through PVC-B (same workspace root).
+kubectl -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
+	sh -c "printf '%s\n' '$multi_pvc_token_a' > '/workspace-a/$multi_pvc_file_a' && sync" ||
+	fail "multi-PVC: write to PVC-A"
+kubectl -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
+	sh -c "test \"\$(cat '/workspace-b/$multi_pvc_file_a')\" = '$multi_pvc_token_a'" ||
+	fail "multi-PVC: read PVC-A file through PVC-B"
+
+# Write through PVC-B, read through PVC-A.
+kubectl -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
+	sh -c "printf '%s\n' '$multi_pvc_token_b' > '/workspace-b/$multi_pvc_file_b' && sync" ||
+	fail "multi-PVC: write to PVC-B"
+kubectl -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
+	sh -c "test \"\$(cat '/workspace-a/$multi_pvc_file_b')\" = '$multi_pvc_token_b'" ||
+	fail "multi-PVC: read PVC-B file through PVC-A"
+
+# Clean up multi-PVC test files and pod.
+kubectl -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
+	sh -c "rm -f '/workspace-a/$multi_pvc_file_a' '/workspace-a/$multi_pvc_file_b' && sync" ||
+	fail "remove multi-PVC e2e files"
+kubectl -n "$test_namespace" delete pod drive9-csi-e2e-multi-pvc \
+	--wait=true || fail "delete multi-PVC pod"
+
+pv_name_b="$(kubectl -n "$test_namespace" get pvc drive9-workspace-e2e-b \
+	-o jsonpath='{.spec.volumeName}')" || fail "read second PV name"
+[[ "$pv_name_b" != "" ]] || fail "second PVC did not bind a PV"
+kubectl -n "$test_namespace" delete pvc drive9-workspace-e2e-b \
+	--wait=true || fail "delete second PVC"
+wait_for_pv_deleted "$pv_name_b"
+info "passed: one-pod multi-PVC mount"
+# --- End multi-PVC test ---
+
 if [[ "$DRIVE9_REMOTE_ROOT_PREFIX" == "" ]]; then
 	kubectl -n "$test_namespace" delete pvc drive9-workspace-e2e \
 		--wait=true || fail "delete test PVC before recreate"
@@ -403,4 +513,4 @@ kubectl -n "$test_namespace" delete pvc drive9-workspace-e2e \
 	--wait=true || fail "delete test PVC"
 wait_for_pv_deleted "$pv_name"
 
-info "passed: mount/write/read/remount/multi-pod/unpublish/unstage/delete"
+info "passed: mount/write/read/remount/multi-pod/multi-pvc/unpublish/unstage/delete"
