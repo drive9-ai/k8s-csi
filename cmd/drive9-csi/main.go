@@ -6,6 +6,8 @@ import (
 	"os"
 
 	"github.com/drive9-ai/csi/internal/driver"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 func main() {
@@ -18,7 +20,18 @@ func main() {
 	flag.StringVar(&cfg.Drive9Binary, "drive9-binary", envOr("DRIVE9_BINARY", "drive9"), "drive9 CLI binary path")
 	flag.Parse()
 
-	if err := driver.Run(cfg); err != nil {
+	restConfig, err := rest.InClusterConfig()
+	if err != nil {
+		log.Printf("drive9-csi: build in-cluster config: %v", err)
+		os.Exit(1)
+	}
+	k8sClient, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		log.Printf("drive9-csi: create kubernetes client: %v", err)
+		os.Exit(1)
+	}
+
+	if err := driver.Run(cfg, k8sClient); err != nil {
 		log.Printf("drive9-csi: %v", err)
 		os.Exit(1)
 	}

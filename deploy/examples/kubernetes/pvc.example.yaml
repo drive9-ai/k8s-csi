@@ -2,6 +2,9 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: drive9-workspace
+  annotations:
+    drive9.ai/secret-name: drive9-workspace-secret
+    # drive9.ai/remote-root: /            # optional, default "/"
 spec:
   accessModes:
     - ReadWriteOnce
