@@ -806,17 +806,9 @@ func resolveCreateVolumeRemoteRoot(name string, params map[string]string, ref pv
 }
 
 // resolveDeleteCredentials resolves Drive9 credentials for DeleteVolume.
-// It first tries req.GetSecrets() (legacy StorageClass delete-secret template),
-// then looks up the PV by volumeHandle to read the Secret reference from
-// volumeAttributes (the annotation-based flow).
+// It looks up the PV by volumeHandle to read the Secret reference from
+// volumeAttributes (fixated during CreateVolume).
 func (d *Driver) resolveDeleteCredentials(ctx context.Context, req *csi.DeleteVolumeRequest) (drive9Credentials, error) {
-	// Legacy path: StorageClass delete-secret template provided credentials directly.
-	if creds, err := credentialsFromSecrets(req.GetSecrets()); err == nil {
-		return creds, nil
-	}
-
-	// Annotation-based path: look up PV by volumeHandle to get the Secret
-	// reference from volumeAttributes (fixated during CreateVolume).
 	secretName, secretNamespace, err := resolveSecretRefFromPV(ctx, d.k8s, req.GetVolumeId())
 	if err != nil {
 		return drive9Credentials{}, err
