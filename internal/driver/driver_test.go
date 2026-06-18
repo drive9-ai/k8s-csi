@@ -388,15 +388,19 @@ func TestNodeStageVolumeRequiresMatchingRemoteMarker(t *testing.T) {
 	fake := newFakeDrive9(t)
 	defer fake.close()
 
-	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
+	k8s := k8sfake.NewSimpleClientset(fake.k8sSecret("drive9-secret", "default"))
+	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}, k8s: k8s}
 	remoteRoot := "/k8s/pvc/demo"
 	volumeID := volumeIDForRemoteRoot(remoteRoot)
 	req := &csi.NodeStageVolumeRequest{
 		VolumeId:          volumeID,
 		StagingTargetPath: t.TempDir(),
-		VolumeContext:     map[string]string{"remoteRoot": remoteRoot},
-		Secrets:           fake.secrets(),
-		VolumeCapability:  singleNodeMountCapability(),
+		VolumeContext: map[string]string{
+			"remoteRoot":        remoteRoot,
+			attrSecretName:      "drive9-secret",
+			attrSecretNamespace: "default",
+		},
+		VolumeCapability: singleNodeMountCapability(),
 	}
 
 	_, err := d.NodeStageVolume(context.Background(), req)
@@ -727,7 +731,6 @@ func TestCreateVolumeDefaultsToWorkspaceRootWithoutMarkers(t *testing.T) {
 
 	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
-		Secrets:  fd.secrets(),
 	}); err != nil {
 		t.Fatalf("DeleteVolume root mode error = %v", err)
 	}
@@ -836,9 +839,11 @@ func TestCreateDeleteManagedDirectoryVolumeWritesIndexAndMarker(t *testing.T) {
 	// Write a user file into the managed directory to verify data is preserved.
 	fd.putFile(remoteRoot+"/user-data.txt", []byte("keep me"))
 
+	// Simulate external-provisioner creating PV with volumeAttributes.
+	createPVForVolume(t, k8s, createResp, "csi.drive9.ai")
+
 	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
-		Secrets:  fd.secrets(),
 	}); err != nil {
 		t.Fatalf("DeleteVolume error = %v", err)
 	}
@@ -1005,9 +1010,26 @@ func TestDeleteVolumeRejectsTamperedRootIndex(t *testing.T) {
 	fd := newFakeDrive9(t)
 	defer fd.close()
 
-	k8s := k8sfake.NewSimpleClientset()
-	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
 	volumeID := volumeIDForRemoteRoot("/")
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sSecret("drive9-secret", "default"),
+		&corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "pv-tampered"},
+			Spec: corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					CSI: &corev1.CSIPersistentVolumeSource{
+						Driver:       "csi.drive9.ai",
+						VolumeHandle: volumeID,
+						VolumeAttributes: map[string]string{
+							attrSecretName:      "drive9-secret",
+							attrSecretNamespace: "default",
+						},
+					},
+				},
+			},
+		},
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
 	fd.putJSON(indexPath(volumeID), volumeMarker{
 		Version:    1,
 		Driver:     "csi.drive9.ai",
@@ -1017,7 +1039,6 @@ func TestDeleteVolumeRejectsTamperedRootIndex(t *testing.T) {
 	})
 	_, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
-		Secrets:  fd.secrets(),
 	})
 	if err == nil {
 		t.Fatal("expected DeleteVolume to reject tampered root index")
@@ -1055,9 +1076,11 @@ func TestDeleteVolumeRejectsTamperedRootMarkerName(t *testing.T) {
 		RemoteRoot: remoteRoot,
 	})
 
+	// Simulate external-provisioner creating PV with volumeAttributes.
+	createPVForVolume(t, k8s, createResp, "csi.drive9.ai")
+
 	_, err = d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
-		Secrets:  fd.secrets(),
 	})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("DeleteVolume status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
@@ -1091,10 +1114,12 @@ func TestDeleteVolumePreservesDataAndAllowsRecreate(t *testing.T) {
 	// Simulate user writing data.
 	fd.putFile(remoteRoot+"/important.txt", []byte("do not delete"))
 
+	// Simulate external-provisioner creating PV with volumeAttributes.
+	createPVForVolume(t, k8s, createResp, "csi.drive9.ai")
+
 	// Delete the volume — should only remove CSI metadata.
 	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
-		Secrets:  fd.secrets(),
 	}); err != nil {
 		t.Fatalf("DeleteVolume error = %v", err)
 	}
@@ -1146,6 +1171,9 @@ func TestDeleteVolumeRetryAfterPartialFailure(t *testing.T) {
 	volumeID := createResp.GetVolume().GetVolumeId()
 	remoteRoot := createResp.GetVolume().GetVolumeContext()["remoteRoot"]
 
+	// Simulate external-provisioner creating PV with volumeAttributes.
+	createPVForVolume(t, k8s, createResp, "csi.drive9.ai")
+
 	// Simulate partial previous delete: marker removed, index/name-index still present.
 	fd.removeFile(markerPath(remoteRoot))
 	if fd.exists(markerPath(remoteRoot)) {
@@ -1164,7 +1192,6 @@ func TestDeleteVolumeRetryAfterPartialFailure(t *testing.T) {
 	// Retry DeleteVolume — must succeed, not get stuck.
 	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
-		Secrets:  fd.secrets(),
 	}); err != nil {
 		t.Fatalf("retry DeleteVolume error = %v (stuck on missing marker)", err)
 	}
@@ -1202,13 +1229,15 @@ func TestDeleteVolumeTransientNameIndexFailureRetry(t *testing.T) {
 
 	fd.putFile(remoteRoot+"/data.txt", []byte("keep"))
 
+	// Simulate external-provisioner creating PV with volumeAttributes.
+	createPVForVolume(t, k8s, createResp, "csi.drive9.ai")
+
 	// Inject a one-shot transient failure on name-index DELETE.
 	fd.failDeleteOnce(nameIndexPath("pvc-transient"), 1)
 
 	// First DeleteVolume attempt — should fail on name-index transient error.
 	_, err = d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
-		Secrets:  fd.secrets(),
 	})
 	if err == nil {
 		t.Fatal("expected DeleteVolume to fail on transient name-index error")
@@ -1222,7 +1251,6 @@ func TestDeleteVolumeTransientNameIndexFailureRetry(t *testing.T) {
 	// Retry — transient error cleared, should succeed and clean everything.
 	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volumeID,
-		Secrets:  fd.secrets(),
 	}); err != nil {
 		t.Fatalf("retry DeleteVolume error = %v", err)
 	}
@@ -1383,6 +1411,32 @@ func (f *fakeDrive9) k8sPVCWithRemoteRoot(pvcName, namespace, secretName, remote
 				annotationRemoteRoot: remoteRoot,
 			},
 		},
+	}
+}
+
+// createPVForVolume simulates what the external-provisioner does after
+// CreateVolume: it creates a PV with CSI volumeAttributes. Tests call
+// this after CreateVolume so resolveSecretRefFromPV can find the PV.
+func createPVForVolume(t *testing.T, k8s *k8sfake.Clientset, resp *csi.CreateVolumeResponse, driverName string) {
+	t.Helper()
+	volCtx := resp.GetVolume().GetVolumeContext()
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pv-" + resp.GetVolume().GetVolumeId()[:20],
+		},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				CSI: &corev1.CSIPersistentVolumeSource{
+					Driver:           driverName,
+					VolumeHandle:     resp.GetVolume().GetVolumeId(),
+					VolumeAttributes: volCtx,
+				},
+			},
+		},
+	}
+	_, err := k8s.CoreV1().PersistentVolumes().Create(context.Background(), pv, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("create PV for test: %v", err)
 	}
 }
 
@@ -1889,10 +1943,9 @@ func TestCreateVolumeTwoPVCsIndependentLifecycle(t *testing.T) {
 		t.Fatalf("workspace-b secretName = %q, want secret-b", respB.GetVolume().GetVolumeContext()[attrSecretName])
 	}
 
-	// Delete A — B must remain functional.
+	// Delete A — B must remain functional (workspace-root = no-op, no credentials needed).
 	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volA,
-		Secrets:  fd.secrets(),
 	}); err != nil {
 		t.Fatalf("DeleteVolume workspace-a error = %v", err)
 	}
@@ -1913,7 +1966,6 @@ func TestCreateVolumeTwoPVCsIndependentLifecycle(t *testing.T) {
 	// Delete B.
 	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
 		VolumeId: volB,
-		Secrets:  fd.secrets(),
 	}); err != nil {
 		t.Fatalf("DeleteVolume workspace-b error = %v", err)
 	}
