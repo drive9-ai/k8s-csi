@@ -360,9 +360,8 @@ func (d *Driver) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest)
 		return &csi.DeleteVolumeResponse{}, nil
 	}
 
-	// Resolve credentials: try req.GetSecrets() first (legacy StorageClass
-	// delete-secret template), then look up the PV by volumeHandle to read
-	// the Secret reference from volumeAttributes.
+	// Resolve credentials: look up the PV by volumeHandle to read the
+	// Secret reference from volumeAttributes (fixated during CreateVolume).
 	creds, err := d.resolveDeleteCredentials(ctx, req)
 	if err != nil {
 		return nil, err
