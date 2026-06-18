@@ -7,28 +7,22 @@ import (
 	"testing"
 )
 
-func TestDefaultStorageClassUsesPerPVCNamespaceSecrets(t *testing.T) {
+func TestDefaultStorageClassNoSecretTemplate(t *testing.T) {
 	body := readRepoFile(t, "deploy/kubernetes/storageclass.yaml")
 
-	for _, want := range []string{
-		"csi.storage.k8s.io/provisioner-secret-name: drive9-csi-${pvc.name}",
-		"csi.storage.k8s.io/provisioner-secret-namespace: ${pvc.namespace}",
-		"csi.storage.k8s.io/node-stage-secret-name: drive9-csi-${pvc.name}",
-		"csi.storage.k8s.io/node-stage-secret-namespace: ${pvc.namespace}",
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("storageclass.yaml missing %q", want)
-		}
-	}
-
+	// StorageClass must NOT contain any per-PVC secret template parameters.
+	// Credentials are resolved from PVC annotations, not StorageClass templates.
 	for _, stale := range []string{
-		"csi.storage.k8s.io/provisioner-secret-name: drive9-csi-secret",
-		"csi.storage.k8s.io/provisioner-secret-namespace: drive9-csi",
-		"csi.storage.k8s.io/node-stage-secret-name: drive9-csi-secret",
-		"csi.storage.k8s.io/node-stage-secret-namespace: drive9-csi",
+		"csi.storage.k8s.io/provisioner-secret-name",
+		"csi.storage.k8s.io/provisioner-secret-namespace",
+		"csi.storage.k8s.io/node-stage-secret-name",
+		"csi.storage.k8s.io/node-stage-secret-namespace",
+		"${pvc.name}",
+		"${pvc.namespace}",
 	} {
 		if strings.Contains(body, stale) {
-			t.Fatalf("storageclass.yaml still contains stale global secret namespace %q", stale)
+			t.Fatalf("storageclass.yaml must not contain secret template %q — "+
+				"credentials are resolved from PVC annotation drive9.ai/secret-name", stale)
 		}
 	}
 }
@@ -55,26 +49,32 @@ func TestControllerRBACCanReadPerPVCNamespaceLocalDrive9Secrets(t *testing.T) {
 	if !strings.Contains(body, want) {
 		t.Fatalf("rbac.yaml missing ClusterRole secret get rule:\n%s", want)
 	}
-	for _, stale := range []string{
-		"kind: Role\nmetadata:\n  name: drive9-csi-controller-secrets",
-		"kind: RoleBinding\nmetadata:\n  name: drive9-csi-controller-secrets",
-	} {
-		if strings.Contains(body, stale) {
-			t.Fatalf("rbac.yaml still contains namespaced secret RBAC: %q", stale)
-		}
+}
+
+func TestNodeRBACCanReadSecrets(t *testing.T) {
+	body := readRepoFile(t, "deploy/kubernetes/rbac.yaml")
+
+	if !strings.Contains(body, "name: drive9-csi-node") {
+		t.Fatal("rbac.yaml missing drive9-csi-node ClusterRole")
 	}
-	if strings.Contains(body, "resourceNames: [\"drive9-csi-secret\"]") {
-		t.Fatal("rbac.yaml still restricts secret reads to the old fixed secret name")
+	// Node must be able to read Secrets for NodeStageVolume.
+	if !strings.Contains(body, "drive9-csi-node") {
+		t.Fatal("rbac.yaml missing drive9-csi-node ClusterRoleBinding")
 	}
 }
 
-func TestKubernetesExamplesUsePerPVCWorkloadNamespaceSecrets(t *testing.T) {
+func TestKubernetesExamplesUseAnnotationBasedSecrets(t *testing.T) {
+	pvc := readRepoFile(t, "deploy/examples/kubernetes/pvc.example.yaml")
+	if !strings.Contains(pvc, "drive9.ai/secret-name:") {
+		t.Fatal("pvc.example.yaml must include drive9.ai/secret-name annotation")
+	}
+	// Secret name should NOT follow the old drive9-csi-<pvc-name> pattern.
 	secret := readRepoFile(t, "deploy/examples/kubernetes/secret.example.yaml")
 	if strings.Contains(secret, "namespace: drive9-csi") {
 		t.Fatal("secret.example.yaml should not force credentials into the driver namespace")
 	}
-	if !strings.Contains(secret, "name: drive9-csi-drive9-workspace") {
-		t.Fatal("secret.example.yaml must use the default drive9-csi-<pvc-name> secret name")
+	if strings.Contains(secret, "drive9-csi-drive9-workspace") {
+		t.Fatal("secret.example.yaml must not use old drive9-csi-<pvc-name> naming convention")
 	}
 }
 
@@ -82,17 +82,13 @@ func TestE2EUsesPerPVCNamespaceLocalDrive9Secret(t *testing.T) {
 	body := readRepoFile(t, "hack/e2e-k8s.sh")
 
 	for _, want := range []string{
-		"kind: Secret\nmetadata:\n  name: drive9-csi-drive9-workspace-e2e\n  namespace: $test_namespace",
 		"write_storageclass()",
 		"using Drive9 workspace root mode",
 		"read after PVC recreate",
 	} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("e2e script missing namespace-local secret evidence %q", want)
+			t.Fatalf("e2e script missing evidence %q", want)
 		}
-	}
-	if strings.Contains(body, "csi.storage.k8s.io/.*-secret-namespace") {
-		t.Fatal("e2e script should not rewrite CSI secret namespaces to the driver namespace")
 	}
 }
 

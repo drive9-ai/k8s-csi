@@ -5,10 +5,6 @@ metadata:
 provisioner: csi.drive9.ai
 parameters:
   profile: coding-agent
-  csi.storage.k8s.io/provisioner-secret-name: drive9-csi-${pvc.name}
-  csi.storage.k8s.io/provisioner-secret-namespace: ${pvc.namespace}
-  csi.storage.k8s.io/node-stage-secret-name: drive9-csi-${pvc.name}
-  csi.storage.k8s.io/node-stage-secret-namespace: ${pvc.namespace}
 reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: false
