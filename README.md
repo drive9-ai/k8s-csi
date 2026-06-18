@@ -255,9 +255,12 @@ then runs a multi-pod same-node concurrent test: keeps the second pod running,
 launches a third pod pinned to the same node, verifies cross-pod read, deletes
 the second pod, and confirms the third pod still works. After the multi-pod
 test, it runs a one-pod multi-PVC test: creates a second PVC with its own
-Secret, launches a single pod mounting both PVCs, writes through one mount and
-reads through the other to verify cross-PVC visibility, then cleans up the
-second PVC. Finally it deletes the first PVC and PV, recreates the PVC, reads
+Secret, launches a single pod mounting both PVCs, and validates mode-specific
+behavior — in workspace-root mode (default) it writes through one mount and
+reads through the other to verify cross-PVC visibility; in managed-directory
+mode it asserts isolation (each PVC's files are not visible through the other
+mount). It then cleans up the second PVC. Finally it deletes the first PVC
+and PV, recreates the PVC, reads
 the same token from the Drive9 workspace root, removes the temporary token
 file, then deletes the pod and PVC.
 It fails closed if either e2e namespace or cluster-scoped CSI resources already
