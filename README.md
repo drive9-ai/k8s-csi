@@ -254,14 +254,118 @@ that pod, remounts the same PVC into a second pod, reads the same token again,
 then runs a multi-pod same-node concurrent test: keeps the second pod running,
 launches a third pod pinned to the same node, verifies cross-pod read, deletes
 the second pod, and confirms the third pod still works. After the multi-pod
-test, it deletes the PVC and PV, recreates the PVC, reads the same token from
-the Drive9 workspace root, removes the temporary token file, then deletes the
-pod and PVC.
+test, it runs a one-pod multi-PVC test: creates a second PVC with its own
+Secret, launches a single pod mounting both PVCs, and validates mode-specific
+behavior — in workspace-root mode (default) it writes through one mount and
+reads through the other to verify cross-PVC visibility; in managed-directory
+mode it asserts isolation (each PVC's files are not visible through the other
+mount). It then cleans up the second PVC. Finally it deletes the first PVC
+and PV, recreates the PVC, reads
+the same token from the Drive9 workspace root, removes the temporary token
+file, then deletes the pod and PVC.
 It fails closed if either e2e namespace or cluster-scoped CSI resources already
 exist, because the e2e should run on a clean validation cluster. Set
 `DRIVE9_REMOTE_ROOT_PREFIX=/k8s/pvc-e2e` only when explicitly testing managed
 directory mode. Do not use `:latest` for `DRIVE9_CSI_IMAGE`; use an immutable tag
 or digest for customer evidence.
+
+## Multiple Workspaces per Namespace
+
+The default `StorageClass` uses `drive9-csi-${pvc.name}` to resolve per-PVC
+credentials. Each PVC maps to exactly one Drive9 workspace via its own Secret.
+This is intentional for multi-workspace scenarios: different PVCs can use
+different API keys (and therefore different workspaces) without requiring
+multiple StorageClasses.
+
+To mount multiple workspaces in one namespace, create one Secret + PVC pair per
+workspace:
+
+```sh
+# Workspace A
+kubectl -n myapp create secret generic drive9-csi-workspace-a \
+  --from-literal=server=https://api.drive9.ai \
+  --from-literal=apiKey=<api-key-for-workspace-a>
+
+cat <<'EOF' | kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: workspace-a
+  namespace: myapp
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: drive9-rwo
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+
+# Workspace B
+kubectl -n myapp create secret generic drive9-csi-workspace-b \
+  --from-literal=server=https://api.drive9.ai \
+  --from-literal=apiKey=<api-key-for-workspace-b>
+
+cat <<'EOF' | kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: workspace-b
+  namespace: myapp
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: drive9-rwo
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+```
+
+A single pod can mount both PVCs:
+
+```yaml
+containers:
+  - name: app
+    volumeMounts:
+      - name: ws-a
+        mountPath: /workspace-a
+      - name: ws-b
+        mountPath: /workspace-b
+volumes:
+  - name: ws-a
+    persistentVolumeClaim:
+      claimName: workspace-a
+  - name: ws-b
+    persistentVolumeClaim:
+      claimName: workspace-b
+```
+
+## Troubleshooting
+
+**PVC stuck in Pending with `failed to provision volume` or Secret not found:**
+
+The CSI provisioner resolves the Secret name from the StorageClass template
+`drive9-csi-${pvc.name}`. If you created a PVC named `my-data`, the provisioner
+looks for Secret `drive9-csi-my-data` in the PVC's namespace. Create it:
+
+```sh
+kubectl -n <namespace> create secret generic drive9-csi-my-data \
+  --from-literal=server=https://api.drive9.ai \
+  --from-literal=apiKey=<your-api-key>
+```
+
+**Multiple PVCs sharing the same API key:**
+
+Each PVC still needs its own Secret (e.g. `drive9-csi-pvc-1`, `drive9-csi-pvc-2`)
+even if the API key is identical. This is a CSI StorageClass template limitation.
+For scripted provisioning, loop over PVC names:
+
+```sh
+for name in pvc-1 pvc-2 pvc-3; do
+  kubectl -n myapp create secret generic "drive9-csi-$name" \
+    --from-literal=server=https://api.drive9.ai \
+    --from-literal=apiKey="$DRIVE9_API_KEY"
+done
+```
 
 ## GHCR Visibility
 

@@ -1737,6 +1737,124 @@ func TestCheckMultiTargetAccessLegacyStateBlocksMultiTarget(t *testing.T) {
 	}
 }
 
+// TestCreateVolumeTwoPVCsIndependentLifecycle validates that two PVCs
+// backed by different Secrets (same API key, same workspace root) produce
+// independent volumes with independent delete lifecycles.  This is the
+// unit-level analog of the one-pod multi-PVC e2e test.
+func TestCreateVolumeTwoPVCsIndependentLifecycle(t *testing.T) {
+	fake := newFakeDrive9(t)
+	defer fake.close()
+
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+
+	// Create two workspace-root PVCs (different names, same workspace root).
+	respA, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "workspace-a",
+		Secrets:            fake.secrets(),
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume workspace-a error = %v", err)
+	}
+	respB, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "workspace-b",
+		Secrets:            fake.secrets(),
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume workspace-b error = %v", err)
+	}
+
+	volA := respA.GetVolume().GetVolumeId()
+	volB := respB.GetVolume().GetVolumeId()
+	if volA == volB {
+		t.Fatalf("two PVCs must produce different volumeIDs: %q", volA)
+	}
+	if !isWorkspaceRootVolumeID(volA) || !isWorkspaceRootVolumeID(volB) {
+		t.Fatalf("both must be workspace root volumes: A=%q B=%q", volA, volB)
+	}
+
+	// Delete A — B must remain functional.
+	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
+		VolumeId: volA,
+		Secrets:  fake.secrets(),
+	}); err != nil {
+		t.Fatalf("DeleteVolume workspace-a error = %v", err)
+	}
+
+	// Idempotent re-create of B must succeed with the same volumeID.
+	respB2, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "workspace-b",
+		Secrets:            fake.secrets(),
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("idempotent CreateVolume workspace-b error = %v", err)
+	}
+	if respB2.GetVolume().GetVolumeId() != volB {
+		t.Fatalf("idempotent CreateVolume workspace-b volumeID = %q, want %q", respB2.GetVolume().GetVolumeId(), volB)
+	}
+
+	// Delete B.
+	if _, err := d.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{
+		VolumeId: volB,
+		Secrets:  fake.secrets(),
+	}); err != nil {
+		t.Fatalf("DeleteVolume workspace-b error = %v", err)
+	}
+
+	// Workspace root must survive both deletions.
+	if !fake.exists("/") {
+		t.Fatal("workspace root must not be deleted after both PVCs are removed")
+	}
+}
+
+// TestCreateVolumeTwoPVCsDifferentRemoteRoots validates that two PVCs with
+// the same API key but different remoteRoot values produce volumes that
+// point to different mount paths.
+func TestCreateVolumeTwoPVCsDifferentRemoteRoots(t *testing.T) {
+	fake := newFakeDrive9(t)
+	defer fake.close()
+	fake.mkdir("/projects/alpha")
+	fake.mkdir("/projects/beta")
+
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+
+	secretsA := fake.secrets()
+	secretsA["remoteRoot"] = "/projects/alpha"
+	respA, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-alpha",
+		Secrets:            secretsA,
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume alpha error = %v", err)
+	}
+
+	secretsB := fake.secrets()
+	secretsB["remoteRoot"] = "/projects/beta"
+	respB, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "pvc-beta",
+		Secrets:            secretsB,
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume beta error = %v", err)
+	}
+
+	volA := respA.GetVolume().GetVolumeId()
+	volB := respB.GetVolume().GetVolumeId()
+	if volA == volB {
+		t.Fatalf("different remoteRoot PVCs must produce different volumeIDs: %q", volA)
+	}
+	if respA.GetVolume().GetVolumeContext()["remoteRoot"] != "/projects/alpha" {
+		t.Fatalf("alpha remoteRoot = %q, want /projects/alpha", respA.GetVolume().GetVolumeContext()["remoteRoot"])
+	}
+	if respB.GetVolume().GetVolumeContext()["remoteRoot"] != "/projects/beta" {
+		t.Fatalf("beta remoteRoot = %q, want /projects/beta", respB.GetVolume().GetVolumeContext()["remoteRoot"])
+	}
+}
+
 func multiWriterMountCapability() *csi.VolumeCapability {
 	return &csi.VolumeCapability{
 		AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
