@@ -25,7 +25,7 @@ spec:
             - name: socket-dir
               mountPath: /csi
         - name: drive9-csi
-          image: ghcr.io/drive9-ai/drive9-csi:drive9-cbf73aa-csi-a163416
+          image: ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2
           imagePullPolicy: IfNotPresent
           args:
             - --endpoint=unix:///csi/csi.sock
