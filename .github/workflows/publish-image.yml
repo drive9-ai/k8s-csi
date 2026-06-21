@@ -39,12 +39,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute image tags
+      - name: Extract canonical tag from Makefile
         id: image-tags
         shell: bash
         run: |
-          echo "drive9_short=${DRIVE9_REF::7}" >> "$GITHUB_OUTPUT"
-          echo "csi_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          # Read the canonical IMAGE tag defined in Makefile (single source of truth).
+          CANONICAL=$(sed -n 's/^IMAGE ?= //p' Makefile)
+          CANONICAL_TAG="${CANONICAL##*:}"
+          echo "canonical_tag=${CANONICAL_TAG}" >> "$GITHUB_OUTPUT"
+          # Also emit a trace tag for CI traceability.
+          echo "trace_tag=drive9-${DRIVE9_REF::7}-csi-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -58,6 +62,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/drive9-ai/k8s-csi
             org.opencontainers.image.description=Drive9 Kubernetes CSI driver
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=drive9-${{ steps.image-tags.outputs.drive9_short }}-csi-${{ steps.image-tags.outputs.csi_short }}
+            org.opencontainers.image.version=${{ steps.image-tags.outputs.canonical_tag }}
           tags: |
-            ${{ env.IMAGE }}:drive9-${{ steps.image-tags.outputs.drive9_short }}-csi-${{ steps.image-tags.outputs.csi_short }}
+            ${{ env.IMAGE }}:${{ steps.image-tags.outputs.canonical_tag }}
+            ${{ env.IMAGE }}:${{ steps.image-tags.outputs.trace_tag }}
