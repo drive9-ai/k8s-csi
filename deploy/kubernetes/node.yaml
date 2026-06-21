@@ -26,7 +26,7 @@ spec:
             - name: registration-dir
               mountPath: /registration
         - name: drive9-csi
-          image: ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2
+          image: ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-2ff35fc
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
