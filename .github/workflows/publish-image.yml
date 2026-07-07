@@ -43,12 +43,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          DRIVE9_VERSION="$(curl -fsSL https://drive9.ai/releases/version | tr -d '[:space:]')"
+          TMP_DIR="$(mktemp -d)"
+          trap 'rm -rf "$TMP_DIR"' EXIT
+          curl -fsSL -o "$TMP_DIR/drive9" https://drive9.ai/releases/drive9-linux-amd64
+          chmod +x "$TMP_DIR/drive9"
+          "$TMP_DIR/drive9" --version | tee "$TMP_DIR/drive9-version.txt"
+          DRIVE9_VERSION="$(awk -F': *' '$1 == "version" {print $2; exit}' "$TMP_DIR/drive9-version.txt" | tr -d '[:space:]')"
           if [ -z "$DRIVE9_VERSION" ]; then
-            echo "Failed to resolve latest drive9 CLI version" >&2
+            echo "Failed to resolve drive9 CLI version" >&2
             exit 1
           fi
-          echo "Latest drive9 CLI version: v${DRIVE9_VERSION}"
+          echo "Resolved drive9 CLI version: ${DRIVE9_VERSION}"
           echo "version=${DRIVE9_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Resolve image tags
@@ -59,8 +64,8 @@ jobs:
         run: |
           set -euo pipefail
           SAFE_DRIVE9_VERSION="$(printf '%s' "$DRIVE9_VERSION" | tr -c 'A-Za-z0-9_.-' '-')"
-          # Trace tag: drive9-v<drive9-version>-csi-<csisha7>.
-          TRACE_TAG="drive9-v${SAFE_DRIVE9_VERSION}-csi-${GITHUB_SHA:0:7}"
+          # Trace tag: drive9-<drive9-cli-version>-csi-<csisha7>.
+          TRACE_TAG="drive9-${SAFE_DRIVE9_VERSION}-csi-${GITHUB_SHA:0:7}"
           echo "trace_tag=${TRACE_TAG}" >> "$GITHUB_OUTPUT"
 
           # Build the full tag list.
