@@ -1,5 +1,4 @@
-IMAGE ?= ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2
-DRIVE9_REF ?= aff1023d45869664056a1b8ac910efb316b71d5e
+IMAGE ?= ghcr.io/drive9-ai/drive9-csi:local
 GOPROXY ?= https://proxy.golang.org,direct
 GOSUMDB ?= sum.golang.org
 
@@ -15,7 +14,7 @@ build:
 
 .PHONY: image
 image:
-	docker build --build-arg DRIVE9_REF=$(DRIVE9_REF) --build-arg GOPROXY=$(GOPROXY) --build-arg GOSUMDB=$(GOSUMDB) -t $(IMAGE) .
+	docker build --build-arg GOPROXY=$(GOPROXY) --build-arg GOSUMDB=$(GOSUMDB) -t $(IMAGE) .
 
 .PHONY: manifests
 manifests:
