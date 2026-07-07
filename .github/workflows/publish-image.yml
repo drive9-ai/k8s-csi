@@ -28,7 +28,7 @@ env:
   # Default drive9 commit used when no `drive9_ref` input is supplied
   # (e.g. push-triggered runs). Dispatched runs from drive9/prod-cd pass an
   # explicit SHA so this fallback is only for local/manual pushes here.
-  DRIVE9_REF_DEFAULT: aff1023d45869664056a1b8ac910efb316b71d5e
+  DRIVE9_REF_DEFAULT: d04d88bafc9c8f9585c50e582c1b848f47d950b7
 
 jobs:
   publish:
