@@ -22,25 +22,13 @@ env:
   IMAGE: ghcr.io/drive9-ai/drive9-csi
 
 jobs:
-  publish:
+  metadata:
     runs-on: ubuntu-24.04
+    outputs:
+      drive9_version: ${{ steps.drive9_version.outputs.version }}
+      tags: ${{ steps.image-tags.outputs.tags }}
+      trace_tag: ${{ steps.image-tags.outputs.trace_tag }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Show latest drive9 CLI version
         id: drive9_version
         shell: bash
@@ -81,16 +69,118 @@ jobs:
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
+  build:
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            artifact: linux-amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            artifact: linux-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.source=https://github.com/drive9-ai/k8s-csi
             org.opencontainers.image.description=Drive9 Kubernetes CSI driver
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ steps.image-tags.outputs.trace_tag }}
-            ai.drive9.cli.version=${{ steps.drive9_version.outputs.version }}
-          tags: ${{ steps.image-tags.outputs.tags }}
+            org.opencontainers.image.version=${{ needs.metadata.outputs.trace_tag }}
+            ai.drive9.cli.version=${{ needs.metadata.outputs.drive9_version }}
+
+      - name: Export digest
+        shell: bash
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          digest="${DIGEST#sha256:}"
+          if [ -z "$digest" ]; then
+            echo "Build did not produce an image digest" >&2
+            exit 1
+          fi
+          touch "/tmp/digests/${digest}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.artifact }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs:
+      - metadata
+      - build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Create manifest list
+        shell: bash
+        env:
+          TAGS: ${{ needs.metadata.outputs.tags }}
+        run: |
+          set -euo pipefail
+          tag_args=()
+          while IFS= read -r tag; do
+            if [ -n "$tag" ]; then
+              tag_args+=("-t" "$tag")
+            fi
+          done <<< "$TAGS"
+          if [ "${#tag_args[@]}" -eq 0 ]; then
+            echo "No image tags resolved" >&2
+            exit 1
+          fi
+
+          sources=()
+          while IFS= read -r -d '' digest_file; do
+            digest="$(basename "$digest_file")"
+            sources+=("${IMAGE}@sha256:${digest}")
+          done < <(find /tmp/digests -type f -print0 | sort -z)
+          if [ "${#sources[@]}" -eq 0 ]; then
+            echo "No image digests downloaded" >&2
+            exit 1
+          fi
+
+          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
+          docker buildx imagetools inspect "${IMAGE}:${{ needs.metadata.outputs.trace_tag }}"

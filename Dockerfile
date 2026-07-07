@@ -1,4 +1,4 @@
-FROM golang:1.26-bookworm AS csi-builder
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS csi-builder
 ARG GOPROXY=https://proxy.golang.org,direct
 ARG GOSUMDB=sum.golang.org
 ARG TARGETOS=linux
@@ -11,7 +11,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o /out/drive9-csi ./cmd/drive9-csi
 
-FROM debian:bookworm-slim AS drive9-downloader
+FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS drive9-downloader
 ARG TARGETARCH=amd64
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
@@ -19,8 +19,7 @@ RUN apt-get update \
 RUN mkdir -p /out \
  && curl -fsSL -o /out/drive9 "https://drive9.ai/releases/drive9-linux-${TARGETARCH}" \
  && chmod +x /out/drive9 \
- && echo "Downloaded drive9 CLI binary version:" \
- && /out/drive9 --version
+ && echo "Downloaded drive9 CLI for linux/${TARGETARCH}"
 
 FROM debian:bookworm-slim
 LABEL org.opencontainers.image.source=https://github.com/drive9-ai/k8s-csi
