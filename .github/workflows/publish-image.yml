@@ -13,11 +13,6 @@ on:
       - "go.sum"
       - "internal/**"
   workflow_dispatch:
-    inputs:
-      drive9_ref:
-        description: "drive9 commit SHA to bake into the CSI image (overrides Dockerfile default; leave empty to use env default)"
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -25,10 +20,6 @@ permissions:
 
 env:
   IMAGE: ghcr.io/drive9-ai/drive9-csi
-  # Default drive9 commit used when no `drive9_ref` input is supplied
-  # (e.g. push-triggered runs). Dispatched runs from drive9/prod-cd pass an
-  # explicit SHA so this fallback is only for local/manual pushes here.
-  DRIVE9_REF_DEFAULT: d04d88bafc9c8f9585c50e582c1b848f47d950b7
 
 jobs:
   publish:
@@ -47,51 +38,34 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve drive9 ref and tags
+      - name: Show latest drive9 CLI version
+        id: drive9_version
+        shell: bash
+        run: |
+          set -euo pipefail
+          DRIVE9_VERSION="$(curl -fsSL https://drive9.ai/releases/version | tr -d '[:space:]')"
+          if [ -z "$DRIVE9_VERSION" ]; then
+            echo "Failed to resolve latest drive9 CLI version" >&2
+            exit 1
+          fi
+          echo "Latest drive9 CLI version: v${DRIVE9_VERSION}"
+          echo "version=${DRIVE9_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve image tags
         id: image-tags
         shell: bash
         env:
-          INPUT_DRIVE9_REF: ${{ inputs.drive9_ref }}
+          DRIVE9_VERSION: ${{ steps.drive9_version.outputs.version }}
         run: |
           set -euo pipefail
-          # Prefer the dispatch input, fall back to the env default.
-          DRIVE9_REF="${INPUT_DRIVE9_REF:-$DRIVE9_REF_DEFAULT}"
-          # Require a hex commit SHA (7-40 chars). Earlier alnum-only
-          # check accepted branch names like `main` or tags like
-          # `v1.2.3` — those pass `git checkout` inside the Dockerfile
-          # but produce a NON-REPRODUCIBLE image (branch head can
-          # move) and a MISLEADING trace tag like
-          # `drive9-main-csi-<csisha7>` that the operator will read
-          # as a specific commit. Refuse anything that isn't a hex
-          # SHA to guarantee the image name and the baked-in ref
-          # match.
-          if ! printf '%s' "$DRIVE9_REF" | grep -Eq '^[0-9a-f]{7,40}$'; then
-            echo "Invalid drive9_ref (must be a 7-40 char hex commit SHA): $DRIVE9_REF" >&2
-            exit 1
-          fi
-          echo "drive9_ref=${DRIVE9_REF}" >> "$GITHUB_OUTPUT"
-
-          # Trace tag: drive9-<drive9sha7>-csi-<csisha7>. This is the tag
-          # consumed by drive9/prod-cd promotions.
-          TRACE_TAG="drive9-${DRIVE9_REF:0:7}-csi-${GITHUB_SHA:0:7}"
+          SAFE_DRIVE9_VERSION="$(printf '%s' "$DRIVE9_VERSION" | tr -c 'A-Za-z0-9_.-' '-')"
+          # Trace tag: drive9-v<drive9-version>-csi-<csisha7>.
+          TRACE_TAG="drive9-v${SAFE_DRIVE9_VERSION}-csi-${GITHUB_SHA:0:7}"
           echo "trace_tag=${TRACE_TAG}" >> "$GITHUB_OUTPUT"
 
-          # Build the full tag list. Always include the trace tag. When no
-          # drive9_ref override is supplied (push-triggered builds), also
-          # include the Makefile's canonical tag. When an explicit
-          # drive9_ref is passed, the Makefile's baked-in SHA no longer
-          # matches, so publishing the canonical tag would mislabel the
-          # image.
+          # Build the full tag list.
           FULL_IMAGE="${IMAGE:-ghcr.io/drive9-ai/drive9-csi}"
           TAGS="${FULL_IMAGE}:${TRACE_TAG}"
-          if [ -z "${INPUT_DRIVE9_REF:-}" ]; then
-            CANONICAL=$(sed -n 's/^IMAGE ?= //p' Makefile)
-            CANONICAL_TAG="${CANONICAL##*:}"
-            echo "canonical_tag=${CANONICAL_TAG}" >> "$GITHUB_OUTPUT"
-            TAGS="${TAGS}"$'\n'"${FULL_IMAGE}:${CANONICAL_TAG}"
-          else
-            echo "canonical_tag=" >> "$GITHUB_OUTPUT"
-          fi
           # Multiline output for build-push-action's `tags:` input.
           {
             echo 'tags<<EOF'
@@ -105,11 +79,10 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
-          build-args: |
-            DRIVE9_REF=${{ steps.image-tags.outputs.drive9_ref }}
           labels: |
             org.opencontainers.image.source=https://github.com/drive9-ai/k8s-csi
             org.opencontainers.image.description=Drive9 Kubernetes CSI driver
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ steps.image-tags.outputs.trace_tag }}
+            ai.drive9.cli.version=${{ steps.drive9_version.outputs.version }}
           tags: ${{ steps.image-tags.outputs.tags }}
