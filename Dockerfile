@@ -1,20 +1,23 @@
 FROM golang:1.26-bookworm AS csi-builder
 ARG GOPROXY=https://proxy.golang.org,direct
 ARG GOSUMDB=sum.golang.org
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 ENV GOPROXY=${GOPROXY}
 ENV GOSUMDB=${GOSUMDB}
 WORKDIR /src/csi
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/drive9-csi ./cmd/drive9-csi
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o /out/drive9-csi ./cmd/drive9-csi
 
 FROM debian:bookworm-slim AS drive9-downloader
+ARG TARGETARCH=amd64
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /out \
- && curl -fsSL -o /out/drive9 https://drive9.ai/releases/drive9-linux-amd64 \
+ && curl -fsSL -o /out/drive9 "https://drive9.ai/releases/drive9-linux-${TARGETARCH}" \
  && chmod +x /out/drive9 \
  && echo "Downloaded drive9 CLI binary version:" \
  && /out/drive9 --version
