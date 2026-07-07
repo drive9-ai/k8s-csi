@@ -56,12 +56,19 @@ jobs:
           set -euo pipefail
           # Prefer the dispatch input, fall back to the env default.
           DRIVE9_REF="${INPUT_DRIVE9_REF:-$DRIVE9_REF_DEFAULT}"
-          case "$DRIVE9_REF" in
-            *[![:alnum:]]*)
-              echo "Invalid drive9_ref (must be alphanumeric SHA): $DRIVE9_REF" >&2
-              exit 1
-              ;;
-          esac
+          # Require a hex commit SHA (7-40 chars). Earlier alnum-only
+          # check accepted branch names like `main` or tags like
+          # `v1.2.3` — those pass `git checkout` inside the Dockerfile
+          # but produce a NON-REPRODUCIBLE image (branch head can
+          # move) and a MISLEADING trace tag like
+          # `drive9-main-csi-<csisha7>` that the operator will read
+          # as a specific commit. Refuse anything that isn't a hex
+          # SHA to guarantee the image name and the baked-in ref
+          # match.
+          if ! printf '%s' "$DRIVE9_REF" | grep -Eq '^[0-9a-f]{7,40}$'; then
+            echo "Invalid drive9_ref (must be a 7-40 char hex commit SHA): $DRIVE9_REF" >&2
+            exit 1
+          fi
           echo "drive9_ref=${DRIVE9_REF}" >> "$GITHUB_OUTPUT"
 
           # Trace tag: drive9-<drive9sha7>-csi-<csisha7>. This is the tag
