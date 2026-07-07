@@ -10,7 +10,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/drive9-csi ./cmd/drive9-csi
 
 FROM golang:1.26-bookworm AS drive9-builder
-ARG DRIVE9_REF=aff1023d45869664056a1b8ac910efb316b71d5e
+ARG DRIVE9_REF=d04d88bafc9c8f9585c50e582c1b848f47d950b7
 ARG GOPROXY=https://proxy.golang.org,direct
 ARG GOSUMDB=sum.golang.org
 ENV GOPROXY=${GOPROXY}
