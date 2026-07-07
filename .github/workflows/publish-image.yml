@@ -25,10 +25,8 @@ permissions:
 
 env:
   IMAGE: ghcr.io/drive9-ai/drive9-csi
-  # Default drive9 commit used when no `drive9_ref` input is supplied
-  # (e.g. push-triggered runs). Dispatched runs from drive9/prod-cd pass an
-  # explicit SHA so this fallback is only for local/manual pushes here.
-  DRIVE9_REF_DEFAULT: aff1023d45869664056a1b8ac910efb316b71d5e
+  # Repository containing the drive9 CLI baked into the CSI image.
+  DRIVE9_REPO: mem9-ai/drive9
 
 jobs:
   publish:
@@ -52,10 +50,16 @@ jobs:
         shell: bash
         env:
           INPUT_DRIVE9_REF: ${{ inputs.drive9_ref }}
+          GH_TOKEN: ${{ github.token }}
+          DRIVE9_REPO: ${{ env.DRIVE9_REPO }}
         run: |
           set -euo pipefail
-          # Prefer the dispatch input, fall back to the env default.
-          DRIVE9_REF="${INPUT_DRIVE9_REF:-$DRIVE9_REF_DEFAULT}"
+          if [ -n "${INPUT_DRIVE9_REF:-}" ]; then
+            DRIVE9_REF="$INPUT_DRIVE9_REF"
+          else
+            echo "No drive9_ref input supplied; resolving ${DRIVE9_REPO} main."
+            DRIVE9_REF="$(gh api "repos/${DRIVE9_REPO}/commits/main" --jq .sha)"
+          fi
           # Require a hex commit SHA (7-40 chars). Earlier alnum-only
           # check accepted branch names like `main` or tags like
           # `v1.2.3` — those pass `git checkout` inside the Dockerfile
@@ -76,22 +80,11 @@ jobs:
           TRACE_TAG="drive9-${DRIVE9_REF:0:7}-csi-${GITHUB_SHA:0:7}"
           echo "trace_tag=${TRACE_TAG}" >> "$GITHUB_OUTPUT"
 
-          # Build the full tag list. Always include the trace tag. When no
-          # drive9_ref override is supplied (push-triggered builds), also
-          # include the Makefile's canonical tag. When an explicit
-          # drive9_ref is passed, the Makefile's baked-in SHA no longer
-          # matches, so publishing the canonical tag would mislabel the
-          # image.
+          # Publish only traceable tags. Every pushed image tag encodes the
+          # resolved drive9 CLI commit and the k8s-csi commit.
           FULL_IMAGE="${IMAGE:-ghcr.io/drive9-ai/drive9-csi}"
           TAGS="${FULL_IMAGE}:${TRACE_TAG}"
-          if [ -z "${INPUT_DRIVE9_REF:-}" ]; then
-            CANONICAL=$(sed -n 's/^IMAGE ?= //p' Makefile)
-            CANONICAL_TAG="${CANONICAL##*:}"
-            echo "canonical_tag=${CANONICAL_TAG}" >> "$GITHUB_OUTPUT"
-            TAGS="${TAGS}"$'\n'"${FULL_IMAGE}:${CANONICAL_TAG}"
-          else
-            echo "canonical_tag=" >> "$GITHUB_OUTPUT"
-          fi
+          echo "canonical_tag=" >> "$GITHUB_OUTPUT"
           # Multiline output for build-push-action's `tags:` input.
           {
             echo 'tags<<EOF'

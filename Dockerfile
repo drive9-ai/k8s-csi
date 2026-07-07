@@ -10,13 +10,14 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/drive9-csi ./cmd/drive9-csi
 
 FROM golang:1.26-bookworm AS drive9-builder
-ARG DRIVE9_REF=aff1023d45869664056a1b8ac910efb316b71d5e
+ARG DRIVE9_REF
 ARG GOPROXY=https://proxy.golang.org,direct
 ARG GOSUMDB=sum.golang.org
 ENV GOPROXY=${GOPROXY}
 ENV GOSUMDB=${GOSUMDB}
 WORKDIR /src
-RUN git clone https://github.com/mem9-ai/drive9.git drive9 \
+RUN printf '%s' "${DRIVE9_REF}" | grep -Eq '^[0-9a-f]{7,40}$' \
+ && git clone https://github.com/mem9-ai/drive9.git drive9 \
  && cd drive9 \
  && git checkout "${DRIVE9_REF}"
 WORKDIR /src/drive9
