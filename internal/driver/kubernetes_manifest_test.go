@@ -61,6 +61,22 @@ func TestDefaultStorageClassMountPerfDisabled(t *testing.T) {
 	}
 }
 
+func TestDefaultStorageClassOmitsExplicitMountTuning(t *testing.T) {
+	body := readRepoFile(t, "deploy/kubernetes/storageclass.yaml")
+
+	for _, forbidden := range []string{
+		"readdirPrefetch:",
+		"readdirPrefetchMaxFiles:",
+		"readdirPrefetchMaxFileBytes:",
+		"readdirPrefetchMaxBytes:",
+		"writebackBatchWindow:",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("storageclass.yaml must not set explicit mount tuning parameter %q by default", forbidden)
+		}
+	}
+}
+
 func TestSidecarFallbackMountTTLs(t *testing.T) {
 	body := readRepoFile(t, "deploy/sidecar/deployment.yaml")
 
@@ -95,6 +111,38 @@ func TestSidecarFallbackMountPerf(t *testing.T) {
 	}
 	if strings.Contains(body, "DRIVE9_PERF_DIR") {
 		t.Fatal("sidecar deployment must not expose arbitrary DRIVE9_PERF_DIR")
+	}
+}
+
+func TestSidecarFallbackExplicitMountTuning(t *testing.T) {
+	body := readRepoFile(t, "deploy/sidecar/deployment.yaml")
+
+	for _, want := range []string{
+		"DRIVE9_READDIR_PREFETCH",
+		"DRIVE9_READDIR_PREFETCH_MAX_FILES",
+		"DRIVE9_READDIR_PREFETCH_MAX_FILE_BYTES",
+		"DRIVE9_READDIR_PREFETCH_MAX_BYTES",
+		"DRIVE9_WRITEBACK_BATCH_WINDOW",
+		"--readdir-prefetch",
+		"--readdir-prefetch-max-files",
+		"--readdir-prefetch-max-file-bytes",
+		"--readdir-prefetch-max-bytes",
+		"--writeback-batch-window",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("sidecar deployment missing explicit mount tuning evidence %q", want)
+		}
+	}
+	for _, forbiddenDefault := range []string{
+		"- name: DRIVE9_READDIR_PREFETCH",
+		"- name: DRIVE9_READDIR_PREFETCH_MAX_FILES",
+		"- name: DRIVE9_READDIR_PREFETCH_MAX_FILE_BYTES",
+		"- name: DRIVE9_READDIR_PREFETCH_MAX_BYTES",
+		"- name: DRIVE9_WRITEBACK_BATCH_WINDOW",
+	} {
+		if strings.Contains(body, forbiddenDefault) {
+			t.Fatalf("sidecar deployment must not set explicit mount tuning env by default: %q", forbiddenDefault)
+		}
 	}
 }
 

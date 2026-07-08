@@ -38,6 +38,11 @@ spec:
               entry_ttl="${DRIVE9_ENTRY_TTL:-30s}"
               dir_ttl="${DRIVE9_DIR_TTL:-30s}"
               perf_enabled="${DRIVE9_PERF_ENABLED:-false}"
+              readdir_prefetch="${DRIVE9_READDIR_PREFETCH:-}"
+              readdir_prefetch_max_files="${DRIVE9_READDIR_PREFETCH_MAX_FILES:-}"
+              readdir_prefetch_max_file_bytes="${DRIVE9_READDIR_PREFETCH_MAX_FILE_BYTES:-}"
+              readdir_prefetch_max_bytes="${DRIVE9_READDIR_PREFETCH_MAX_BYTES:-}"
+              writeback_batch_window="${DRIVE9_WRITEBACK_BATCH_WINDOW:-}"
               if [ -z "${attr_ttl}" ] || [ -z "${entry_ttl}" ] || [ -z "${dir_ttl}" ]; then
                 echo "DRIVE9_*_TTL must not be empty" >&2
                 exit 1
@@ -55,6 +60,29 @@ spec:
                   exit 1
                   ;;
               esac
+              case "${readdir_prefetch}" in
+                true)
+                  set -- "$@" --readdir-prefetch
+                  ;;
+                false|"")
+                  ;;
+                *)
+                  echo "DRIVE9_READDIR_PREFETCH must be true or false when set" >&2
+                  exit 1
+                  ;;
+              esac
+              if [ -n "${readdir_prefetch_max_files}" ]; then
+                set -- "$@" --readdir-prefetch-max-files "${readdir_prefetch_max_files}"
+              fi
+              if [ -n "${readdir_prefetch_max_file_bytes}" ]; then
+                set -- "$@" --readdir-prefetch-max-file-bytes "${readdir_prefetch_max_file_bytes}"
+              fi
+              if [ -n "${readdir_prefetch_max_bytes}" ]; then
+                set -- "$@" --readdir-prefetch-max-bytes "${readdir_prefetch_max_bytes}"
+              fi
+              if [ -n "${writeback_batch_window}" ]; then
+                set -- "$@" --writeback-batch-window "${writeback_batch_window}"
+              fi
 
               case "${remote_root}" in
                 /*) ;;

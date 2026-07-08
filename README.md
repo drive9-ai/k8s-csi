@@ -218,6 +218,38 @@ under `/var/lib/drive9-csi/perf/<volume-id>`. The driver does not accept a
 user-provided perf path and does not automatically delete perf output. Remove
 the perf directory manually after collecting support data.
 
+The following optional tuning parameters have no CSI defaults. The driver passes
+only values explicitly set in the `StorageClass`:
+
+| StorageClass parameter | `drive9 mount` flag |
+| --- | --- |
+| `readdirPrefetch` | `--readdir-prefetch` |
+| `readdirPrefetchMaxFiles` | `--readdir-prefetch-max-files` |
+| `readdirPrefetchMaxFileBytes` | `--readdir-prefetch-max-file-bytes` |
+| `readdirPrefetchMaxBytes` | `--readdir-prefetch-max-bytes` |
+| `writebackBatchWindow` | `--writeback-batch-window` |
+
+`readdirPrefetch` accepts `"true"` or `"false"`. The integer values must be
+positive. `writebackBatchWindow` uses Go duration syntax, for example `20ms`.
+The `--writeback-batch-window` flag requires a `drive9` CLI version that
+supports it.
+
+Example with explicit tuning enabled:
+
+```yaml
+parameters:
+  profile: coding-agent
+  attrTTL: 30s
+  entryTTL: 30s
+  dirTTL: 30s
+  perfEnabled: "true"
+  readdirPrefetch: "true"
+  readdirPrefetchMaxFiles: "64"
+  readdirPrefetchMaxFileBytes: "50000"
+  readdirPrefetchMaxBytes: "4194304"
+  writebackBatchWindow: 20ms
+```
+
 If you use `reclaimPolicy: Delete`, keep the per-PVC workload namespace Secret in
 place until Kubernetes has deleted the PV. If the Secret is removed first,
 `DeleteVolume` cannot resolve credentials and backend cleanup will require manual
@@ -238,6 +270,35 @@ sidecar fallback. The path is fixed to `/perf`; use a Kubernetes volume mount to
 choose where `/perf` is stored. The example manifest mounts it from
 `/var/lib/drive9-sidecar/demo/perf`.
 
+The sidecar fallback also supports explicit mount tuning env vars with no
+defaults:
+
+| Environment variable | `drive9 mount` flag |
+| --- | --- |
+| `DRIVE9_READDIR_PREFETCH` | `--readdir-prefetch` |
+| `DRIVE9_READDIR_PREFETCH_MAX_FILES` | `--readdir-prefetch-max-files` |
+| `DRIVE9_READDIR_PREFETCH_MAX_FILE_BYTES` | `--readdir-prefetch-max-file-bytes` |
+| `DRIVE9_READDIR_PREFETCH_MAX_BYTES` | `--readdir-prefetch-max-bytes` |
+| `DRIVE9_WRITEBACK_BATCH_WINDOW` | `--writeback-batch-window` |
+
+Example:
+
+```yaml
+env:
+  - name: DRIVE9_PERF_ENABLED
+    value: "true"
+  - name: DRIVE9_READDIR_PREFETCH
+    value: "true"
+  - name: DRIVE9_READDIR_PREFETCH_MAX_FILES
+    value: "64"
+  - name: DRIVE9_READDIR_PREFETCH_MAX_FILE_BYTES
+    value: "50000"
+  - name: DRIVE9_READDIR_PREFETCH_MAX_BYTES
+    value: "4194304"
+  - name: DRIVE9_WRITEBACK_BATCH_WINDOW
+    value: 20ms
+```
+
 Create the sidecar Secret in the target namespace before applying the fallback deployment:
 
 ```sh
@@ -249,6 +310,60 @@ kubectl apply -k deploy/sidecar
 ```
 
 The sidecar Secret example lives under `deploy/examples/sidecar/` and is intentionally not part of the sidecar kustomization.
+
+## Perf Support Bundle Upload
+
+When `perfEnabled` is `"true"`, the CSI node plugin writes `drive9 mount`
+profiling output under:
+
+```text
+/var/lib/drive9-csi/perf/<volume-id>/
+```
+
+CSI does not upload or delete this data automatically. To send it to Drive9
+support, use the `drive9` CLI already present in the node plugin container with
+a short-lived support upload token provided by Drive9 support. Do not use the
+workload Drive9 API key for this upload.
+
+Find the node plugin pod on the target node:
+
+```sh
+kubectl -n drive9-csi get pods -l app=drive9-csi-node -o wide
+```
+
+Create a bundle inside the `drive9-csi` container:
+
+```sh
+kubectl -n drive9-csi exec <drive9-csi-node-pod> -c drive9-csi -- \
+  tar czf /var/lib/drive9-csi/perf/<case-id>.tgz \
+    -C /var/lib/drive9-csi/perf <volume-id>
+```
+
+Upload the bundle to the support-owned Drive9 space:
+
+```sh
+kubectl -n drive9-csi exec <drive9-csi-node-pod> -c drive9-csi -- \
+  env DRIVE9_SERVER=https://api.drive9.ai \
+    DRIVE9_API_KEY="${DRIVE9_SUPPORT_UPLOAD_TOKEN}" \
+    drive9 fs cp /var/lib/drive9-csi/perf/<case-id>.tgz \
+      :/support-inbox/<case-id>/<node-name>/<volume-id>.tgz \
+      --tag case=<case-id> \
+      --tag source=k8s-csi \
+      --description "Drive9 CSI perf bundle"
+```
+
+For sidecar fallback, perf output is written to `/perf` in the mounter
+container when `DRIVE9_PERF_ENABLED` is `"true"`. Bundle and upload the mounted
+`/perf` directory with the same support upload token flow.
+
+After support confirms receipt, remove the local bundle and perf directory
+manually:
+
+```sh
+kubectl -n drive9-csi exec <drive9-csi-node-pod> -c drive9-csi -- \
+  rm -rf /var/lib/drive9-csi/perf/<volume-id> \
+    /var/lib/drive9-csi/perf/<case-id>.tgz
+```
 
 ## Limitations
 

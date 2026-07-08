@@ -30,6 +30,7 @@ type drive9MountRequest struct {
 	EntryTTL      string
 	DirTTL        string
 	PerfDir       string
+	Tuning        mountTuning
 }
 
 func (d *Driver) startDrive9Mount(ctx context.Context, req drive9MountRequest) error {
@@ -120,7 +121,27 @@ func (d *Driver) drive9MountArgs(req drive9MountRequest, cacheDir string) []stri
 	if req.PerfDir != "" {
 		args = append(args, "--perf-dir", req.PerfDir)
 	}
+	args = appendMountTuningArgs(args, req.Tuning)
 	return append(args, ":"+req.RemoteRoot, req.StagingTarget)
+}
+
+func appendMountTuningArgs(args []string, tuning mountTuning) []string {
+	if tuning.ReaddirPrefetch {
+		args = append(args, "--readdir-prefetch")
+	}
+	if tuning.ReaddirPrefetchMaxFiles != "" {
+		args = append(args, "--readdir-prefetch-max-files", tuning.ReaddirPrefetchMaxFiles)
+	}
+	if tuning.ReaddirPrefetchMaxFileBytes != "" {
+		args = append(args, "--readdir-prefetch-max-file-bytes", tuning.ReaddirPrefetchMaxFileBytes)
+	}
+	if tuning.ReaddirPrefetchMaxBytes != "" {
+		args = append(args, "--readdir-prefetch-max-bytes", tuning.ReaddirPrefetchMaxBytes)
+	}
+	if tuning.WritebackBatchWindow != "" {
+		args = append(args, "--writeback-batch-window", tuning.WritebackBatchWindow)
+	}
+	return args
 }
 
 func (d *Driver) drive9LocalRoot(volumeID string) string {

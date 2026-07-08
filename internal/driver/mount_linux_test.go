@@ -141,6 +141,63 @@ func TestDrive9MountArgsIncludesPerfDir(t *testing.T) {
 	assertStringSlice(t, got, want)
 }
 
+func TestDrive9MountArgsIncludesExplicitMountTuning(t *testing.T) {
+	d := &Driver{cfg: Config{StateDir: t.TempDir()}}
+	cacheDir := filepath.Join(d.cfg.StateDir, "cache", "vol")
+
+	got := d.drive9MountArgs(drive9MountRequest{
+		VolumeID:      "vol",
+		RemoteRoot:    "/",
+		StagingTarget: "/stage",
+		Tuning: mountTuning{
+			ReaddirPrefetchGiven:        true,
+			ReaddirPrefetch:             true,
+			ReaddirPrefetchMaxFiles:     "64",
+			ReaddirPrefetchMaxFileBytes: "50000",
+			ReaddirPrefetchMaxBytes:     "4194304",
+			WritebackBatchWindow:        "20ms",
+		},
+	}, cacheDir)
+
+	want := []string{
+		"mount",
+		"--mode=fuse",
+		"--allow-other",
+		"--cache-dir", cacheDir,
+		"--attr-ttl", "30s",
+		"--entry-ttl", "30s",
+		"--dir-ttl", "30s",
+		"--readdir-prefetch",
+		"--readdir-prefetch-max-files", "64",
+		"--readdir-prefetch-max-file-bytes", "50000",
+		"--readdir-prefetch-max-bytes", "4194304",
+		"--writeback-batch-window", "20ms",
+		":/",
+		"/stage",
+	}
+	assertStringSlice(t, got, want)
+}
+
+func TestDrive9MountArgsOmitsFalseReaddirPrefetch(t *testing.T) {
+	d := &Driver{cfg: Config{StateDir: t.TempDir()}}
+	cacheDir := filepath.Join(d.cfg.StateDir, "cache", "vol")
+
+	got := d.drive9MountArgs(drive9MountRequest{
+		VolumeID:      "vol",
+		RemoteRoot:    "/",
+		StagingTarget: "/stage",
+		Tuning: mountTuning{
+			ReaddirPrefetchGiven: true,
+		},
+	}, cacheDir)
+
+	for _, arg := range got {
+		if arg == "--readdir-prefetch" {
+			t.Fatalf("drive9MountArgs included --readdir-prefetch for explicit false: %v", got)
+		}
+	}
+}
+
 func TestNodeStageVolumeDefaultsMissingMountTTLsForLegacyVolumeContext(t *testing.T) {
 	fake := newFakeDrive9(t)
 	defer fake.close()
