@@ -249,6 +249,39 @@ func TestNodeRBACCanReadSecrets(t *testing.T) {
 	}
 }
 
+func TestNodeRBACCanReadPersistentVolumesForRecovery(t *testing.T) {
+	body := readRepoFile(t, "deploy/kubernetes/rbac.yaml")
+	idx := strings.Index(body, "name: drive9-csi-node\nrules:")
+	if idx < 0 {
+		t.Fatal("rbac.yaml missing drive9-csi-node ClusterRole rules")
+	}
+	nodeRole := body[idx:]
+
+	for _, want := range []string{
+		"resources: [\"persistentvolumes\"]",
+		"verbs: [\"get\", \"list\"]",
+	} {
+		if !strings.Contains(nodeRole, want) {
+			t.Fatalf("rbac.yaml missing node PV recovery permission evidence %q", want)
+		}
+	}
+}
+
+func TestRecoverNodeMountsManifestArgs(t *testing.T) {
+	controller := readRepoFile(t, "deploy/kubernetes/controller.yaml")
+	node := readRepoFile(t, "deploy/kubernetes/node.yaml")
+
+	if !strings.Contains(controller, "--recover-node-mounts=disabled") {
+		t.Fatal("controller.yaml must disable node mount recovery")
+	}
+	if !strings.Contains(node, "--recover-node-mounts=enabled") {
+		t.Fatal("node.yaml must enable node mount recovery")
+	}
+	if !strings.Contains(node, "terminationGracePeriodSeconds: 120") {
+		t.Fatal("node.yaml must set terminationGracePeriodSeconds for graceful umount")
+	}
+}
+
 func TestKubernetesExamplesUseAnnotationBasedSecrets(t *testing.T) {
 	pvc := readRepoFile(t, "deploy/examples/kubernetes/pvc.example.yaml")
 	if !strings.Contains(pvc, "drive9.ai/secret-name:") {
