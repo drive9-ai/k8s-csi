@@ -165,7 +165,7 @@ The default example `StorageClass` uses `Retain`, so deleting the PVC keeps the
 PV and Drive9 workspace data for safety. Even with `reclaimPolicy: Delete`, the
 default workspace-root mode does not delete Drive9 workspace data.
 
-Example Secret, PVC, and smoke Pod manifests live under `deploy/examples/kubernetes/` so that applying `deploy/kubernetes/` does not create placeholder credentials or demo workloads in production clusters. Apply the example Secret with `kubectl -n <workload-namespace> apply -f deploy/examples/kubernetes/secret.example.yaml` after replacing the API key. Each PVC references its Secret via the `drive9.ai/secret-name` annotation — multiple PVCs can share a Secret or use different ones.
+Example StorageClass, Secret, PVC, and smoke Pod manifests live under `deploy/examples/kubernetes/` so that applying `deploy/kubernetes/` does not create placeholder credentials or demo workloads in production clusters. Apply the example Secret with `kubectl -n <workload-namespace> apply -f deploy/examples/kubernetes/secret.example.yaml` after replacing the API key. Each PVC references its Secret via the `drive9.ai/secret-name` annotation — multiple PVCs can share a Secret or use different ones.
 
 ## StorageClass
 
