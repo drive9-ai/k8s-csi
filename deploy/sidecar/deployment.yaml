@@ -121,6 +121,7 @@ spec:
               fi
 
               exec drive9 mount \
+                --foreground \
                 --mode=fuse \
                 --allow-other \
                 --cache-dir /cache \
