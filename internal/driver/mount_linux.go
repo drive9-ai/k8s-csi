@@ -26,6 +26,11 @@ type drive9MountRequest struct {
 	RemoteRoot    string
 	StagingTarget string
 	Profile       string
+	AttrTTL       string
+	EntryTTL      string
+	DirTTL        string
+	PerfDir       string
+	Tuning        mountTuning
 }
 
 func (d *Driver) startDrive9Mount(ctx context.Context, req drive9MountRequest) error {
@@ -43,23 +48,17 @@ func (d *Driver) startDrive9Mount(ctx context.Context, req drive9MountRequest) e
 	}
 	defer func() { _ = logFile.Close() }()
 
-	args := []string{
-		"mount",
-		"--mode=fuse",
-		"--allow-other",
-		"--cache-dir", cacheDir,
-	}
-	if req.Profile != "" {
-		args = append(args, "--profile", req.Profile)
-		if req.Profile == "coding-agent" {
-			localRoot := filepath.Join(d.cfg.StateDir, "local", safeFileName(req.VolumeID))
-			if err := os.MkdirAll(localRoot, 0o700); err != nil {
-				return status.Errorf(codes.Internal, "create Drive9 local root: %v", err)
-			}
-			args = append(args, "--local-root", localRoot)
+	if req.Profile == "coding-agent" {
+		if err := os.MkdirAll(d.drive9LocalRoot(req.VolumeID), 0o700); err != nil {
+			return status.Errorf(codes.Internal, "create Drive9 local root: %v", err)
 		}
 	}
-	args = append(args, ":"+req.RemoteRoot, req.StagingTarget)
+	if req.PerfDir != "" {
+		if err := os.MkdirAll(req.PerfDir, 0o700); err != nil {
+			return status.Errorf(codes.Internal, "create Drive9 perf dir: %v", err)
+		}
+	}
+	args := d.drive9MountArgs(req, cacheDir)
 
 	cmd := exec.Command(d.cfg.Drive9Binary, args...)
 	cmd.Env = append(os.Environ(),
@@ -100,6 +99,53 @@ func (d *Driver) startDrive9Mount(ctx context.Context, req drive9MountRequest) e
 		return status.Errorf(codes.Internal, "drive9 mount did not become ready: %v", err)
 	}
 	return nil
+}
+
+func (d *Driver) drive9MountArgs(req drive9MountRequest, cacheDir string) []string {
+	ttls := mountTTLsOrDefault(req.AttrTTL, req.EntryTTL, req.DirTTL)
+	args := []string{
+		"mount",
+		"--mode=fuse",
+		"--allow-other",
+		"--cache-dir", cacheDir,
+		"--attr-ttl", ttls.AttrTTL,
+		"--entry-ttl", ttls.EntryTTL,
+		"--dir-ttl", ttls.DirTTL,
+	}
+	if req.Profile != "" {
+		args = append(args, "--profile", req.Profile)
+		if req.Profile == "coding-agent" {
+			args = append(args, "--local-root", d.drive9LocalRoot(req.VolumeID))
+		}
+	}
+	if req.PerfDir != "" {
+		args = append(args, "--perf-dir", req.PerfDir)
+	}
+	args = appendMountTuningArgs(args, req.Tuning)
+	return append(args, ":"+req.RemoteRoot, req.StagingTarget)
+}
+
+func appendMountTuningArgs(args []string, tuning mountTuning) []string {
+	if tuning.ReaddirPrefetch {
+		args = append(args, "--readdir-prefetch")
+	}
+	if tuning.ReaddirPrefetchMaxFiles != "" {
+		args = append(args, "--readdir-prefetch-max-files", tuning.ReaddirPrefetchMaxFiles)
+	}
+	if tuning.ReaddirPrefetchMaxFileBytes != "" {
+		args = append(args, "--readdir-prefetch-max-file-bytes", tuning.ReaddirPrefetchMaxFileBytes)
+	}
+	if tuning.ReaddirPrefetchMaxBytes != "" {
+		args = append(args, "--readdir-prefetch-max-bytes", tuning.ReaddirPrefetchMaxBytes)
+	}
+	if tuning.WritebackBatchWindow != "" {
+		args = append(args, "--writeback-batch-window", tuning.WritebackBatchWindow)
+	}
+	return args
+}
+
+func (d *Driver) drive9LocalRoot(volumeID string) string {
+	return filepath.Join(d.cfg.StateDir, "local", safeFileName(volumeID))
 }
 
 func (d *Driver) stopRecordedMount(ctx context.Context, volumeID string, stagingTarget string) error {

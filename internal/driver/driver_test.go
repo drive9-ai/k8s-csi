@@ -699,6 +699,9 @@ func TestCreateVolumeDefaultsToWorkspaceRootWithoutMarkers(t *testing.T) {
 	if ctx[attrSecretNamespace] != "default" {
 		t.Fatalf("CreateVolume secretNamespace = %q, want default", ctx[attrSecretNamespace])
 	}
+	assertVolumeContextMountTTLs(t, ctx, mountTTLs{AttrTTL: "30s", EntryTTL: "30s", DirTTL: "30s"})
+	assertVolumeContextMountPerf(t, ctx, false)
+	assertVolumeContextMountTuningAbsent(t, ctx)
 	for _, remotePath := range []string{markerPath("/"), indexPath(volumeID), nameIndexPath("pvc-root")} {
 		if fd.exists(remotePath) {
 			t.Fatalf("workspace root mode should not write CSI metadata path %s", remotePath)
@@ -736,6 +739,173 @@ func TestCreateVolumeDefaultsToWorkspaceRootWithoutMarkers(t *testing.T) {
 	}
 	if !fd.exists("/") {
 		t.Fatal("DeleteVolume root mode must not delete the Drive9 workspace root")
+	}
+}
+
+func TestCreateVolumeStoresConfiguredMountTTLs(t *testing.T) {
+	fd := newFakeDrive9(t)
+	defer fd.close()
+
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-ttl", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "pvc-ttl",
+		Parameters: pvcParams("pvc-ttl", "default", map[string]string{
+			paramAttrTTL:  "1000ms",
+			paramEntryTTL: "1m",
+			paramDirTTL:   "2m30s",
+		}),
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	assertVolumeContextMountTTLs(t, createResp.GetVolume().GetVolumeContext(), mountTTLs{
+		AttrTTL:  "1s",
+		EntryTTL: "1m0s",
+		DirTTL:   "2m30s",
+	})
+}
+
+func TestCreateVolumeStoresConfiguredMountPerf(t *testing.T) {
+	fd := newFakeDrive9(t)
+	defer fd.close()
+
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-perf", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "pvc-perf",
+		Parameters: pvcParams("pvc-perf", "default", map[string]string{
+			paramPerfEnabled: "true",
+		}),
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	assertVolumeContextMountPerf(t, createResp.GetVolume().GetVolumeContext(), true)
+}
+
+func TestCreateVolumeStoresConfiguredMountTuning(t *testing.T) {
+	fd := newFakeDrive9(t)
+	defer fd.close()
+
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-tuning", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "pvc-tuning",
+		Parameters: pvcParams("pvc-tuning", "default", map[string]string{
+			paramReaddirPrefetch:             "true",
+			paramReaddirPrefetchMaxFiles:     "64",
+			paramReaddirPrefetchMaxFileBytes: "50000",
+			paramReaddirPrefetchMaxBytes:     "4194304",
+			paramWritebackBatchWindow:        "20ms",
+		}),
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	assertVolumeContextMountTuning(t, createResp.GetVolume().GetVolumeContext(), mountTuning{
+		ReaddirPrefetchGiven:        true,
+		ReaddirPrefetch:             true,
+		ReaddirPrefetchMaxFiles:     "64",
+		ReaddirPrefetchMaxFileBytes: "50000",
+		ReaddirPrefetchMaxBytes:     "4194304",
+		WritebackBatchWindow:        "20ms",
+	})
+}
+
+func TestCreateVolumeRejectsInvalidMountTTLs(t *testing.T) {
+	fd := newFakeDrive9(t)
+	defer fd.close()
+
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-ttl", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
+	tests := []map[string]string{
+		{paramAttrTTL: ""},
+		{paramEntryTTL: "abc"},
+		{paramDirTTL: "0s"},
+		{paramAttrTTL: "-1s"},
+	}
+	for _, extra := range tests {
+		_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+			Name:               "pvc-ttl",
+			Parameters:         pvcParams("pvc-ttl", "default", extra),
+			VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+		})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("CreateVolume(%v) status = %s, want InvalidArgument (err=%v)", extra, status.Code(err), err)
+		}
+	}
+}
+
+func TestCreateVolumeRejectsInvalidMountPerf(t *testing.T) {
+	fd := newFakeDrive9(t)
+	defer fd.close()
+
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-perf", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
+	for _, value := range []string{"", "yes", "TRUE"} {
+		_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+			Name: "pvc-perf",
+			Parameters: pvcParams("pvc-perf", "default", map[string]string{
+				paramPerfEnabled: value,
+			}),
+			VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+		})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("CreateVolume(%q) status = %s, want InvalidArgument (err=%v)", value, status.Code(err), err)
+		}
+	}
+}
+
+func TestCreateVolumeRejectsInvalidMountTuning(t *testing.T) {
+	fd := newFakeDrive9(t)
+	defer fd.close()
+
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-tuning", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
+	tests := []map[string]string{
+		{paramReaddirPrefetch: "yes"},
+		{paramReaddirPrefetchMaxFiles: "0"},
+		{paramReaddirPrefetchMaxFileBytes: "-1"},
+		{paramReaddirPrefetchMaxBytes: "no"},
+		{paramWritebackBatchWindow: "0s"},
+	}
+	for _, extra := range tests {
+		_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+			Name:               "pvc-tuning",
+			Parameters:         pvcParams("pvc-tuning", "default", extra),
+			VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+		})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("CreateVolume(%v) status = %s, want InvalidArgument (err=%v)", extra, status.Code(err), err)
+		}
 	}
 }
 
@@ -835,6 +1005,8 @@ func TestCreateDeleteManagedDirectoryVolumeWritesIndexAndMarker(t *testing.T) {
 	if !fd.exists(nameIndexPath("pvc-demo")) {
 		t.Fatalf("missing name index marker %s", nameIndexPath("pvc-demo"))
 	}
+	assertVolumeContextMountPerf(t, createResp.GetVolume().GetVolumeContext(), false)
+	assertVolumeContextMountTuningAbsent(t, createResp.GetVolume().GetVolumeContext())
 
 	// Write a user file into the managed directory to verify data is preserved.
 	fd.putFile(remoteRoot+"/user-data.txt", []byte("keep me"))
@@ -1450,6 +1622,71 @@ func pvcParams(pvcName, namespace string, extra map[string]string) map[string]st
 		params[k] = v
 	}
 	return params
+}
+
+func assertVolumeContextMountTTLs(t *testing.T, ctx map[string]string, want mountTTLs) {
+	t.Helper()
+	if got := ctx[paramAttrTTL]; got != want.AttrTTL {
+		t.Fatalf("volume context %s = %q, want %q", paramAttrTTL, got, want.AttrTTL)
+	}
+	if got := ctx[paramEntryTTL]; got != want.EntryTTL {
+		t.Fatalf("volume context %s = %q, want %q", paramEntryTTL, got, want.EntryTTL)
+	}
+	if got := ctx[paramDirTTL]; got != want.DirTTL {
+		t.Fatalf("volume context %s = %q, want %q", paramDirTTL, got, want.DirTTL)
+	}
+}
+
+func assertVolumeContextMountPerf(t *testing.T, ctx map[string]string, want bool) {
+	t.Helper()
+	wantValue := "false"
+	if want {
+		wantValue = "true"
+	}
+	if got := ctx[paramPerfEnabled]; got != wantValue {
+		t.Fatalf("volume context %s = %q, want %q", paramPerfEnabled, got, wantValue)
+	}
+}
+
+func assertVolumeContextMountTuning(t *testing.T, ctx map[string]string, want mountTuning) {
+	t.Helper()
+	if got := ctx[paramReaddirPrefetch]; got != boolString(want.ReaddirPrefetch) {
+		t.Fatalf("volume context %s = %q, want %q", paramReaddirPrefetch, got, boolString(want.ReaddirPrefetch))
+	}
+	if got := ctx[paramReaddirPrefetchMaxFiles]; got != want.ReaddirPrefetchMaxFiles {
+		t.Fatalf("volume context %s = %q, want %q", paramReaddirPrefetchMaxFiles, got, want.ReaddirPrefetchMaxFiles)
+	}
+	if got := ctx[paramReaddirPrefetchMaxFileBytes]; got != want.ReaddirPrefetchMaxFileBytes {
+		t.Fatalf("volume context %s = %q, want %q", paramReaddirPrefetchMaxFileBytes, got, want.ReaddirPrefetchMaxFileBytes)
+	}
+	if got := ctx[paramReaddirPrefetchMaxBytes]; got != want.ReaddirPrefetchMaxBytes {
+		t.Fatalf("volume context %s = %q, want %q", paramReaddirPrefetchMaxBytes, got, want.ReaddirPrefetchMaxBytes)
+	}
+	if got := ctx[paramWritebackBatchWindow]; got != want.WritebackBatchWindow {
+		t.Fatalf("volume context %s = %q, want %q", paramWritebackBatchWindow, got, want.WritebackBatchWindow)
+	}
+}
+
+func assertVolumeContextMountTuningAbsent(t *testing.T, ctx map[string]string) {
+	t.Helper()
+	for _, key := range []string{
+		paramReaddirPrefetch,
+		paramReaddirPrefetchMaxFiles,
+		paramReaddirPrefetchMaxFileBytes,
+		paramReaddirPrefetchMaxBytes,
+		paramWritebackBatchWindow,
+	} {
+		if _, ok := ctx[key]; ok {
+			t.Fatalf("volume context must not contain default mount tuning key %s", key)
+		}
+	}
+}
+
+func boolString(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
 }
 
 func (f *fakeDrive9) exists(remotePath string) bool {
