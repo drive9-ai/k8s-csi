@@ -14,6 +14,11 @@ type drive9MountRequest struct {
 	RemoteRoot    string
 	StagingTarget string
 	Profile       string
+	AttrTTL       string
+	EntryTTL      string
+	DirTTL        string
+	PerfDir       string
+	Tuning        mountTuning
 }
 
 func (d *Driver) startDrive9Mount(context.Context, drive9MountRequest) error {

@@ -34,6 +34,56 @@ spec:
               mkdir -p /mnt/drive9 /cache || exit 1
 
               remote_root="${DRIVE9_REMOTE_ROOT:-/}"
+              attr_ttl="${DRIVE9_ATTR_TTL:-30s}"
+              entry_ttl="${DRIVE9_ENTRY_TTL:-30s}"
+              dir_ttl="${DRIVE9_DIR_TTL:-30s}"
+              perf_enabled="${DRIVE9_PERF_ENABLED:-false}"
+              readdir_prefetch="${DRIVE9_READDIR_PREFETCH:-}"
+              readdir_prefetch_max_files="${DRIVE9_READDIR_PREFETCH_MAX_FILES:-}"
+              readdir_prefetch_max_file_bytes="${DRIVE9_READDIR_PREFETCH_MAX_FILE_BYTES:-}"
+              readdir_prefetch_max_bytes="${DRIVE9_READDIR_PREFETCH_MAX_BYTES:-}"
+              writeback_batch_window="${DRIVE9_WRITEBACK_BATCH_WINDOW:-}"
+              if [ -z "${attr_ttl}" ] || [ -z "${entry_ttl}" ] || [ -z "${dir_ttl}" ]; then
+                echo "DRIVE9_*_TTL must not be empty" >&2
+                exit 1
+              fi
+              case "${perf_enabled}" in
+                true)
+                  mkdir -p /perf || exit 1
+                  set -- --perf-dir /perf
+                  ;;
+                false)
+                  set --
+                  ;;
+                *)
+                  echo "DRIVE9_PERF_ENABLED must be true or false" >&2
+                  exit 1
+                  ;;
+              esac
+              case "${readdir_prefetch}" in
+                true)
+                  set -- "$@" --readdir-prefetch
+                  ;;
+                false|"")
+                  ;;
+                *)
+                  echo "DRIVE9_READDIR_PREFETCH must be true or false when set" >&2
+                  exit 1
+                  ;;
+              esac
+              if [ -n "${readdir_prefetch_max_files}" ]; then
+                set -- "$@" --readdir-prefetch-max-files "${readdir_prefetch_max_files}"
+              fi
+              if [ -n "${readdir_prefetch_max_file_bytes}" ]; then
+                set -- "$@" --readdir-prefetch-max-file-bytes "${readdir_prefetch_max_file_bytes}"
+              fi
+              if [ -n "${readdir_prefetch_max_bytes}" ]; then
+                set -- "$@" --readdir-prefetch-max-bytes "${readdir_prefetch_max_bytes}"
+              fi
+              if [ -n "${writeback_batch_window}" ]; then
+                set -- "$@" --writeback-batch-window "${writeback_batch_window}"
+              fi
+
               case "${remote_root}" in
                 /*) ;;
                 *)
@@ -70,7 +120,17 @@ spec:
                 done
               fi
 
-              exec drive9 mount --mode=fuse --allow-other --cache-dir /cache --profile "${DRIVE9_PROFILE}" ":${remote_root}" /mnt/drive9
+              exec drive9 mount \
+                --mode=fuse \
+                --allow-other \
+                --cache-dir /cache \
+                --profile "${DRIVE9_PROFILE}" \
+                --attr-ttl "${attr_ttl}" \
+                --entry-ttl "${entry_ttl}" \
+                --dir-ttl "${dir_ttl}" \
+                "$@" \
+                ":${remote_root}" \
+                /mnt/drive9
           env:
             - name: DRIVE9_SERVER
               valueFrom:
@@ -86,12 +146,22 @@ spec:
               value: /
             - name: DRIVE9_PROFILE
               value: coding-agent
+            - name: DRIVE9_ATTR_TTL
+              value: 30s
+            - name: DRIVE9_ENTRY_TTL
+              value: 30s
+            - name: DRIVE9_DIR_TTL
+              value: 30s
+            - name: DRIVE9_PERF_ENABLED
+              value: "false"
           volumeMounts:
             - name: drive9-workspace
               mountPath: /mnt/drive9
               mountPropagation: Bidirectional
             - name: drive9-cache
               mountPath: /cache
+            - name: drive9-perf
+              mountPath: /perf
             - name: dev-fuse
               mountPath: /dev/fuse
       volumes:
@@ -101,6 +171,10 @@ spec:
             type: DirectoryOrCreate
         - name: drive9-cache
           emptyDir: {}
+        - name: drive9-perf
+          hostPath:
+            path: /var/lib/drive9-sidecar/demo/perf
+            type: DirectoryOrCreate
         - name: dev-fuse
           hostPath:
             path: /dev/fuse
