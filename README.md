@@ -175,6 +175,9 @@ Default example:
 provisioner: csi.drive9.ai
 parameters:
   profile: coding-agent
+  attrTTL: 30s
+  entryTTL: 30s
+  dirTTL: 30s
 reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer
 ```
@@ -192,12 +195,20 @@ root, create a separate `StorageClass` with `remoteRootPrefix`:
 parameters:
   remoteRootPrefix: /k8s/pvc
   profile: coding-agent
+  attrTTL: 30s
+  entryTTL: 30s
+  dirTTL: 30s
 ```
 
 In managed directory mode, `CreateVolume` creates a unique child directory under
 that prefix and writes CSI metadata. If that separate `StorageClass` uses
 `reclaimPolicy: Delete`, the driver still refuses to delete paths without both a
 matching metadata index entry and a matching `.drive9-csi-volume.json` marker.
+
+The optional `attrTTL`, `entryTTL`, and `dirTTL` parameters control the matching
+`drive9 mount --attr-ttl`, `--entry-ttl`, and `--dir-ttl` flags. Each value uses
+Go duration syntax, for example `500ms`, `1s`, `30s`, or `2m`. If omitted, the
+CSI driver defaults each value to `30s`.
 
 If you use `reclaimPolicy: Delete`, keep the per-PVC workload namespace Secret in
 place until Kubernetes has deleted the PV. If the Secret is removed first,
@@ -209,6 +220,10 @@ intervention.
 If a customer cannot install a CSI driver yet, use `deploy/sidecar/deployment.yaml` as a fallback. It runs a privileged Drive9 mounter sidecar and exposes the mounted directory to the app container.
 
 This is less clean than CSI because it requires privileged pods and hostPath mount propagation. Use it for pilots or constrained clusters, not as the default production path. The fallback example also mounts the Drive9 workspace root by default; set `DRIVE9_REMOTE_ROOT` only when a subpath is intentional.
+
+The sidecar fallback exposes the same mount TTL behavior through
+`DRIVE9_ATTR_TTL`, `DRIVE9_ENTRY_TTL`, and `DRIVE9_DIR_TTL`. Each defaults to
+`30s` and maps to the corresponding `drive9 mount` flag.
 
 Create the sidecar Secret in the target namespace before applying the fallback deployment:
 

@@ -34,6 +34,14 @@ spec:
               mkdir -p /mnt/drive9 /cache || exit 1
 
               remote_root="${DRIVE9_REMOTE_ROOT:-/}"
+              attr_ttl="${DRIVE9_ATTR_TTL:-30s}"
+              entry_ttl="${DRIVE9_ENTRY_TTL:-30s}"
+              dir_ttl="${DRIVE9_DIR_TTL:-30s}"
+              if [ -z "${attr_ttl}" ] || [ -z "${entry_ttl}" ] || [ -z "${dir_ttl}" ]; then
+                echo "DRIVE9_*_TTL must not be empty" >&2
+                exit 1
+              fi
+
               case "${remote_root}" in
                 /*) ;;
                 *)
@@ -70,7 +78,16 @@ spec:
                 done
               fi
 
-              exec drive9 mount --mode=fuse --allow-other --cache-dir /cache --profile "${DRIVE9_PROFILE}" ":${remote_root}" /mnt/drive9
+              exec drive9 mount \
+                --mode=fuse \
+                --allow-other \
+                --cache-dir /cache \
+                --profile "${DRIVE9_PROFILE}" \
+                --attr-ttl "${attr_ttl}" \
+                --entry-ttl "${entry_ttl}" \
+                --dir-ttl "${dir_ttl}" \
+                ":${remote_root}" \
+                /mnt/drive9
           env:
             - name: DRIVE9_SERVER
               valueFrom:
@@ -86,6 +103,12 @@ spec:
               value: /
             - name: DRIVE9_PROFILE
               value: coding-agent
+            - name: DRIVE9_ATTR_TTL
+              value: 30s
+            - name: DRIVE9_ENTRY_TTL
+              value: 30s
+            - name: DRIVE9_DIR_TTL
+              value: 30s
           volumeMounts:
             - name: drive9-workspace
               mountPath: /mnt/drive9

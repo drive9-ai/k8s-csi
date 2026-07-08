@@ -38,6 +38,38 @@ func TestDefaultStorageClassMountsWorkspaceRoot(t *testing.T) {
 	}
 }
 
+func TestDefaultStorageClassMountTTLs(t *testing.T) {
+	body := readRepoFile(t, "deploy/kubernetes/storageclass.yaml")
+
+	for _, want := range []string{
+		"  attrTTL: 30s",
+		"  entryTTL: 30s",
+		"  dirTTL: 30s",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("storageclass.yaml missing default mount TTL parameter %q", want)
+		}
+	}
+}
+
+func TestSidecarFallbackMountTTLs(t *testing.T) {
+	body := readRepoFile(t, "deploy/sidecar/deployment.yaml")
+
+	for _, want := range []string{
+		"DRIVE9_ATTR_TTL",
+		"DRIVE9_ENTRY_TTL",
+		"DRIVE9_DIR_TTL",
+		"--attr-ttl",
+		"--entry-ttl",
+		"--dir-ttl",
+		"value: 30s",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("sidecar deployment missing mount TTL evidence %q", want)
+		}
+	}
+}
+
 func TestControllerRBACCanReadPerPVCNamespaceLocalDrive9Secrets(t *testing.T) {
 	body := readRepoFile(t, "deploy/kubernetes/rbac.yaml")
 

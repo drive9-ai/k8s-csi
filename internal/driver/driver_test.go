@@ -699,6 +699,7 @@ func TestCreateVolumeDefaultsToWorkspaceRootWithoutMarkers(t *testing.T) {
 	if ctx[attrSecretNamespace] != "default" {
 		t.Fatalf("CreateVolume secretNamespace = %q, want default", ctx[attrSecretNamespace])
 	}
+	assertVolumeContextMountTTLs(t, ctx, mountTTLs{AttrTTL: "30s", EntryTTL: "30s", DirTTL: "30s"})
 	for _, remotePath := range []string{markerPath("/"), indexPath(volumeID), nameIndexPath("pvc-root")} {
 		if fd.exists(remotePath) {
 			t.Fatalf("workspace root mode should not write CSI metadata path %s", remotePath)
@@ -736,6 +737,63 @@ func TestCreateVolumeDefaultsToWorkspaceRootWithoutMarkers(t *testing.T) {
 	}
 	if !fd.exists("/") {
 		t.Fatal("DeleteVolume root mode must not delete the Drive9 workspace root")
+	}
+}
+
+func TestCreateVolumeStoresConfiguredMountTTLs(t *testing.T) {
+	fd := newFakeDrive9(t)
+	defer fd.close()
+
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-ttl", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "pvc-ttl",
+		Parameters: pvcParams("pvc-ttl", "default", map[string]string{
+			paramAttrTTL:  "1000ms",
+			paramEntryTTL: "1m",
+			paramDirTTL:   "2m30s",
+		}),
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	assertVolumeContextMountTTLs(t, createResp.GetVolume().GetVolumeContext(), mountTTLs{
+		AttrTTL:  "1s",
+		EntryTTL: "1m0s",
+		DirTTL:   "2m30s",
+	})
+}
+
+func TestCreateVolumeRejectsInvalidMountTTLs(t *testing.T) {
+	fd := newFakeDrive9(t)
+	defer fd.close()
+
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-ttl", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
+	tests := []map[string]string{
+		{paramAttrTTL: ""},
+		{paramEntryTTL: "abc"},
+		{paramDirTTL: "0s"},
+		{paramAttrTTL: "-1s"},
+	}
+	for _, extra := range tests {
+		_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+			Name:               "pvc-ttl",
+			Parameters:         pvcParams("pvc-ttl", "default", extra),
+			VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+		})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("CreateVolume(%v) status = %s, want InvalidArgument (err=%v)", extra, status.Code(err), err)
+		}
 	}
 }
 
@@ -1450,6 +1508,19 @@ func pvcParams(pvcName, namespace string, extra map[string]string) map[string]st
 		params[k] = v
 	}
 	return params
+}
+
+func assertVolumeContextMountTTLs(t *testing.T, ctx map[string]string, want mountTTLs) {
+	t.Helper()
+	if got := ctx[paramAttrTTL]; got != want.AttrTTL {
+		t.Fatalf("volume context %s = %q, want %q", paramAttrTTL, got, want.AttrTTL)
+	}
+	if got := ctx[paramEntryTTL]; got != want.EntryTTL {
+		t.Fatalf("volume context %s = %q, want %q", paramEntryTTL, got, want.EntryTTL)
+	}
+	if got := ctx[paramDirTTL]; got != want.DirTTL {
+		t.Fatalf("volume context %s = %q, want %q", paramDirTTL, got, want.DirTTL)
+	}
 }
 
 func (f *fakeDrive9) exists(remotePath string) bool {

@@ -251,13 +251,17 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	if err := validateNoAPIKeyInAttributes(params); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
+	ttls, err := effectiveMountTTLs(params)
+	if err != nil {
+		return nil, err
+	}
 
 	remoteRoot, managedVolume, err := resolveCreateVolumeRemoteRoot(name, params, ref)
 	if err != nil {
 		return nil, err
 	}
 	if managedVolume {
-		return d.createManagedDirectoryVolume(ctx, req, creds, ref, name, remoteRoot)
+		return d.createManagedDirectoryVolume(ctx, req, creds, ref, name, remoteRoot, ttls)
 	}
 
 	client := newDrive9Client(creds)
@@ -265,23 +269,25 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 		return nil, err
 	}
 	volumeID := volumeIDForWorkspaceRoot(name, remoteRoot)
+	volumeContext := map[string]string{
+		"drive9VolumeMode":  "workspace-root",
+		"remoteRoot":        remoteRoot,
+		"volumeName":        name,
+		"profile":           params["profile"],
+		attrSecretName:      ref.SecretName,
+		attrSecretNamespace: ref.SecretNamespace,
+	}
+	ttls.addToVolumeContext(volumeContext)
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
 			VolumeId:      volumeID,
 			CapacityBytes: requestedCapacity(req.GetCapacityRange()),
-			VolumeContext: map[string]string{
-				"drive9VolumeMode":  "workspace-root",
-				"remoteRoot":        remoteRoot,
-				"volumeName":        name,
-				"profile":           params["profile"],
-				attrSecretName:      ref.SecretName,
-				attrSecretNamespace: ref.SecretNamespace,
-			},
+			VolumeContext: volumeContext,
 		},
 	}, nil
 }
 
-func (d *Driver) createManagedDirectoryVolume(ctx context.Context, req *csi.CreateVolumeRequest, creds drive9Credentials, ref pvcSecretRef, name string, remoteRoot string) (*csi.CreateVolumeResponse, error) {
+func (d *Driver) createManagedDirectoryVolume(ctx context.Context, req *csi.CreateVolumeRequest, creds drive9Credentials, ref pvcSecretRef, name string, remoteRoot string, ttls mountTTLs) (*csi.CreateVolumeResponse, error) {
 	params := req.GetParameters()
 	volumeID := volumeIDForRemoteRoot(remoteRoot)
 	marker := volumeMarker{
@@ -336,16 +342,18 @@ func (d *Driver) createManagedDirectoryVolume(ctx context.Context, req *csi.Crea
 		return nil, err
 	}
 
+	volumeContext := map[string]string{
+		"remoteRoot":        remoteRoot,
+		"profile":           params["profile"],
+		attrSecretName:      ref.SecretName,
+		attrSecretNamespace: ref.SecretNamespace,
+	}
+	ttls.addToVolumeContext(volumeContext)
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
 			VolumeId:      volumeID,
 			CapacityBytes: requestedCapacity(req.GetCapacityRange()),
-			VolumeContext: map[string]string{
-				"remoteRoot":        remoteRoot,
-				"profile":           params["profile"],
-				attrSecretName:      ref.SecretName,
-				attrSecretNamespace: ref.SecretNamespace,
-			},
+			VolumeContext: volumeContext,
 		},
 	}, nil
 }
@@ -497,6 +505,10 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 			return nil, status.Error(codes.FailedPrecondition, "volume id does not match volume context remoteRoot")
 		}
 	}
+	ttls, err := effectiveMountTTLs(req.GetVolumeContext())
+	if err != nil {
+		return nil, err
+	}
 	// Resolve credentials from volumeAttributes Secret reference.
 	creds, err := d.resolveNodeStageCredentials(ctx, req)
 	if err != nil {
@@ -537,6 +549,9 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		RemoteRoot:    remoteRoot,
 		StagingTarget: stagingTarget,
 		Profile:       profile,
+		AttrTTL:       ttls.AttrTTL,
+		EntryTTL:      ttls.EntryTTL,
+		DirTTL:        ttls.DirTTL,
 	}); err != nil {
 		return nil, err
 	}

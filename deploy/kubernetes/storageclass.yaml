@@ -5,6 +5,9 @@ metadata:
 provisioner: csi.drive9.ai
 parameters:
   profile: coding-agent
+  attrTTL: 30s
+  entryTTL: 30s
+  dirTTL: 30s
 reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: false
