@@ -700,6 +700,7 @@ func TestCreateVolumeDefaultsToWorkspaceRootWithoutMarkers(t *testing.T) {
 		t.Fatalf("CreateVolume secretNamespace = %q, want default", ctx[attrSecretNamespace])
 	}
 	assertVolumeContextMountTTLs(t, ctx, mountTTLs{AttrTTL: "30s", EntryTTL: "30s", DirTTL: "30s"})
+	assertVolumeContextMountPerf(t, ctx, false)
 	for _, remotePath := range []string{markerPath("/"), indexPath(volumeID), nameIndexPath("pvc-root")} {
 		if fd.exists(remotePath) {
 			t.Fatalf("workspace root mode should not write CSI metadata path %s", remotePath)
@@ -769,6 +770,29 @@ func TestCreateVolumeStoresConfiguredMountTTLs(t *testing.T) {
 	})
 }
 
+func TestCreateVolumeStoresConfiguredMountPerf(t *testing.T) {
+	fd := newFakeDrive9(t)
+	defer fd.close()
+
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-perf", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "pvc-perf",
+		Parameters: pvcParams("pvc-perf", "default", map[string]string{
+			paramPerfEnabled: "true",
+		}),
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	assertVolumeContextMountPerf(t, createResp.GetVolume().GetVolumeContext(), true)
+}
+
 func TestCreateVolumeRejectsInvalidMountTTLs(t *testing.T) {
 	fd := newFakeDrive9(t)
 	defer fd.close()
@@ -793,6 +817,30 @@ func TestCreateVolumeRejectsInvalidMountTTLs(t *testing.T) {
 		})
 		if status.Code(err) != codes.InvalidArgument {
 			t.Fatalf("CreateVolume(%v) status = %s, want InvalidArgument (err=%v)", extra, status.Code(err), err)
+		}
+	}
+}
+
+func TestCreateVolumeRejectsInvalidMountPerf(t *testing.T) {
+	fd := newFakeDrive9(t)
+	defer fd.close()
+
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-perf", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
+	for _, value := range []string{"", "yes", "TRUE"} {
+		_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+			Name: "pvc-perf",
+			Parameters: pvcParams("pvc-perf", "default", map[string]string{
+				paramPerfEnabled: value,
+			}),
+			VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+		})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("CreateVolume(%q) status = %s, want InvalidArgument (err=%v)", value, status.Code(err), err)
 		}
 	}
 }
@@ -893,6 +941,7 @@ func TestCreateDeleteManagedDirectoryVolumeWritesIndexAndMarker(t *testing.T) {
 	if !fd.exists(nameIndexPath("pvc-demo")) {
 		t.Fatalf("missing name index marker %s", nameIndexPath("pvc-demo"))
 	}
+	assertVolumeContextMountPerf(t, createResp.GetVolume().GetVolumeContext(), false)
 
 	// Write a user file into the managed directory to verify data is preserved.
 	fd.putFile(remoteRoot+"/user-data.txt", []byte("keep me"))
@@ -1520,6 +1569,17 @@ func assertVolumeContextMountTTLs(t *testing.T, ctx map[string]string, want moun
 	}
 	if got := ctx[paramDirTTL]; got != want.DirTTL {
 		t.Fatalf("volume context %s = %q, want %q", paramDirTTL, got, want.DirTTL)
+	}
+}
+
+func assertVolumeContextMountPerf(t *testing.T, ctx map[string]string, want bool) {
+	t.Helper()
+	wantValue := "false"
+	if want {
+		wantValue = "true"
+	}
+	if got := ctx[paramPerfEnabled]; got != wantValue {
+		t.Fatalf("volume context %s = %q, want %q", paramPerfEnabled, got, wantValue)
 	}
 }
 

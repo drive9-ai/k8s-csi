@@ -37,10 +37,24 @@ spec:
               attr_ttl="${DRIVE9_ATTR_TTL:-30s}"
               entry_ttl="${DRIVE9_ENTRY_TTL:-30s}"
               dir_ttl="${DRIVE9_DIR_TTL:-30s}"
+              perf_enabled="${DRIVE9_PERF_ENABLED:-false}"
               if [ -z "${attr_ttl}" ] || [ -z "${entry_ttl}" ] || [ -z "${dir_ttl}" ]; then
                 echo "DRIVE9_*_TTL must not be empty" >&2
                 exit 1
               fi
+              case "${perf_enabled}" in
+                true)
+                  mkdir -p /perf || exit 1
+                  set -- --perf-dir /perf
+                  ;;
+                false)
+                  set --
+                  ;;
+                *)
+                  echo "DRIVE9_PERF_ENABLED must be true or false" >&2
+                  exit 1
+                  ;;
+              esac
 
               case "${remote_root}" in
                 /*) ;;
@@ -86,6 +100,7 @@ spec:
                 --attr-ttl "${attr_ttl}" \
                 --entry-ttl "${entry_ttl}" \
                 --dir-ttl "${dir_ttl}" \
+                "$@" \
                 ":${remote_root}" \
                 /mnt/drive9
           env:
@@ -109,12 +124,16 @@ spec:
               value: 30s
             - name: DRIVE9_DIR_TTL
               value: 30s
+            - name: DRIVE9_PERF_ENABLED
+              value: "false"
           volumeMounts:
             - name: drive9-workspace
               mountPath: /mnt/drive9
               mountPropagation: Bidirectional
             - name: drive9-cache
               mountPath: /cache
+            - name: drive9-perf
+              mountPath: /perf
             - name: dev-fuse
               mountPath: /dev/fuse
       volumes:
@@ -124,6 +143,10 @@ spec:
             type: DirectoryOrCreate
         - name: drive9-cache
           emptyDir: {}
+        - name: drive9-perf
+          hostPath:
+            path: /var/lib/drive9-sidecar/demo/perf
+            type: DirectoryOrCreate
         - name: dev-fuse
           hostPath:
             path: /dev/fuse

@@ -29,6 +29,7 @@ type drive9MountRequest struct {
 	AttrTTL       string
 	EntryTTL      string
 	DirTTL        string
+	PerfDir       string
 }
 
 func (d *Driver) startDrive9Mount(ctx context.Context, req drive9MountRequest) error {
@@ -49,6 +50,11 @@ func (d *Driver) startDrive9Mount(ctx context.Context, req drive9MountRequest) e
 	if req.Profile == "coding-agent" {
 		if err := os.MkdirAll(d.drive9LocalRoot(req.VolumeID), 0o700); err != nil {
 			return status.Errorf(codes.Internal, "create Drive9 local root: %v", err)
+		}
+	}
+	if req.PerfDir != "" {
+		if err := os.MkdirAll(req.PerfDir, 0o700); err != nil {
+			return status.Errorf(codes.Internal, "create Drive9 perf dir: %v", err)
 		}
 	}
 	args := d.drive9MountArgs(req, cacheDir)
@@ -110,6 +116,9 @@ func (d *Driver) drive9MountArgs(req drive9MountRequest, cacheDir string) []stri
 		if req.Profile == "coding-agent" {
 			args = append(args, "--local-root", d.drive9LocalRoot(req.VolumeID))
 		}
+	}
+	if req.PerfDir != "" {
+		args = append(args, "--perf-dir", req.PerfDir)
 	}
 	return append(args, ":"+req.RemoteRoot, req.StagingTarget)
 }

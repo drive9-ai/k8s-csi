@@ -113,6 +113,34 @@ func TestDrive9MountArgsDefaultsMountTTLs(t *testing.T) {
 	assertStringSlice(t, got, want)
 }
 
+func TestDrive9MountArgsIncludesPerfDir(t *testing.T) {
+	stateDir := t.TempDir()
+	d := &Driver{cfg: Config{StateDir: stateDir}}
+	cacheDir := filepath.Join(stateDir, "cache", "vol")
+	perfDir := filepath.Join(stateDir, "perf", "vol")
+
+	got := d.drive9MountArgs(drive9MountRequest{
+		VolumeID:      "vol",
+		RemoteRoot:    "/",
+		StagingTarget: "/stage",
+		PerfDir:       perfDir,
+	}, cacheDir)
+
+	want := []string{
+		"mount",
+		"--mode=fuse",
+		"--allow-other",
+		"--cache-dir", cacheDir,
+		"--attr-ttl", "30s",
+		"--entry-ttl", "30s",
+		"--dir-ttl", "30s",
+		"--perf-dir", perfDir,
+		":/",
+		"/stage",
+	}
+	assertStringSlice(t, got, want)
+}
+
 func TestNodeStageVolumeDefaultsMissingMountTTLsForLegacyVolumeContext(t *testing.T) {
 	fake := newFakeDrive9(t)
 	defer fake.close()

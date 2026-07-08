@@ -255,13 +255,17 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	if err != nil {
 		return nil, err
 	}
+	perf, err := effectiveMountPerf(params)
+	if err != nil {
+		return nil, err
+	}
 
 	remoteRoot, managedVolume, err := resolveCreateVolumeRemoteRoot(name, params, ref)
 	if err != nil {
 		return nil, err
 	}
 	if managedVolume {
-		return d.createManagedDirectoryVolume(ctx, req, creds, ref, name, remoteRoot, ttls)
+		return d.createManagedDirectoryVolume(ctx, req, creds, ref, name, remoteRoot, ttls, perf)
 	}
 
 	client := newDrive9Client(creds)
@@ -278,6 +282,7 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 		attrSecretNamespace: ref.SecretNamespace,
 	}
 	ttls.addToVolumeContext(volumeContext)
+	perf.addToVolumeContext(volumeContext)
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
 			VolumeId:      volumeID,
@@ -287,7 +292,7 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	}, nil
 }
 
-func (d *Driver) createManagedDirectoryVolume(ctx context.Context, req *csi.CreateVolumeRequest, creds drive9Credentials, ref pvcSecretRef, name string, remoteRoot string, ttls mountTTLs) (*csi.CreateVolumeResponse, error) {
+func (d *Driver) createManagedDirectoryVolume(ctx context.Context, req *csi.CreateVolumeRequest, creds drive9Credentials, ref pvcSecretRef, name string, remoteRoot string, ttls mountTTLs, perf mountPerf) (*csi.CreateVolumeResponse, error) {
 	params := req.GetParameters()
 	volumeID := volumeIDForRemoteRoot(remoteRoot)
 	marker := volumeMarker{
@@ -349,6 +354,7 @@ func (d *Driver) createManagedDirectoryVolume(ctx context.Context, req *csi.Crea
 		attrSecretNamespace: ref.SecretNamespace,
 	}
 	ttls.addToVolumeContext(volumeContext)
+	perf.addToVolumeContext(volumeContext)
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
 			VolumeId:      volumeID,
@@ -509,6 +515,10 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	if err != nil {
 		return nil, err
 	}
+	perf, err := effectiveMountPerf(req.GetVolumeContext())
+	if err != nil {
+		return nil, err
+	}
 	// Resolve credentials from volumeAttributes Secret reference.
 	creds, err := d.resolveNodeStageCredentials(ctx, req)
 	if err != nil {
@@ -552,10 +562,18 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		AttrTTL:       ttls.AttrTTL,
 		EntryTTL:      ttls.EntryTTL,
 		DirTTL:        ttls.DirTTL,
+		PerfDir:       d.mountPerfDir(volumeID, perf),
 	}); err != nil {
 		return nil, err
 	}
 	return &csi.NodeStageVolumeResponse{}, nil
+}
+
+func (d *Driver) mountPerfDir(volumeID string, perf mountPerf) string {
+	if !perf.Enabled {
+		return ""
+	}
+	return d.drive9PerfDir(volumeID)
 }
 
 func (d *Driver) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolumeRequest) (*csi.NodeUnstageVolumeResponse, error) {

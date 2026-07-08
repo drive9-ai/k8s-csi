@@ -17,6 +17,7 @@ type drive9MountRequest struct {
 	AttrTTL       string
 	EntryTTL      string
 	DirTTL        string
+	PerfDir       string
 }
 
 func (d *Driver) startDrive9Mount(context.Context, drive9MountRequest) error {

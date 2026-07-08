@@ -178,6 +178,7 @@ parameters:
   attrTTL: 30s
   entryTTL: 30s
   dirTTL: 30s
+  perfEnabled: "false"
 reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer
 ```
@@ -198,6 +199,7 @@ parameters:
   attrTTL: 30s
   entryTTL: 30s
   dirTTL: 30s
+  perfEnabled: "false"
 ```
 
 In managed directory mode, `CreateVolume` creates a unique child directory under
@@ -209,6 +211,12 @@ The optional `attrTTL`, `entryTTL`, and `dirTTL` parameters control the matching
 `drive9 mount --attr-ttl`, `--entry-ttl`, and `--dir-ttl` flags. Each value uses
 Go duration syntax, for example `500ms`, `1s`, `30s`, or `2m`. If omitted, the
 CSI driver defaults each value to `30s`.
+
+The optional `perfEnabled` parameter defaults to `"false"`. When set to
+`"true"`, `NodeStageVolume` passes `--perf-dir` with a driver-generated path
+under `/var/lib/drive9-csi/perf/<volume-id>`. The driver does not accept a
+user-provided perf path and does not automatically delete perf output. Remove
+the perf directory manually after collecting support data.
 
 If you use `reclaimPolicy: Delete`, keep the per-PVC workload namespace Secret in
 place until Kubernetes has deleted the PV. If the Secret is removed first,
@@ -224,6 +232,11 @@ This is less clean than CSI because it requires privileged pods and hostPath mou
 The sidecar fallback exposes the same mount TTL behavior through
 `DRIVE9_ATTR_TTL`, `DRIVE9_ENTRY_TTL`, and `DRIVE9_DIR_TTL`. Each defaults to
 `30s` and maps to the corresponding `drive9 mount` flag.
+
+Set `DRIVE9_PERF_ENABLED` to `"true"` to enable `drive9 mount --perf-dir` in the
+sidecar fallback. The path is fixed to `/perf`; use a Kubernetes volume mount to
+choose where `/perf` is stored. The example manifest mounts it from
+`/var/lib/drive9-sidecar/demo/perf`.
 
 Create the sidecar Secret in the target namespace before applying the fallback deployment:
 

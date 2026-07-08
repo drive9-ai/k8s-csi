@@ -52,6 +52,15 @@ func TestDefaultStorageClassMountTTLs(t *testing.T) {
 	}
 }
 
+func TestDefaultStorageClassMountPerfDisabled(t *testing.T) {
+	body := readRepoFile(t, "deploy/kubernetes/storageclass.yaml")
+
+	want := "  perfEnabled: \"false\""
+	if !strings.Contains(body, want) {
+		t.Fatalf("storageclass.yaml missing default mount perf parameter %q", want)
+	}
+}
+
 func TestSidecarFallbackMountTTLs(t *testing.T) {
 	body := readRepoFile(t, "deploy/sidecar/deployment.yaml")
 
@@ -67,6 +76,25 @@ func TestSidecarFallbackMountTTLs(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("sidecar deployment missing mount TTL evidence %q", want)
 		}
+	}
+}
+
+func TestSidecarFallbackMountPerf(t *testing.T) {
+	body := readRepoFile(t, "deploy/sidecar/deployment.yaml")
+
+	for _, want := range []string{
+		"DRIVE9_PERF_ENABLED",
+		"set -- --perf-dir /perf",
+		"mountPath: /perf",
+		"path: /var/lib/drive9-sidecar/demo/perf",
+		"value: \"false\"",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("sidecar deployment missing mount perf evidence %q", want)
+		}
+	}
+	if strings.Contains(body, "DRIVE9_PERF_DIR") {
+		t.Fatal("sidecar deployment must not expose arbitrary DRIVE9_PERF_DIR")
 	}
 }
 
