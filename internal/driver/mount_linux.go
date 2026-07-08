@@ -125,6 +125,20 @@ func (d *Driver) drive9MountArgs(req drive9MountRequest, cacheDir string) []stri
 	return append(args, ":"+req.RemoteRoot, req.StagingTarget)
 }
 
+func (d *Driver) drive9Umount(ctx context.Context, target string, timeout time.Duration) error {
+	args := []string{"umount", "--timeout", timeout.String(), "--no-auto-pack", target}
+	cmd := exec.CommandContext(ctx, d.cfg.Drive9Binary, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(output))
+		if msg == "" {
+			return err
+		}
+		return fmt.Errorf("%w: %s", err, msg)
+	}
+	return nil
+}
+
 func appendMountTuningArgs(args []string, tuning mountTuning) []string {
 	if tuning.ReaddirPrefetch {
 		args = append(args, "--readdir-prefetch")
@@ -231,6 +245,32 @@ func unmountPath(target string) error {
 		return nil
 	}
 	return unix.Unmount(target, 0)
+}
+
+func lazyUnmountPath(target string) error {
+	mounted, err := isMountPoint(target)
+	if err != nil {
+		return err
+	}
+	if !mounted {
+		return nil
+	}
+	return unix.Unmount(target, unix.MNT_DETACH)
+}
+
+func isBusyUnmountError(err error) bool {
+	return errors.Is(err, unix.EBUSY)
+}
+
+func checkFuseDevice() error {
+	info, err := os.Stat("/dev/fuse")
+	if err != nil {
+		return fmt.Errorf("/dev/fuse unavailable: %w", err)
+	}
+	if info.Mode()&os.ModeCharDevice == 0 {
+		return errors.New("/dev/fuse is not a character device")
+	}
+	return nil
 }
 
 func isMountPoint(target string) (bool, error) {

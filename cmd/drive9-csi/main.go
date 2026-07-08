@@ -18,6 +18,7 @@ func main() {
 	flag.StringVar(&cfg.Version, "version", envOr("DRIVER_VERSION", "0.1.0"), "driver version")
 	flag.StringVar(&cfg.StateDir, "state-dir", envOr("DRIVE9_CSI_STATE_DIR", "/var/lib/drive9-csi"), "state directory")
 	flag.StringVar(&cfg.Drive9Binary, "drive9-binary", envOr("DRIVE9_BINARY", "drive9"), "drive9 CLI binary path")
+	flag.StringVar(&cfg.RecoverNodeMounts, "recover-node-mounts", envOr("DRIVE9_CSI_RECOVER_NODE_MOUNTS", "auto"), "node mount recovery mode: auto, enabled, or disabled")
 	flag.Parse()
 
 	restConfig, err := rest.InClusterConfig()

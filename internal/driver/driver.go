@@ -10,10 +10,12 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -33,12 +35,13 @@ const (
 )
 
 type Config struct {
-	Endpoint     string
-	NodeID       string
-	DriverName   string
-	Version      string
-	StateDir     string
-	Drive9Binary string
+	Endpoint          string
+	NodeID            string
+	DriverName        string
+	Version           string
+	StateDir          string
+	Drive9Binary      string
+	RecoverNodeMounts string
 }
 
 type Driver struct {
@@ -61,6 +64,7 @@ func (d *Driver) lockVolume(volumeID string) func() {
 }
 
 func Run(cfg Config, k8sClient kubernetes.Interface) error {
+	cfg.RecoverNodeMounts = normalizeNodeRecoveryMode(cfg.RecoverNodeMounts)
 	if strings.TrimSpace(cfg.DriverName) == "" {
 		return errors.New("driver name is required")
 	}
@@ -72,6 +76,9 @@ func Run(cfg Config, k8sClient kubernetes.Interface) error {
 	}
 	if strings.TrimSpace(cfg.Drive9Binary) == "" {
 		return errors.New("drive9 binary is required")
+	}
+	if err := validateNodeRecoveryMode(cfg.RecoverNodeMounts); err != nil {
+		return err
 	}
 	if k8sClient == nil {
 		return errors.New("kubernetes client is required")
@@ -92,8 +99,60 @@ func Run(cfg Config, k8sClient kubernetes.Interface) error {
 	csi.RegisterControllerServer(server, d)
 	csi.RegisterNodeServer(server, d)
 
+	recoverNodeMounts, err := d.shouldRecoverNodeMounts()
+	if err != nil {
+		return err
+	}
+	recoveryCtx, cancelRecovery := context.WithCancel(context.Background())
+	defer cancelRecovery()
+	if recoverNodeMounts {
+		go d.recoverNodeMounts(recoveryCtx)
+	}
+
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(signals)
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- server.Serve(listener)
+	}()
+
 	log.Printf("drive9-csi: serving %s on %s node=%s", cfg.DriverName, cfg.Endpoint, cfg.NodeID)
-	return server.Serve(listener)
+	select {
+	case err := <-serveErr:
+		if errors.Is(err, grpc.ErrServerStopped) {
+			return nil
+		}
+		return err
+	case sig := <-signals:
+		log.Printf("drive9-csi: received %s, shutting down", sig)
+		cancelRecovery()
+		stopGRPCServer(server, 10*time.Second)
+		if recoverNodeMounts {
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			d.shutdownNodeMounts(ctx)
+			cancel()
+		}
+		if err := <-serveErr; err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			return err
+		}
+		return nil
+	}
+}
+
+func stopGRPCServer(server *grpc.Server, timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		server.GracefulStop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		server.Stop()
+		<-done
+	}
 }
 
 func listenCSIEndpoint(endpoint string) (net.Listener, func(), error) {
@@ -556,8 +615,22 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	if mounted, err := isMountPoint(stagingTarget); err != nil {
 		return nil, status.Errorf(codes.Internal, "check staging mount: %v", err)
 	} else if mounted {
-		if err := d.validateStagedMount(volumeID, remoteRoot, stagingTarget); err != nil {
+		state, err := d.validatedStagedMountState(volumeID, remoteRoot, stagingTarget)
+		if err != nil {
 			return nil, err
+		}
+		if pidMatchesState(state) {
+			return &csi.NodeStageVolumeResponse{}, nil
+		}
+		if !pathUnderRoot(stagingTarget, defaultKubeletRoot) {
+			return nil, status.Errorf(codes.FailedPrecondition,
+				"staging target has stale Drive9 state but is outside recovery root %s", defaultKubeletRoot)
+		}
+		if err := d.recoverStagedMount(ctx, state, req.GetVolumeContext(), creds); err != nil {
+			if _, ok := status.FromError(err); ok {
+				return nil, err
+			}
+			return nil, status.Errorf(codes.Internal, "recover stale staging mount: %v", err)
 		}
 		return &csi.NodeStageVolumeResponse{}, nil
 	}
@@ -771,14 +844,19 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 }
 
 func (d *Driver) validateStagedMount(volumeID string, remoteRoot string, stagingTarget string) error {
+	_, err := d.validatedStagedMountState(volumeID, remoteRoot, stagingTarget)
+	return err
+}
+
+func (d *Driver) validatedStagedMountState(volumeID string, remoteRoot string, stagingTarget string) (mountState, error) {
 	state, err := d.readMountState(volumeID)
 	if err != nil {
-		return status.Errorf(codes.FailedPrecondition, "staging target is mounted but no matching Drive9 state exists: %v", err)
+		return mountState{}, status.Errorf(codes.FailedPrecondition, "staging target is mounted but no matching Drive9 state exists: %v", err)
 	}
 	if !mountStateMatches(state, volumeID, remoteRoot, stagingTarget) {
-		return status.Error(codes.FailedPrecondition, "staging target is mounted for a different Drive9 volume")
+		return mountState{}, status.Error(codes.FailedPrecondition, "staging target is mounted for a different Drive9 volume")
 	}
-	return nil
+	return state, nil
 }
 
 func (d *Driver) validatePublishedMount(volumeID string, stagingTarget string, target string, readonly bool, accessMode string) error {
