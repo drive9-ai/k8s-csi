@@ -146,6 +146,34 @@ func TestSidecarFallbackExplicitMountTuning(t *testing.T) {
 	}
 }
 
+func TestNodeDaemonSetInjectsPerfUploadIdentity(t *testing.T) {
+	body := readRepoFile(t, "deploy/kubernetes/node.yaml")
+
+	for _, want := range []string{
+		"DRIVE9_CSI_NODE_NAME",
+		"fieldPath: spec.nodeName",
+		"DRIVE9_CSI_POD_NAME",
+		"fieldPath: metadata.name",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("node DaemonSet missing perf upload identity evidence %q", want)
+		}
+	}
+}
+
+func TestRuntimeImageInstallsPerfUploadHelper(t *testing.T) {
+	body := readRepoFile(t, "Dockerfile")
+
+	for _, want := range []string{
+		"COPY hack/drive9-csi-upload-perf.sh /usr/local/bin/drive9-csi-upload-perf",
+		"chmod +x /usr/local/bin/drive9-csi-upload-perf",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Dockerfile missing perf upload helper install evidence %q", want)
+		}
+	}
+}
+
 func TestControllerRBACCanReadPerPVCNamespaceLocalDrive9Secrets(t *testing.T) {
 	body := readRepoFile(t, "deploy/kubernetes/rbac.yaml")
 
