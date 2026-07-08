@@ -7,3 +7,4 @@ resources:
   - controller.yaml
   - node.yaml
   - storageclass.yaml
+  - volumeattributesclass.yaml

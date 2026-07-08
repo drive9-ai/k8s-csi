@@ -1,0 +1,16 @@
+apiVersion: storage.k8s.io/v1
+kind: VolumeAttributesClass
+metadata:
+  name: drive9-coding-agent-tuned
+driverName: csi.drive9.ai
+parameters:
+  profile: coding-agent
+  attrTTL: 30s
+  entryTTL: 30s
+  dirTTL: 30s
+  perfEnabled: "false"
+  readdirPrefetch: "true"
+  readdirPrefetchMaxFiles: "64"
+  readdirPrefetchMaxFileBytes: "50000"
+  readdirPrefetchMaxBytes: "4194304"
+  writebackBatchWindow: 20ms

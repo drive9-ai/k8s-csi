@@ -192,6 +192,13 @@ func (d *Driver) ControllerGetCapabilities(context.Context, *csi.ControllerGetCa
 					},
 				},
 			},
+			{
+				Type: &csi.ControllerServiceCapability_Rpc{
+					Rpc: &csi.ControllerServiceCapability_RPC{
+						Type: csi.ControllerServiceCapability_RPC_MODIFY_VOLUME,
+					},
+				},
+			},
 		},
 	}, nil
 }
@@ -213,6 +220,16 @@ func (d *Driver) ValidateVolumeCapabilities(_ context.Context, req *csi.Validate
 	}, nil
 }
 
+func (d *Driver) ControllerModifyVolume(_ context.Context, req *csi.ControllerModifyVolumeRequest) (*csi.ControllerModifyVolumeResponse, error) {
+	if strings.TrimSpace(req.GetVolumeId()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume id is required")
+	}
+	if err := validateMutableMountParameterValues(req.GetMutableParameters()); err != nil {
+		return nil, err
+	}
+	return nil, status.Error(codes.Unimplemented, "dynamic VolumeAttributesClass updates are not supported; recreate the volume to apply new mount parameters")
+}
+
 func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
 	name := strings.TrimSpace(req.GetName())
 	if name == "" {
@@ -227,11 +244,12 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	if req.GetVolumeContentSource() != nil {
 		return nil, status.Error(codes.InvalidArgument, "volume content sources are not supported")
 	}
-	if len(req.GetMutableParameters()) > 0 {
-		return nil, status.Error(codes.InvalidArgument, "mutable parameters are not supported")
-	}
 
 	params := req.GetParameters()
+	mountParams, err := effectiveCreateMountParameters(params, req.GetMutableParameters())
+	if err != nil {
+		return nil, err
+	}
 
 	// Resolve credentials from PVC annotation → Secret.
 	pvcName, pvcNamespace, err := extractPVCRef(params)
@@ -251,25 +269,26 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	if err := validateNoAPIKeyInAttributes(params); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
-	ttls, err := effectiveMountTTLs(params)
+	ttls, err := effectiveMountTTLs(mountParams)
 	if err != nil {
 		return nil, err
 	}
-	perf, err := effectiveMountPerf(params)
+	perf, err := effectiveMountPerf(mountParams)
 	if err != nil {
 		return nil, err
 	}
-	tuning, err := effectiveMountTuning(params)
+	tuning, err := effectiveMountTuning(mountParams)
 	if err != nil {
 		return nil, err
 	}
+	profile := profileFromParameters(mountParams)
 
 	remoteRoot, managedVolume, err := resolveCreateVolumeRemoteRoot(name, params, ref)
 	if err != nil {
 		return nil, err
 	}
 	if managedVolume {
-		return d.createManagedDirectoryVolume(ctx, req, creds, ref, name, remoteRoot, ttls, perf, tuning)
+		return d.createManagedDirectoryVolume(ctx, req, creds, ref, name, remoteRoot, profile, ttls, perf, tuning)
 	}
 
 	client := newDrive9Client(creds)
@@ -281,7 +300,7 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 		"drive9VolumeMode":  "workspace-root",
 		"remoteRoot":        remoteRoot,
 		"volumeName":        name,
-		"profile":           params["profile"],
+		"profile":           profile,
 		attrSecretName:      ref.SecretName,
 		attrSecretNamespace: ref.SecretNamespace,
 	}
@@ -297,8 +316,7 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	}, nil
 }
 
-func (d *Driver) createManagedDirectoryVolume(ctx context.Context, req *csi.CreateVolumeRequest, creds drive9Credentials, ref pvcSecretRef, name string, remoteRoot string, ttls mountTTLs, perf mountPerf, tuning mountTuning) (*csi.CreateVolumeResponse, error) {
-	params := req.GetParameters()
+func (d *Driver) createManagedDirectoryVolume(ctx context.Context, req *csi.CreateVolumeRequest, creds drive9Credentials, ref pvcSecretRef, name string, remoteRoot string, profile string, ttls mountTTLs, perf mountPerf, tuning mountTuning) (*csi.CreateVolumeResponse, error) {
 	volumeID := volumeIDForRemoteRoot(remoteRoot)
 	marker := volumeMarker{
 		Version:    1,
@@ -354,7 +372,7 @@ func (d *Driver) createManagedDirectoryVolume(ctx context.Context, req *csi.Crea
 
 	volumeContext := map[string]string{
 		"remoteRoot":        remoteRoot,
-		"profile":           params["profile"],
+		"profile":           profile,
 		attrSecretName:      ref.SecretName,
 		attrSecretNamespace: ref.SecretNamespace,
 	}

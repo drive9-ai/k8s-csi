@@ -16,11 +16,12 @@ spec:
       serviceAccountName: drive9-csi-controller
       containers:
         - name: csi-provisioner
-          image: registry.k8s.io/sig-storage/csi-provisioner:v5.2.0
+          image: registry.k8s.io/sig-storage/csi-provisioner:v6.3.0
           args:
             - --csi-address=/csi/csi.sock
             - --extra-create-metadata
             - --leader-election
+            - --feature-gates=VolumeAttributesClass=true
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
