@@ -8,7 +8,7 @@ Drive9 CSI should recover node-local Drive9 FUSE mounts after the `drive9-csi-no
 
 The immediate production problem is:
 
-1. `NodeStageVolume` starts `drive9 mount --mode=fuse` as a child process of the node plugin container.
+1. `NodeStageVolume` starts `drive9 mount --foreground --mode=fuse` as a child process of the node plugin container.
 2. Workload Pods access the volume through CSI publish bind mounts.
 3. When the node plugin container is replaced, the old `drive9 mount` process may exit.
 4. The workload Pod may remain Running, but its mounted path can point at a dead FUSE mount.
@@ -37,7 +37,7 @@ CSI node mounting has two layers:
 
 ```text
 NodeStageVolume:
-  drive9 mount --mode=fuse -> stagingTarget
+  drive9 mount --foreground --mode=fuse -> stagingTarget
 
 NodePublishVolume:
   bind mount stagingTarget -> publish target

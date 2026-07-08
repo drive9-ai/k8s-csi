@@ -75,6 +75,7 @@ func TestDrive9MountArgsIncludesMountTTLs(t *testing.T) {
 
 	want := []string{
 		"mount",
+		"--foreground",
 		"--mode=fuse",
 		"--allow-other",
 		"--cache-dir", cacheDir,
@@ -101,6 +102,7 @@ func TestDrive9MountArgsDefaultsMountTTLs(t *testing.T) {
 
 	want := []string{
 		"mount",
+		"--foreground",
 		"--mode=fuse",
 		"--allow-other",
 		"--cache-dir", cacheDir,
@@ -128,6 +130,7 @@ func TestDrive9MountArgsIncludesPerfDir(t *testing.T) {
 
 	want := []string{
 		"mount",
+		"--foreground",
 		"--mode=fuse",
 		"--allow-other",
 		"--cache-dir", cacheDir,
@@ -161,6 +164,7 @@ func TestDrive9MountArgsIncludesExplicitMountTuning(t *testing.T) {
 
 	want := []string{
 		"mount",
+		"--foreground",
 		"--mode=fuse",
 		"--allow-other",
 		"--cache-dir", cacheDir,

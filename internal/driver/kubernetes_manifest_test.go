@@ -137,6 +137,14 @@ func TestSidecarFallbackMountTTLs(t *testing.T) {
 	}
 }
 
+func TestSidecarFallbackRunsMountInForeground(t *testing.T) {
+	body := readRepoFile(t, "deploy/sidecar/deployment.yaml")
+
+	if !strings.Contains(body, "exec drive9 mount \\\n                --foreground \\") {
+		t.Fatal("sidecar deployment must run drive9 mount with --foreground")
+	}
+}
+
 func TestSidecarFallbackMountPerf(t *testing.T) {
 	body := readRepoFile(t, "deploy/sidecar/deployment.yaml")
 

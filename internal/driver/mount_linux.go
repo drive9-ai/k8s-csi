@@ -105,6 +105,7 @@ func (d *Driver) drive9MountArgs(req drive9MountRequest, cacheDir string) []stri
 	ttls := mountTTLsOrDefault(req.AttrTTL, req.EntryTTL, req.DirTTL)
 	args := []string{
 		"mount",
+		"--foreground",
 		"--mode=fuse",
 		"--allow-other",
 		"--cache-dir", cacheDir,
