@@ -4,7 +4,9 @@ title: CSI Node Mount Recovery Design
 
 ## Goal
 
-Drive9 CSI should recover node-local Drive9 FUSE mounts after the `drive9-csi-node` Pod restarts.
+This document records the Option B node mount recovery design and the follow-up test result.
+
+The original goal was to recover Drive9 FUSE mounts after the `drive9-csi-node` Pod restarts. Testing showed that this design can repair node-local staging state, but it cannot recover the mount already visible inside a running workload Pod.
 
 The immediate production problem is:
 
@@ -14,6 +16,14 @@ The immediate production problem is:
 4. The workload Pod may remain Running, but its mounted path can point at a dead FUSE mount.
 
 This design covers Option B from issue 20: stale mount detection and automatic recovery, using the state files that already exist under `/var/lib/drive9-csi`.
+
+Post-implementation conclusion:
+
+1. Recreating the FUSE mount on the same host staging path works.
+2. Rebinding the kubelet publish target works in the host mount namespace.
+3. An already-running workload Pod can still see the old dead FUSE mount at its mounted path and continue to fail with `Transport endpoint is not connected`.
+4. Setting application `volumeMounts[].mountPropagation` to `HostToContainer` does not fix this layout, because the recovery replaces the CSI volume root mount instead of creating a new submount under the mounted volume.
+5. Therefore `--recover-node-mounts` is not a safe rolling-upgrade mechanism for `drive9-csi-node`.
 
 ## Non-Goals
 
@@ -28,8 +38,10 @@ First implementation scope does not include:
 5. Splitting the binary into explicit controller and node roles.
 6. Changing normal `NodeUnpublishVolume` unmount semantics.
 7. Probing FUSE health with `stat`, `readdir`, or path reads that may hang.
+8. Recovering already-running workload Pod mount namespaces after the old FUSE instance has died.
+9. Making `drive9-csi-node` DaemonSet rolling updates transparent to running workload Pods.
 
-The first implementation is startup one-shot recovery, graceful `drive9-csi-node` shutdown, and better `NodeStageVolume` idempotency.
+The first implementation is startup one-shot recovery, graceful `drive9-csi-node` shutdown, and better `NodeStageVolume` idempotency. After testing, this should be treated as host-side defensive repair only, not workload continuity.
 
 ## Terminology
 
@@ -47,7 +59,9 @@ NodePublishVolume:
 
 `publish target` is the Pod-facing bind mount target. This is the path kubelet exposes to a workload Pod. One staged volume may have multiple publish targets.
 
-The publish target binds to the mount instance that existed when the bind mount was created. If the staging target path is later unmounted and mounted again, an existing publish bind mount does not automatically switch to the new FUSE mount instance. Recovery must rebind publish targets after replacing a stale staging mount.
+The publish target binds to the mount instance that existed when the bind mount was created. If the staging target path is later unmounted and mounted again, an existing publish bind mount does not automatically switch to the new FUSE mount instance.
+
+Rebinding publish targets updates the host-side kubelet target. It does not replace the mount object already present in a running workload Pod's mount namespace. A running Pod can therefore remain broken even when the host-side publish target has been repaired.
 
 ## Current Behavior
 
@@ -195,6 +209,8 @@ args:
 
 This flag controls only startup node mount recovery. It does not change which CSI services are registered.
 
+This flag must not be documented as a workload availability guarantee. It cannot make a running workload Pod switch from the dead FUSE mount object to the new FUSE mount object.
+
 ## Node Environment Detection
 
 For `enabled` and `auto`, recovery requires the node mount environment:
@@ -233,6 +249,8 @@ Recovery must use the existing per-volume mutex. That keeps recovery serialized 
 
 `--recover-node-mounts=enabled` means the node environment must be valid. It does not mean every historical volume must recover successfully. Single-volume recovery failures should be logged and should not crash the node plugin.
 
+It also does not mean running workload Pods are recovered. Startup recovery runs in the node plugin mount namespace, while existing containers keep their own mount namespace view.
+
 ## Recovery Flow
 
 Startup recovery scans mount state files:
@@ -255,7 +273,7 @@ recoverOneVolume(state):
   read Secret referenced by PV volumeAttributes
   evaluate staging health
   recover staging if needed
-  repair publish targets if staging was recovered
+  optionally repair host-side publish targets if staging was recovered
 ```
 
 ### PV Resolution
@@ -321,13 +339,26 @@ For each publish state matching `(volumeID, stagingTarget)`:
 
 This `MNT_DETACH` fallback applies only to startup recovery. Normal `NodeUnpublishVolume` should keep strict regular unmount behavior.
 
-`MNT_DETACH` does not repair old open file descriptors in already-running processes. It allows future path lookups through the publish target to bind to the recovered staging mount.
+`MNT_DETACH` does not repair old open file descriptors in already-running processes. It also does not repair the mounted volume root already present inside a running workload Pod.
+
+The tested behavior is:
+
+1. Host-side staging target is recovered.
+2. Host-side kubelet publish target is recovered and readable from the node plugin container.
+3. The already-running workload Pod still sees the old dead FUSE mount and reads fail with `Transport endpoint is not connected`.
+4. A Pod with `mountPropagation: HostToContainer` on the Drive9 PVC volume mount still fails after recovery.
+
+The reason is that mount propagation handles mount and unmount events under a propagated mount. The current CSI layout exposes the FUSE filesystem as the root of the workload volume mount. Recovery replaces that root mount object on the host side; it does not create a new child mount under the already-mounted `/workspace` path inside the container.
+
+Therefore publish target repair is only host-side cleanup. It is not sufficient for workload continuity.
 
 ## Graceful Node Shutdown
 
 The node plugin should make a best-effort attempt to cleanly stop recorded Drive9 FUSE mounts before the `drive9-csi-node` container exits.
 
-This covers the rolling upgrade path where Kubernetes sends `SIGTERM` to the node plugin container. Cleanup should run only when node mount recovery is enabled or auto-detected for the process. The controller Deployment should not run this logic because it has no node FUSE mounts.
+This does not make rolling upgrades transparent. If running workload Pods still use Drive9 volumes on the node, stopping the FUSE process can break those Pods permanently until they are recreated.
+
+Cleanup should run only when node mount recovery is enabled or auto-detected for the process. The controller Deployment should not run this logic because it has no node FUSE mounts.
 
 ### Signal Handling
 
@@ -365,7 +396,7 @@ Shutdown should not:
 3. Unmount publish targets.
 4. Query PVs or Secrets.
 
-State files must remain available for startup recovery in the next node plugin process. Publish targets are repaired by startup recovery after the staging mount is recreated.
+State files must remain available for startup recovery in the next node plugin process. Startup recovery may repair host-side staging and publish state after the staging mount is recreated, but it cannot repair already-running workload Pods.
 
 ### Drive9 Umount First
 
@@ -420,9 +451,18 @@ mounted + valid state + pid alive -> return success
 mounted + valid state + pid dead -> recover staging, then return success
 ```
 
-This makes recovery work even when kubelet retries `NodeStageVolume` after the startup recovery has skipped or failed a volume.
+This makes future staging attempts defensive even when startup recovery has skipped or failed a volume. It does not repair an already-running Pod that still holds the old mount object.
 
 `NodeStageVolume` already receives the full `VolumeContext`, so it does not need PV lookup for this path. It can reuse the same stale staging recovery helper with request-derived volume attributes.
+
+This is the part of the recovery design that remains useful for normal CSI correctness:
+
+1. If kubelet calls `NodeStageVolume` and the staging target is a dead FUSE mount, the driver should not return idempotent success.
+2. The driver should verify the recorded `drive9 mount` PID identity.
+3. If the PID is dead, the driver should unmount the stale staging target and create a new FUSE mount before returning success.
+4. This protects future mount requests from binding a dead FUSE staging mount.
+
+It does not make `drive9-csi-node` restart safe while workload Pods are still running on the node.
 
 ## Path Safety
 
@@ -453,9 +493,29 @@ The only startup-fatal errors are invalid configuration or missing node prerequi
 
 Graceful shutdown should also prefer forward progress. It should log per-volume failures and continue to the next recorded mount until its shutdown deadline is reached.
 
+## Operational Impact
+
+Current architecture ties each `drive9 mount --foreground --mode=fuse` process to the `drive9-csi-node` container lifecycle. Updating the node DaemonSet can therefore kill the FUSE process used by running workload Pods.
+
+Because the running workload Pod mount cannot be repaired in place, Drive9 CSI node upgrades must be treated as disruptive maintenance unless Drive9 workloads are drained first.
+
+Safe per-node upgrade sequence:
+
+1. Prevent new Drive9 workload Pods from scheduling onto the node.
+2. Evict or delete workload Pods on that node that use Drive9 PVCs.
+3. Wait for kubelet to call `NodeUnpublishVolume` and `NodeUnstageVolume` for those volumes.
+4. Confirm there are no active Drive9 publish mounts on the node.
+5. Replace or restart the `drive9-csi-node` Pod on that node.
+6. Wait for the new node plugin to become Ready.
+7. Allow Drive9 workload Pods to schedule or restart.
+
+Reversing this order is unsafe. If the node plugin is upgraded first, the old FUSE process can die while workload Pods still hold the old mount object. Restarting those workload Pods afterward is the only reliable recovery for those Pods.
+
+Long-term transparent upgrades require changing the FUSE process lifecycle so that it no longer dies with the node plugin container.
+
 ## Implementation Plan
 
-Production code changes:
+Implemented production code changes:
 
 1. Add `RecoverNodeMounts` to `driver.Config`.
 2. Parse `--recover-node-mounts` in `cmd/drive9-csi/main.go`.
@@ -489,22 +549,30 @@ Test changes:
 12. Manifest test node RBAC includes PV `get/list`.
 13. Manifest test node has explicit `terminationGracePeriodSeconds`.
 
-Estimated production code scope: `220-350 LoC`.
+Follow-up production code changes:
+
+1. Reword user-facing documentation so `--recover-node-mounts` is not presented as running Pod recovery.
+2. Consider disabling startup publish target repair by default if it is not needed for a concrete failure mode.
+3. Keep or simplify `NodeStageVolume` stale PID handling as defensive idempotency.
+4. Add an explicit safe upgrade procedure for `drive9-csi-node`.
+5. Decide whether the node DaemonSet should use an update strategy that avoids automatic rolling replacement.
+
+Estimated follow-up production code scope: `30-150 LoC`, depending on whether startup recovery is disabled or removed.
 
 ## Open Questions
 
-No blocking open questions remain.
+Blocking open questions for the next design:
 
-Decisions fixed in this design:
+1. Should startup recovery remain enabled on the node DaemonSet, or should it be disabled until there is a proven host-side failure mode it fixes?
+2. Should publish target repair be removed, given that it does not recover running Pods and may create false confidence?
+3. Should the node DaemonSet use `OnDelete` or another upgrade strategy to prevent accidental rolling replacement?
+4. Should Drive9 CSI include an opt-in controller or script that performs per-node Drive9 workload drain before replacing `drive9-csi-node`?
+5. Which long-term architecture should decouple FUSE lifecycle from the node plugin: per-volume mounter Pod, host-level supervisor, or FUSE fd handoff?
 
-1. Use `--recover-node-mounts=auto|enabled|disabled`.
-2. Keep recovery as startup one-shot in the first implementation.
-3. Run graceful node shutdown on `SIGTERM` and `SIGINT`.
-4. Call `drive9 umount --no-auto-pack` before kernel unmount fallback during graceful shutdown.
-5. Keep state files during graceful shutdown.
-6. Do not unmount publish targets during graceful shutdown.
-7. Use existing state files as indexes, not as truth.
-8. Rebind publish targets after staging recovery.
-9. Allow `MNT_DETACH` only for publish target repair during recovery.
-10. Do not use `MNT_DETACH` for staging target recovery in the first implementation.
-11. Do not introduce full `--mode=controller|node` role split in this change.
+Decisions that still stand:
+
+1. State files are indexes, not truth.
+2. Recovery paths must validate PV attributes, Secret references, `/proc/self/mountinfo`, and PID identity before acting.
+3. `NodeStageVolume` should not return idempotent success for a mounted staging target whose recorded `drive9 mount` PID is dead.
+4. `MNT_DETACH` must not be used for staging target recovery in this design.
+5. The current design does not support transparent `drive9-csi-node` rolling upgrades while Drive9 workload Pods are running.
