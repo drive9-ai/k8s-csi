@@ -216,12 +216,6 @@ func TestCreateVolumeRejectsUnsupportedRequestFields(t *testing.T) {
 			},
 		},
 		{
-			name: "mutable parameters",
-			mutate: func(req *csi.CreateVolumeRequest) {
-				req.MutableParameters = map[string]string{"profile": "other"}
-			},
-		},
-		{
 			name: "negative capacity",
 			mutate: func(req *csi.CreateVolumeRequest) {
 				req.CapacityRange = &csi.CapacityRange{RequiredBytes: -1}
@@ -826,6 +820,151 @@ func TestCreateVolumeStoresConfiguredMountTuning(t *testing.T) {
 		ReaddirPrefetchMaxBytes:     "4194304",
 		WritebackBatchWindow:        "20ms",
 	})
+}
+
+func TestCreateVolumeStoresMutableMountParameters(t *testing.T) {
+	fd := newFakeDrive9(t)
+	defer fd.close()
+
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-vac", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:       "pvc-vac",
+		Parameters: pvcParams("pvc-vac", "default", nil),
+		MutableParameters: map[string]string{
+			paramProfile:                     " coding-agent ",
+			paramAttrTTL:                     "1000ms",
+			paramEntryTTL:                    "1m",
+			paramDirTTL:                      "2m30s",
+			paramPerfEnabled:                 "true",
+			paramReaddirPrefetch:             "true",
+			paramReaddirPrefetchMaxFiles:     "64",
+			paramReaddirPrefetchMaxFileBytes: "50000",
+			paramReaddirPrefetchMaxBytes:     "4194304",
+			paramWritebackBatchWindow:        "20ms",
+		},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	ctx := createResp.GetVolume().GetVolumeContext()
+	if got := ctx[paramProfile]; got != "coding-agent" {
+		t.Fatalf("volume context %s = %q, want coding-agent", paramProfile, got)
+	}
+	assertVolumeContextMountTTLs(t, ctx, mountTTLs{
+		AttrTTL:  "1s",
+		EntryTTL: "1m0s",
+		DirTTL:   "2m30s",
+	})
+	assertVolumeContextMountPerf(t, ctx, true)
+	assertVolumeContextMountTuning(t, ctx, mountTuning{
+		ReaddirPrefetchGiven:        true,
+		ReaddirPrefetch:             true,
+		ReaddirPrefetchMaxFiles:     "64",
+		ReaddirPrefetchMaxFileBytes: "50000",
+		ReaddirPrefetchMaxBytes:     "4194304",
+		WritebackBatchWindow:        "20ms",
+	})
+}
+
+func TestCreateVolumeMutableParametersOverrideStorageClassParameters(t *testing.T) {
+	fd := newFakeDrive9(t)
+	defer fd.close()
+
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-vac-override", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "pvc-vac-override",
+		Parameters: pvcParams("pvc-vac-override", "default", map[string]string{
+			paramProfile:     "legacy-profile",
+			paramAttrTTL:     "30s",
+			paramPerfEnabled: "false",
+		}),
+		MutableParameters: map[string]string{
+			paramProfile:     "coding-agent",
+			paramAttrTTL:     "5s",
+			paramPerfEnabled: "true",
+		},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	ctx := createResp.GetVolume().GetVolumeContext()
+	if got := ctx[paramProfile]; got != "coding-agent" {
+		t.Fatalf("volume context %s = %q, want coding-agent", paramProfile, got)
+	}
+	assertVolumeContextMountTTLs(t, ctx, mountTTLs{
+		AttrTTL:  "5s",
+		EntryTTL: "30s",
+		DirTTL:   "30s",
+	})
+	assertVolumeContextMountPerf(t, ctx, true)
+}
+
+func TestCreateVolumeRejectsUnsupportedMutableParameters(t *testing.T) {
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+
+	tests := []map[string]string{
+		{"remoteRootPrefix": "/k8s/pvc"},
+		{"remoteRoot": "/team/workspace"},
+		{"csi.storage.k8s.io/pvc/name": "pvc-demo"},
+		{"apiKey": "secret"},
+		{"server": "https://api.drive9.ai"},
+		{attrSecretName: "drive9-secret"},
+		{attrSecretNamespace: "default"},
+	}
+	for _, mutable := range tests {
+		_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+			Name:               "pvc-vac-invalid",
+			MutableParameters:  mutable,
+			VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+		})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("CreateVolume mutable=%v status = %s, want InvalidArgument (err=%v)", mutable, status.Code(err), err)
+		}
+	}
+}
+
+func TestCreateVolumeUsesStorageClassRemoteRootPrefixWithMutableMountParameters(t *testing.T) {
+	fd := newFakeDrive9(t)
+	defer fd.close()
+
+	k8s := k8sfake.NewSimpleClientset(
+		fd.k8sPVC("pvc-vac-managed", "default", "drive9-secret"),
+		fd.k8sSecret("drive9-secret", "default"),
+	)
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+
+	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "pvc-vac-managed",
+		Parameters: pvcParams("pvc-vac-managed", "default", map[string]string{
+			"remoteRootPrefix": "/k8s/pvc",
+		}),
+		MutableParameters: map[string]string{
+			paramProfile: "coding-agent",
+		},
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("CreateVolume error = %v", err)
+	}
+	ctx := createResp.GetVolume().GetVolumeContext()
+	if got := ctx[paramProfile]; got != "coding-agent" {
+		t.Fatalf("volume context %s = %q, want coding-agent", paramProfile, got)
+	}
+	if got := ctx["remoteRoot"]; !strings.HasPrefix(got, "/k8s/pvc/pvc-vac-managed-") {
+		t.Fatalf("remoteRoot = %q, want generated managed path under /k8s/pvc", got)
+	}
 }
 
 func TestCreateVolumeRejectsInvalidMountTTLs(t *testing.T) {
@@ -1845,6 +1984,50 @@ func TestControllerGetCapabilitiesIncludesMultiWriter(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("ControllerGetCapabilities must include SINGLE_NODE_MULTI_WRITER")
+	}
+}
+
+func TestControllerGetCapabilitiesIncludesModifyVolume(t *testing.T) {
+	d := &Driver{}
+	resp, err := d.ControllerGetCapabilities(context.Background(), &csi.ControllerGetCapabilitiesRequest{})
+	if err != nil {
+		t.Fatalf("ControllerGetCapabilities error = %v", err)
+	}
+	found := false
+	for _, cap := range resp.GetCapabilities() {
+		if cap.GetRpc().GetType() == csi.ControllerServiceCapability_RPC_MODIFY_VOLUME {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("ControllerGetCapabilities must include MODIFY_VOLUME")
+	}
+}
+
+func TestControllerModifyVolumeRejectsDynamicUpdates(t *testing.T) {
+	d := &Driver{}
+	_, err := d.ControllerModifyVolume(context.Background(), &csi.ControllerModifyVolumeRequest{
+		VolumeId: "drive9-root-demo",
+		MutableParameters: map[string]string{
+			paramAttrTTL: "5s",
+		},
+	})
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("ControllerModifyVolume status = %s, want Unimplemented (err=%v)", status.Code(err), err)
+	}
+}
+
+func TestControllerModifyVolumeRejectsUnsupportedMutableParameters(t *testing.T) {
+	d := &Driver{}
+	_, err := d.ControllerModifyVolume(context.Background(), &csi.ControllerModifyVolumeRequest{
+		VolumeId: "drive9-root-demo",
+		MutableParameters: map[string]string{
+			"remoteRootPrefix": "/k8s/pvc",
+		},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("ControllerModifyVolume status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
 	}
 }
 

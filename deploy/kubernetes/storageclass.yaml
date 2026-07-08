@@ -3,12 +3,7 @@ kind: StorageClass
 metadata:
   name: drive9-rwo
 provisioner: csi.drive9.ai
-parameters:
-  profile: coding-agent
-  attrTTL: 30s
-  entryTTL: 30s
-  dirTTL: 30s
-  perfEnabled: "false"
+parameters: {}
 reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: false

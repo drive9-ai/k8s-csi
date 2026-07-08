@@ -9,6 +9,7 @@ spec:
   accessModes:
     - ReadWriteOnce
   storageClassName: drive9-rwo
+  volumeAttributesClassName: drive9-coding-agent
   resources:
     requests:
       storage: 1Gi

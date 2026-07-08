@@ -39,6 +39,9 @@ cleanup() {
 	kubectl delete storageclass "$storage_class" \
 		--ignore-not-found >/dev/null 2>&1
 
+	kubectl delete volumeattributesclass "$volume_attributes_class" \
+		--ignore-not-found >/dev/null 2>&1
+
 	if [[ "$manifest_dir" != "" && -d "$manifest_dir" ]]; then
 		kubectl delete -f "$manifest_dir" \
 			--ignore-not-found >/dev/null 2>&1
@@ -100,24 +103,21 @@ write_rbac() {
 write_storageclass() {
 	awk \
 		-v storage_class="$storage_class" \
-		-v root_prefix="$DRIVE9_REMOTE_ROOT_PREFIX" \
-		-v profile="$DRIVE9_PROFILE" '
+		-v root_prefix="$DRIVE9_REMOTE_ROOT_PREFIX" '
 		$0 == "  name: drive9-rwo" {
 			print "  name: " storage_class
 			next
 		}
-		$0 == "parameters:" {
-			print
+		$0 ~ /^parameters:/ {
 			if (root_prefix != "") {
+				print "parameters:"
 				print "  remoteRootPrefix: " root_prefix
+			} else {
+				print "parameters: {}"
 			}
 			next
 		}
 		$0 ~ /^  remoteRootPrefix:/ {
-			next
-		}
-		$0 ~ /^  profile:/ {
-			print "  profile: " profile
 			next
 		}
 		$0 ~ /^reclaimPolicy:/ {
@@ -128,6 +128,24 @@ write_storageclass() {
 	' "$repo_root/deploy/kubernetes/storageclass.yaml" \
 		> "$manifest_dir/storageclass.yaml" ||
 		fail "render storageclass"
+}
+
+write_volumeattributesclass() {
+	awk \
+		-v volume_attributes_class="$volume_attributes_class" \
+		-v profile="$DRIVE9_PROFILE" '
+		$0 == "  name: drive9-coding-agent" {
+			print "  name: " volume_attributes_class
+			next
+		}
+		$0 ~ /^  profile:/ {
+			print "  profile: " profile
+			next
+		}
+		{ print }
+	' "$repo_root/deploy/kubernetes/volumeattributesclass.yaml" \
+		> "$manifest_dir/volumeattributesclass.yaml" ||
+		fail "render volumeattributesclass"
 }
 
 write_test_workload() {
@@ -160,6 +178,7 @@ spec:
   accessModes:
     - ReadWriteOnce
   storageClassName: $storage_class
+  volumeAttributesClassName: $volume_attributes_class
   resources:
     requests:
       storage: 1Gi
@@ -245,6 +264,7 @@ spec:
   accessModes:
     - ReadWriteOnce
   storageClassName: $storage_class
+  volumeAttributesClassName: $volume_attributes_class
   resources:
     requests:
       storage: 1Gi
@@ -302,6 +322,7 @@ manifest_dir=""
 driver_namespace="${DRIVE9_CSI_E2E_DRIVER_NAMESPACE:-drive9-csi-e2e-driver}"
 test_namespace="${DRIVE9_CSI_E2E_NAMESPACE:-drive9-csi-e2e}"
 storage_class="${DRIVE9_CSI_E2E_STORAGE_CLASS:-drive9-rwo-e2e}"
+volume_attributes_class="${DRIVE9_CSI_E2E_VOLUME_ATTRIBUTES_CLASS:-drive9-coding-agent-e2e}"
 
 need_cmd kubectl
 need_env DRIVE9_SERVER
@@ -329,6 +350,7 @@ ensure_absent clusterrole drive9-csi-controller
 ensure_absent clusterrolebinding drive9-csi-controller
 ensure_absent csidriver csi.drive9.ai
 ensure_absent storageclass "$storage_class"
+ensure_absent volumeattributesclass "$volume_attributes_class"
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/drive9-csi-e2e.XXXXXX")" ||
 	fail "create temporary directory"
@@ -341,6 +363,7 @@ info "using Kubernetes context: $(kubectl config current-context)"
 info "using image: $DRIVE9_CSI_IMAGE"
 info "using driver namespace: $driver_namespace"
 info "using e2e namespace: $test_namespace"
+info "using VolumeAttributesClass: $volume_attributes_class"
 if [[ "$DRIVE9_REMOTE_ROOT_PREFIX" == "" ]]; then
 	info "using Drive9 workspace root mode"
 else
@@ -354,6 +377,7 @@ write_rbac
 copy_manifest controller.yaml controller.yaml
 copy_manifest node.yaml node.yaml
 write_storageclass
+write_volumeattributesclass
 write_test_workload
 write_test_pod drive9-csi-e2e-write "$tmp_dir/pod-write.yaml"
 write_test_pod drive9-csi-e2e-read "$tmp_dir/pod-read.yaml"

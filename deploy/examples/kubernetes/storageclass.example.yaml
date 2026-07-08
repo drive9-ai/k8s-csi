@@ -6,16 +6,6 @@ provisioner: csi.drive9.ai
 parameters:
   # Omit remoteRootPrefix to mount the Drive9 workspace root instead.
   remoteRootPrefix: /k8s/pvc
-  profile: coding-agent
-  attrTTL: 30s
-  entryTTL: 30s
-  dirTTL: 30s
-  perfEnabled: "false"
-  readdirPrefetch: "true"
-  readdirPrefetchMaxFiles: "64"
-  readdirPrefetchMaxFileBytes: "50000"
-  readdirPrefetchMaxBytes: "4194304"
-  writebackBatchWindow: 20ms
 reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: false

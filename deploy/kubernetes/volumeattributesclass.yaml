@@ -1,0 +1,11 @@
+apiVersion: storage.k8s.io/v1
+kind: VolumeAttributesClass
+metadata:
+  name: drive9-coding-agent
+driverName: csi.drive9.ai
+parameters:
+  profile: coding-agent
+  attrTTL: 30s
+  entryTTL: 30s
+  dirTTL: 30s
+  perfEnabled: "false"
