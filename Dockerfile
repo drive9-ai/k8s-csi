@@ -48,9 +48,11 @@ FROM debian:bookworm-slim
 LABEL org.opencontainers.image.source=https://github.com/drive9-ai/k8s-csi
 LABEL org.opencontainers.image.description="Drive9 Kubernetes CSI driver"
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates fuse3 tini util-linux \
+ && apt-get install -y --no-install-recommends ca-certificates fuse3 tar tini util-linux \
  && rm -rf /var/lib/apt/lists/* \
  && sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf
 COPY --from=csi-builder /out/drive9-csi /usr/local/bin/drive9-csi
 COPY --from=drive9-downloader /out/drive9 /usr/local/bin/drive9
+COPY hack/drive9-csi-upload-perf.sh /usr/local/bin/drive9-csi-upload-perf
+RUN chmod +x /usr/local/bin/drive9-csi-upload-perf
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/drive9-csi"]

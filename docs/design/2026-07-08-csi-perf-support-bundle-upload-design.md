@@ -18,7 +18,7 @@ The CLI has an upload primitive through `drive9 fs cp`:
 drive9 fs cp [-r|--recursive] [--resume] [--append] [--tag key=value]... [--description <text>] <src> <dst>
 ```
 
-This makes it possible to upload a local support bundle from inside the node plugin container without adding a new uploader binary.
+This makes it possible to upload a local support bundle from inside the node plugin container without adding a new uploader service.
 
 ## User Contract
 
@@ -48,26 +48,24 @@ Drive9 support provides the user with upload credentials:
 
 The token should resolve to a Drive9-owned support space. The destination path is relative to that support context, not the user's business workspace.
 
-The user runs an explicit upload command inside the CSI node plugin container:
+The preferred user-facing flow is a helper command inside the CSI node plugin container:
 
 ```sh
-DRIVE9_SERVER=https://api.drive9.ai \
-DRIVE9_API_KEY=<support-upload-token> \
-drive9 fs cp /var/lib/drive9-csi/perf/<case-id>.tgz \
-  :/support-inbox/<case-id>/<node-name>/<volume-id>.tgz \
-  --tag case=<case-id> \
-  --tag source=k8s-csi \
-  --description "Drive9 CSI perf bundle"
+drive9-csi-upload-perf --case-id <case-id>
 ```
+
+The helper should prompt for the support upload token without echoing it. It should discover the node identity and the perf volume directory automatically when possible.
 
 ## Data Flow
 
 ```text
 drive9 mount --perf-dir
   -> writes perf files under <stateDir>/perf/<safe-volume-id>
-  -> user creates a local bundle
-  -> user injects support upload token only for the upload command
-  -> drive9 fs cp uploads to Drive9 support space
+  -> user runs drive9-csi-upload-perf
+  -> helper creates a local bundle
+  -> helper reads the support upload token only for the upload command
+  -> helper runs drive9 fs cp to upload to Drive9 support space
+  -> helper runs drive9 fs stat to verify the uploaded bundle
 ```
 
 The recommended local layout is:
@@ -83,6 +81,8 @@ The bundle command can be:
 tar czf /var/lib/drive9-csi/perf/<case-id>.tgz \
   -C /var/lib/drive9-csi/perf <volume-id>
 ```
+
+This command is an implementation detail of the helper and a fallback for manual support debugging. It should not be the primary customer workflow.
 
 ## Credential Model
 
@@ -101,7 +101,15 @@ CSI must not store the support upload token in:
 4. Driver state files.
 5. Default deployment manifests.
 
-The token should be passed only at upload time, either as temporary environment variables or as a short-lived Kubernetes Secret used by a support runbook.
+The token should be passed only at upload time. The preferred customer workflow is an interactive hidden prompt. If the helper is not attached to a TTY, it must not attempt an interactive prompt; users must pass `--token-stdin`.
+
+A non-interactive mode may read the token from stdin:
+
+```sh
+printf '%s' '<support-upload-token>' | drive9-csi-upload-perf --case-id <case-id> --token-stdin
+```
+
+The helper must not require users to pass the token as a command-line argument because arguments can be exposed through shell history and process listings.
 
 ## Token Scope
 
@@ -111,14 +119,44 @@ The preferred token type is a scoped Drive9 filesystem token limited to a single
 :/support-inbox/<case-id>/<cluster-id>/
 ```
 
-The scope should be as narrow as the CLI permits:
+The support upload token must allow:
 
 1. Short expiration.
-2. Write access to the case prefix.
-3. No delete access.
-4. No read or list access unless `drive9 fs cp` requires it for the selected upload mode.
+2. Write/create access under the case prefix.
+3. `stat` access for the uploaded object so the helper can verify the upload.
+4. No delete access.
+5. No broad read or list access unless the `drive9 fs cp` implementation requires it.
 
-If resumable uploads require read/list/stat permissions, the support runbook should either disable resume or document the additional scope requirement.
+The scope should be as narrow as the CLI permits. If `drive9 fs cp` requires additional read/list permissions, support token issuance should grant only the minimum required permission under the case prefix.
+
+The helper must treat failed `drive9 fs stat` as upload verification failure and return a non-zero exit status.
+
+## Input Validation
+
+The helper must validate user-controlled path components before using them in local or remote paths.
+
+`--case-id` rules:
+
+1. Required.
+2. Must be non-empty after trimming whitespace.
+3. Maximum length: 128 bytes.
+4. Allowed characters: ASCII letters, ASCII digits, `.`, `_`, and `-`.
+5. Must not contain `/`, `\`, `..`, shell metacharacters, or whitespace.
+
+`--volume-id` rules:
+
+1. Optional when exactly one perf volume directory exists.
+2. Required when multiple perf volume directories exist.
+3. Must be a basename, not a path.
+4. Must be non-empty after trimming whitespace.
+5. Must not contain `/`, `\`, `..`, shell metacharacters, or whitespace.
+6. Must refer to an existing directory directly under `/var/lib/drive9-csi/perf/`.
+
+The helper should build paths by joining validated components, not by accepting arbitrary user-provided paths.
+
+Perf directory discovery should only consider immediate child directories under `/var/lib/drive9-csi/perf/`. It should ignore files such as existing `*.tgz` bundles.
+
+When multiple perf volume directories exist, the helper should print the candidate basenames and exit with instructions to rerun with `--volume-id`. It should not guess based on modification time or current mount processes.
 
 ## CSI Behavior
 
@@ -213,29 +251,120 @@ rm -f /var/lib/drive9-csi/perf/<case-id>.tgz
 
 For sidecar fallback, users clean the volume mounted at `/perf`.
 
-## Support Runbook Shape
+## One-Command Upload Helper
 
-A future helper script can wrap the manual steps:
+The node plugin image should include a helper command:
 
 ```sh
-hack/collect-perf-bundle.sh \
-  --namespace drive9-csi \
-  --node <node-name> \
-  --volume-id <volume-id> \
-  --case-id <case-id> \
-  --upload-prefix :/support-inbox/<case-id>/<cluster-id>/ \
-  --server https://api.drive9.ai
+drive9-csi-upload-perf --case-id <case-id>
 ```
 
-The script should:
+The helper runs inside the `drive9-csi` container. It should use the existing `drive9` CLI and `tar`; it should not add a new long-running process or controller.
 
-1. Locate the `drive9-csi-node` pod on the requested node.
-2. Create a tarball from the perf directory.
-3. Run `drive9 fs cp` inside the container.
-4. Attach useful tags such as case ID, CSI version, node name, volume ID, and timestamp.
-5. Print the uploaded path.
+The first implementation should be a shell script copied into the runtime image as:
 
-The script should not persist the support upload token. It should read the token from an environment variable or prompt the operator to provide it.
+```text
+/usr/local/bin/drive9-csi-upload-perf
+```
+
+The repository source path can be:
+
+```text
+hack/drive9-csi-upload-perf.sh
+```
+
+The Dockerfile should copy it into the runtime image and make it executable. The script should be POSIX `sh` compatible unless a specific bash-only need appears during implementation.
+
+Required behavior:
+
+1. Require `--case-id`.
+2. Discover perf directories under `/var/lib/drive9-csi/perf/`.
+3. If exactly one volume directory exists, select it automatically.
+4. If multiple volume directories exist, print the candidates and require `--volume-id`.
+5. Create `/var/lib/drive9-csi/perf/<case-id>.tgz` from the selected volume directory.
+6. Prompt for the support upload token without echoing input, or read it from stdin when `--token-stdin` is set.
+7. Upload to the support space with `drive9 fs cp`.
+8. Verify the uploaded bundle with `drive9 fs stat`.
+9. Print the uploaded path and local bundle path.
+
+Optional flags:
+
+| Flag | Meaning | Default |
+| --- | --- | --- |
+| `--case-id` | Support case identifier | Required |
+| `--volume-id` | Perf volume ID to upload when multiple directories exist | Auto-select when exactly one exists |
+| `--server` | Drive9 support API endpoint | `https://api.drive9.ai` |
+| `--token-stdin` | Read support upload token from stdin | `false` |
+| `--keep-bundle` | Keep local tarball after successful upload | `true` |
+
+The destination path should be:
+
+```text
+:/support-inbox/<case-id>/<node-name>/<volume-id>.tgz
+```
+
+The helper should attach these tags:
+
+1. `case=<case-id>`
+2. `source=k8s-csi`
+3. `node=<node-name>`
+4. `volume=<volume-id>`
+
+The helper should not persist the support upload token. It must not write the token into files, logs, shell history, or generated bundle metadata.
+
+## Node Identity
+
+The upload path needs a stable node identifier. The helper should not require customers to type it.
+
+The DaemonSet should inject node and pod identity into the `drive9-csi` container through the Kubernetes Downward API:
+
+```yaml
+env:
+  - name: DRIVE9_CSI_NODE_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: spec.nodeName
+  - name: DRIVE9_CSI_POD_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+```
+
+The helper should resolve node identity in this order:
+
+1. `DRIVE9_CSI_NODE_NAME`
+2. `NODE_NAME`
+3. `hostname`
+4. `unknown-node`
+
+`DRIVE9_CSI_POD_NAME` is useful for logs and diagnostics but should not be the primary destination path component because support usually groups uploads by Kubernetes node.
+
+## Manual Fallback
+
+If the helper is unavailable, support can still guide a user through the manual flow:
+
+```sh
+tar czf /var/lib/drive9-csi/perf/<case-id>.tgz \
+  -C /var/lib/drive9-csi/perf <volume-id>
+```
+
+```sh
+DRIVE9_SERVER=https://api.drive9.ai \
+DRIVE9_API_KEY=<support-upload-token> \
+drive9 fs cp /var/lib/drive9-csi/perf/<case-id>.tgz \
+  :/support-inbox/<case-id>/<node-name>/<volume-id>.tgz \
+  --tag case=<case-id> \
+  --tag source=k8s-csi \
+  --description "Drive9 CSI perf bundle"
+```
+
+```sh
+DRIVE9_SERVER=https://api.drive9.ai \
+DRIVE9_API_KEY=<support-upload-token> \
+drive9 fs stat :/support-inbox/<case-id>/<node-name>/<volume-id>.tgz
+```
+
+The manual fallback is intentionally more verbose and should not be the documented happy path for customers.
 
 ## Security And Privacy
 
@@ -251,24 +380,29 @@ The upload action must remain explicit and user-approved:
 
 Documentation should tell users what path is being bundled and where it will be uploaded.
 
+The README should document the helper as the customer happy path and keep the manual `tar` plus `drive9 fs cp` sequence as a troubleshooting fallback.
+
 ## Open Questions
 
 1. What exact Drive9 token API should support use to mint the scoped upload token?
-2. Does `drive9 fs cp` require read/list/stat permission for non-resumable uploads?
-3. What metadata fields should be mandatory tags on uploaded bundles?
-4. What retention policy applies to support-space uploaded bundles?
+2. Does `drive9 fs cp` require read/list permission beyond write and object `stat` for non-resumable uploads?
+3. What retention policy applies to support-space uploaded bundles?
 
-These questions do not block implementation of `perfEnabled` and fixed perf paths. They only affect the support upload runbook and token issuance process.
+These questions do not block implementation of `perfEnabled`, fixed perf paths, or the one-command helper. They only affect support token issuance policy and support-space retention policy.
 
 ## Tests
 
 If a helper script is added, test coverage should verify:
 
-1. It selects the node plugin pod for the requested node.
-2. It refuses to run without an explicit support upload token.
-3. It builds the expected tarball path.
-4. It calls `drive9 fs cp` with the support destination prefix.
-5. It does not write the token to files or command logs.
+1. It refuses to run without `--case-id`.
+2. It auto-selects the only perf volume directory.
+3. It requires `--volume-id` when multiple perf volume directories exist.
+4. It refuses to run without an explicit support upload token.
+5. It builds the expected tarball path.
+6. It calls `drive9 fs cp` with the support destination path.
+7. It calls `drive9 fs stat` after upload.
+8. It resolves node identity from `DRIVE9_CSI_NODE_NAME`.
+9. It does not write the token to files or command logs.
 
 If only documentation is added, no code tests are required.
 

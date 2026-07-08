@@ -331,7 +331,36 @@ Find the node plugin pod on the target node:
 kubectl -n drive9-csi get pods -l app=drive9-csi-node -o wide
 ```
 
-Create a bundle inside the `drive9-csi` container:
+Run the helper inside the `drive9-csi` container:
+
+```sh
+kubectl -n drive9-csi exec -it <drive9-csi-node-pod> -c drive9-csi -- \
+  drive9-csi-upload-perf --case-id <case-id>
+```
+
+The helper prompts for the support upload token without echoing it, creates
+`/var/lib/drive9-csi/perf/<case-id>.tgz`, uploads it to:
+
+```text
+:/support-inbox/<case-id>/<node-name>/<volume-id>.tgz
+```
+
+and verifies the uploaded bundle with `drive9 fs stat`. If more than one perf
+volume directory exists, rerun with `--volume-id <volume-id>`.
+
+For non-interactive use, pass the token on stdin:
+
+```sh
+printf '%s' "${DRIVE9_SUPPORT_UPLOAD_TOKEN}" | \
+  kubectl -n drive9-csi exec -i <drive9-csi-node-pod> -c drive9-csi -- \
+    drive9-csi-upload-perf --case-id <case-id> --token-stdin
+```
+
+Do not pass the support upload token as a command-line argument. The helper uses
+the token only for the upload and verification commands.
+
+If the helper is unavailable, create a bundle manually inside the `drive9-csi`
+container:
 
 ```sh
 kubectl -n drive9-csi exec <drive9-csi-node-pod> -c drive9-csi -- \
@@ -339,7 +368,7 @@ kubectl -n drive9-csi exec <drive9-csi-node-pod> -c drive9-csi -- \
     -C /var/lib/drive9-csi/perf <volume-id>
 ```
 
-Upload the bundle to the support-owned Drive9 space:
+Then upload and verify the bundle with the support-owned Drive9 token:
 
 ```sh
 kubectl -n drive9-csi exec <drive9-csi-node-pod> -c drive9-csi -- \
@@ -350,6 +379,13 @@ kubectl -n drive9-csi exec <drive9-csi-node-pod> -c drive9-csi -- \
       --tag case=<case-id> \
       --tag source=k8s-csi \
       --description "Drive9 CSI perf bundle"
+```
+
+```sh
+kubectl -n drive9-csi exec <drive9-csi-node-pod> -c drive9-csi -- \
+  env DRIVE9_SERVER=https://api.drive9.ai \
+    DRIVE9_API_KEY="${DRIVE9_SUPPORT_UPLOAD_TOKEN}" \
+    drive9 fs stat :/support-inbox/<case-id>/<node-name>/<volume-id>.tgz
 ```
 
 For sidecar fallback, perf output is written to `/perf` in the mounter
