@@ -1,11 +1,8 @@
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: drive9-managed-tuned
+  name: drive9-rwo
 provisioner: csi.drive9.ai
-parameters:
-  # Omit remoteRootPrefix to mount the Drive9 workspace root instead.
-  remoteRootPrefix: /k8s/pvc
 reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: false
