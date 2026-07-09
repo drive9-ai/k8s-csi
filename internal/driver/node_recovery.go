@@ -240,21 +240,23 @@ func (d *Driver) repairPublishTargets(volumeID string, stagingTarget string) {
 }
 
 func repairPublishTarget(stagingTarget string, state publishState) error {
-	mounted, err := isMountPoint(state.Target)
+	return repairPublishTargetWithOps(stagingTarget, state, isMountPoint, bindMount, bindMountOverExistingTarget)
+}
+
+func repairPublishTargetWithOps(stagingTarget string, state publishState, isMounted func(string) (bool, error), bindFresh func(string, string, bool) error, bindExisting func(string, string, bool) error) error {
+	mounted, err := isMounted(state.Target)
 	if err != nil {
 		return fmt.Errorf("check publish target: %w", err)
 	}
 	if mounted {
-		if err := unmountPath(state.Target); err != nil {
-			if !isBusyUnmountError(err) {
-				return fmt.Errorf("unmount publish target: %w", err)
-			}
-			if err := lazyUnmountPath(state.Target); err != nil {
-				return fmt.Errorf("lazy unmount publish target: %w", err)
-			}
+		log.Printf("drive9-csi: repairing publish target %s for %s by repeated bind", state.Target, state.VolumeID)
+		if err := bindExisting(stagingTarget, state.Target, state.Readonly); err != nil {
+			return fmt.Errorf("repeated bind mount publish target: %w", err)
 		}
+		return nil
 	}
-	if err := bindMount(stagingTarget, state.Target, state.Readonly); err != nil {
+
+	if err := bindFresh(stagingTarget, state.Target, state.Readonly); err != nil {
 		return fmt.Errorf("bind mount publish target: %w", err)
 	}
 	return nil

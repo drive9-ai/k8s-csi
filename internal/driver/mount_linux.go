@@ -225,6 +225,10 @@ func bindMount(source string, target string, readonly bool) error {
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		return err
 	}
+	return bindMountOverExistingTarget(source, target, readonly)
+}
+
+func bindMountOverExistingTarget(source string, target string, readonly bool) error {
 	if err := unix.Mount(source, target, "", unix.MS_BIND, ""); err != nil {
 		return err
 	}

@@ -42,6 +42,10 @@ func bindMount(string, string, bool) error {
 	return errors.New("bind mounts are supported on Linux only")
 }
 
+func bindMountOverExistingTarget(string, string, bool) error {
+	return errors.New("bind mounts are supported on Linux only")
+}
+
 func unmountPath(string) error {
 	return nil
 }
