@@ -42,12 +42,24 @@ func bindMount(string, string, bool) error {
 	return errors.New("bind mounts are supported on Linux only")
 }
 
+func ensurePublishAnchor(string) error {
+	return errors.New("bind mounts are supported on Linux only")
+}
+
 func unmountPath(string) error {
+	return nil
+}
+
+func unmountAllAt(string) error {
 	return nil
 }
 
 func lazyUnmountPath(string) error {
 	return nil
+}
+
+func topMountsReferToSameMount(string, string) (bool, error) {
+	return false, errors.New("mountinfo is supported on Linux only")
 }
 
 func isBusyUnmountError(error) bool {

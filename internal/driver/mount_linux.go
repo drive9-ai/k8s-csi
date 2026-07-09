@@ -237,6 +237,40 @@ func bindMount(source string, target string, readonly bool) error {
 	return nil
 }
 
+func ensurePublishAnchor(target string) error {
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return err
+	}
+	mounted, err := isMountPoint(target)
+	if err != nil {
+		return err
+	}
+	created := false
+	if !mounted {
+		if err := selfBindMount(target); err != nil {
+			return err
+		}
+		created = true
+	}
+	if err := makeRShared(target); err != nil {
+		if created {
+			_ = unix.Unmount(target, 0)
+		}
+		return err
+	}
+	return nil
+}
+
+func selfBindMount(target string) error {
+	return unix.Mount(target, target, "", unix.MS_BIND, "")
+}
+
+func makeRShared(target string) error {
+	return unix.Mount("", target, "", unix.MS_SHARED|unix.MS_REC, "")
+}
+
+const maxUnmountLayers = 32
+
 func unmountPath(target string) error {
 	mounted, err := isMountPoint(target)
 	if err != nil {
@@ -248,6 +282,38 @@ func unmountPath(target string) error {
 	return unix.Unmount(target, 0)
 }
 
+func unmountAllAt(target string) error {
+	return unmountAllAtWithOps(target, maxUnmountLayers, mountLayerCount, func(path string) error {
+		return unix.Unmount(path, 0)
+	})
+}
+
+func unmountAllAtWithOps(target string, maxLayers int, countLayers func(string) (int, error), unmount func(string) error) error {
+	if maxLayers <= 0 {
+		return fmt.Errorf("maxLayers must be positive")
+	}
+	for i := 0; i < maxLayers; i++ {
+		count, err := countLayers(target)
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return nil
+		}
+		if err := unmount(target); err != nil {
+			return err
+		}
+	}
+	count, err := countLayers(target)
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return nil
+	}
+	return fmt.Errorf("too many mount layers at %s: %d layer(s) still mounted after %d unmounts", target, count, maxLayers)
+}
+
 func lazyUnmountPath(target string) error {
 	mounted, err := isMountPoint(target)
 	if err != nil {
@@ -257,6 +323,33 @@ func lazyUnmountPath(target string) error {
 		return nil
 	}
 	return unix.Unmount(target, unix.MNT_DETACH)
+}
+
+func topMountsReferToSameMount(source string, target string) (bool, error) {
+	entries, err := readMountInfoEntries()
+	if err != nil {
+		return false, err
+	}
+	return topMountsReferToSameMountFromEntries(entries, source, target)
+}
+
+func topMountsReferToSameMountFromEntries(entries []mountInfoEntry, source string, target string) (bool, error) {
+	sourceEntry, ok := topMountInfoEntry(entries, source)
+	if !ok {
+		return false, fmt.Errorf("source mount %s not found in mountinfo", source)
+	}
+	targetEntry, ok := topMountInfoEntry(entries, target)
+	if !ok {
+		return false, fmt.Errorf("target mount %s not found in mountinfo", target)
+	}
+	return mountInfoEntriesReferToSameMount(sourceEntry, targetEntry), nil
+}
+
+func mountInfoEntriesReferToSameMount(a mountInfoEntry, b mountInfoEntry) bool {
+	return a.MajorMinor == b.MajorMinor &&
+		a.Root == b.Root &&
+		a.FSType == b.FSType &&
+		a.Source == b.Source
 }
 
 func isBusyUnmountError(err error) bool {
@@ -276,20 +369,106 @@ func checkFuseDevice() error {
 
 func isMountPoint(target string) (bool, error) {
 	target = filepath.Clean(target)
-	body, err := os.ReadFile("/proc/self/mountinfo")
+	entries, err := readMountInfoEntries()
 	if err != nil {
 		return false, err
 	}
-	for _, line := range strings.Split(string(body), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 5 {
-			continue
-		}
-		if unescapeMountInfo(fields[4]) == target {
+	for _, entry := range entries {
+		if entry.MountPoint == target {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+func mountLayerCount(target string) (int, error) {
+	entries, err := readMountInfoEntries()
+	if err != nil {
+		return 0, err
+	}
+	return mountLayerCountFromEntries(entries, target), nil
+}
+
+func readMountInfoEntries() ([]mountInfoEntry, error) {
+	body, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return nil, err
+	}
+	return parseMountInfo(string(body)), nil
+}
+
+type mountInfoEntry struct {
+	ID         string
+	ParentID   string
+	MajorMinor string
+	Root       string
+	MountPoint string
+	FSType     string
+	Source     string
+}
+
+func parseMountInfo(body string) []mountInfoEntry {
+	var entries []mountInfoEntry
+	for _, line := range strings.Split(body, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 7 {
+			continue
+		}
+		separator := -1
+		for i, field := range fields {
+			if field == "-" {
+				separator = i
+				break
+			}
+		}
+		if separator < 0 || separator+2 >= len(fields) || len(fields) < 5 {
+			continue
+		}
+		entries = append(entries, mountInfoEntry{
+			ID:         fields[0],
+			ParentID:   fields[1],
+			MajorMinor: fields[2],
+			Root:       unescapeMountInfo(fields[3]),
+			MountPoint: filepath.Clean(unescapeMountInfo(fields[4])),
+			FSType:     fields[separator+1],
+			Source:     unescapeMountInfo(fields[separator+2]),
+		})
+	}
+	return entries
+}
+
+func topMountInfoEntry(entries []mountInfoEntry, target string) (mountInfoEntry, bool) {
+	target = filepath.Clean(target)
+	var matches []mountInfoEntry
+	for _, entry := range entries {
+		if entry.MountPoint == target {
+			matches = append(matches, entry)
+		}
+	}
+	if len(matches) == 0 {
+		return mountInfoEntry{}, false
+	}
+	parentIDs := make(map[string]bool, len(matches))
+	for _, entry := range matches {
+		parentIDs[entry.ParentID] = true
+	}
+	for i := len(matches) - 1; i >= 0; i-- {
+		if !parentIDs[matches[i].ID] {
+			return matches[i], true
+		}
+	}
+	return matches[len(matches)-1], true
+}
+
+func mountLayerCountFromEntries(entries []mountInfoEntry, target string) int {
+	target = filepath.Clean(target)
+	count := 0
+	for _, entry := range entries {
+		if entry.MountPoint == target {
+			count++
+		}
+	}
+	return count
 }
 
 func unescapeMountInfo(s string) string {

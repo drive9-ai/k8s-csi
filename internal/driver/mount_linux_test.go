@@ -58,6 +58,93 @@ func TestWaitForMountReturnsWhenProcessExitsBeforeMount(t *testing.T) {
 	}
 }
 
+func TestTopMountInfoEntryUsesHighestStackLayer(t *testing.T) {
+	target := "/var/lib/kubelet/pods/pod/volumes/kubernetes.io~csi/pv/mount"
+	entries := parseMountInfo(`
+10 1 0:1 / / rw,relatime - ext4 /dev/root rw
+100 10 0:111 / /var/lib/kubelet/plugins/kubernetes.io/csi/pv/vol/globalmount rw,relatime - fuse.drive9 drive9 rw
+200 10 0:222 / /var/lib/kubelet/pods/pod/volumes/kubernetes.io~csi/pv/mount rw,relatime - fuse.drive9 drive9 rw
+201 200 0:111 / /var/lib/kubelet/pods/pod/volumes/kubernetes.io~csi/pv/mount rw,nosuid,nodev,relatime - fuse.drive9 drive9 rw
+`)
+
+	got, ok := topMountInfoEntry(entries, target)
+	if !ok {
+		t.Fatal("expected target mount entry")
+	}
+	if got.ID != "201" || got.MajorMinor != "0:111" {
+		t.Fatalf("top mount = %#v, want id=201 majorMinor=0:111", got)
+	}
+	if count := mountLayerCountFromEntries(entries, target); count != 2 {
+		t.Fatalf("mount layer count = %d, want 2", count)
+	}
+}
+
+func TestTopMountsReferToSameMountFromEntries(t *testing.T) {
+	stage := "/var/lib/kubelet/plugins/kubernetes.io/csi/pv/vol/globalmount"
+	target := "/var/lib/kubelet/pods/pod/volumes/kubernetes.io~csi/pv/mount"
+	entries := parseMountInfo(`
+100 10 0:111 / /var/lib/kubelet/plugins/kubernetes.io/csi/pv/vol/globalmount rw,relatime - fuse.drive9 drive9 rw
+200 10 0:222 / /var/lib/kubelet/pods/pod/volumes/kubernetes.io~csi/pv/mount rw,relatime - fuse.drive9 drive9 rw
+201 200 0:111 / /var/lib/kubelet/pods/pod/volumes/kubernetes.io~csi/pv/mount rw,nosuid,nodev,relatime - fuse.drive9 drive9 rw
+`)
+
+	same, err := topMountsReferToSameMountFromEntries(entries, stage, target)
+	if err != nil {
+		t.Fatalf("topMountsReferToSameMountFromEntries error = %v", err)
+	}
+	if !same {
+		t.Fatal("expected target top mount to match staging top mount")
+	}
+}
+
+func TestUnmountAllAtWithOpsUnmountsUntilNoLayers(t *testing.T) {
+	counts := []int{3, 2, 1, 0}
+	var unmounts int
+	err := unmountAllAtWithOps("/target", maxUnmountLayers,
+		func(target string) (int, error) {
+			if target != "/target" {
+				t.Fatalf("count target = %q, want /target", target)
+			}
+			if unmounts >= len(counts) {
+				t.Fatalf("unexpected layer count call after %d unmounts", unmounts)
+			}
+			return counts[unmounts], nil
+		},
+		func(target string) error {
+			if target != "/target" {
+				t.Fatalf("unmount target = %q, want /target", target)
+			}
+			unmounts++
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("unmountAllAtWithOps error = %v", err)
+	}
+	if unmounts != 3 {
+		t.Fatalf("unmount calls = %d, want 3", unmounts)
+	}
+}
+
+func TestUnmountAllAtWithOpsFailsWhenLayerLimitExceeded(t *testing.T) {
+	var unmounts int
+	err := unmountAllAtWithOps("/target", 2,
+		func(string) (int, error) {
+			return 1, nil
+		},
+		func(string) error {
+			unmounts++
+			return nil
+		},
+	)
+	if err == nil {
+		t.Fatal("expected unmountAllAtWithOps to fail when layers remain after limit")
+	}
+	if unmounts != 2 {
+		t.Fatalf("unmount calls = %d, want 2", unmounts)
+	}
+}
+
 func TestDrive9MountArgsIncludesMountTTLs(t *testing.T) {
 	stateDir := t.TempDir()
 	d := &Driver{cfg: Config{StateDir: stateDir}}

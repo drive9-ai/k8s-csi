@@ -12,12 +12,13 @@ spec:
         - -c
         - |
           set -eu
-          echo hello-drive9 > /workspace/hello.txt
-          cat /workspace/hello.txt
+          echo hello-drive9 > /drive9/workspace/hello.txt
+          cat /drive9/workspace/hello.txt
           sleep 3600
       volumeMounts:
         - name: workspace
-          mountPath: /workspace
+          mountPath: /drive9
+          mountPropagation: HostToContainer
   volumes:
     - name: workspace
       persistentVolumeClaim:
