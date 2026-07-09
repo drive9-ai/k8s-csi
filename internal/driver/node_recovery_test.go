@@ -146,6 +146,12 @@ func TestRepairPublishTargetUsesRepeatedBindWhenTargetMounted(t *testing.T) {
 			}
 			return true, nil
 		},
+		func(source string, target string) (bool, error) {
+			if source != "/stage" || target != state.Target {
+				t.Fatalf("sameTopMount args = (%q, %q)", source, target)
+			}
+			return false, nil
+		},
 		func(string, string, bool) error {
 			t.Fatal("fresh bind must not be used for an existing publish mount")
 			return nil
@@ -166,6 +172,35 @@ func TestRepairPublishTargetUsesRepeatedBindWhenTargetMounted(t *testing.T) {
 	}
 }
 
+func TestRepairPublishTargetSkipsRepeatedBindWhenTargetAlreadyMatchesStaging(t *testing.T) {
+	state := publishState{
+		VolumeID: "vol-a",
+		Target:   "/var/lib/kubelet/pods/pod/volumes/kubernetes.io~csi/pv/mount",
+	}
+	err := repairPublishTargetWithOps("/stage", state,
+		func(string) (bool, error) {
+			return true, nil
+		},
+		func(source string, target string) (bool, error) {
+			if source != "/stage" || target != state.Target {
+				t.Fatalf("sameTopMount args = (%q, %q)", source, target)
+			}
+			return true, nil
+		},
+		func(string, string, bool) error {
+			t.Fatal("fresh bind must not be used when target already matches staging")
+			return nil
+		},
+		func(string, string, bool) error {
+			t.Fatal("repeated bind must not be used when target already matches staging")
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("repairPublishTargetWithOps error = %v", err)
+	}
+}
+
 func TestRepairPublishTargetUsesFreshBindWhenTargetUnmounted(t *testing.T) {
 	state := publishState{
 		VolumeID: "vol-a",
@@ -174,6 +209,10 @@ func TestRepairPublishTargetUsesFreshBindWhenTargetUnmounted(t *testing.T) {
 	var fresh bool
 	err := repairPublishTargetWithOps("/stage", state,
 		func(string) (bool, error) {
+			return false, nil
+		},
+		func(string, string) (bool, error) {
+			t.Fatal("sameTopMount must not be called for an unmounted publish target")
 			return false, nil
 		},
 		func(source string, target string, readonly bool) error {
@@ -205,6 +244,9 @@ func TestRepairPublishTargetWrapsRepeatedBindError(t *testing.T) {
 	err := repairPublishTargetWithOps("/stage", state,
 		func(string) (bool, error) {
 			return true, nil
+		},
+		func(string, string) (bool, error) {
+			return false, nil
 		},
 		func(string, string, bool) error {
 			t.Fatal("fresh bind must not be used for an existing publish mount")
