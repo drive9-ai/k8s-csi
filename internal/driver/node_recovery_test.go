@@ -130,3 +130,142 @@ func TestPathUnderRoot(t *testing.T) {
 		}
 	}
 }
+
+func TestRepairSubtreePublishTargetBindsMissingWorkspaceChild(t *testing.T) {
+	state := publishState{
+		VolumeID:     "vol-a",
+		Target:       "/var/lib/kubelet/pods/pod/volumes/kubernetes.io~csi/pv/mount",
+		Layout:       publishLayoutSubtree,
+		WorkspaceDir: defaultWorkspaceDir,
+		Readonly:     true,
+	}
+	var ensured bool
+	var bound bool
+	err := repairSubtreePublishTargetWithOps("/stage", state,
+		func(target string) (bool, error) {
+			if target != state.workspaceTarget() {
+				t.Fatalf("isMounted target = %q, want workspace target %q", target, state.workspaceTarget())
+			}
+			return false, nil
+		},
+		func(string, string) (bool, error) {
+			t.Fatal("sameTopMount must not be called for a missing workspace mount")
+			return false, nil
+		},
+		func(target string) error {
+			ensured = true
+			if target != state.Target {
+				t.Fatalf("ensure anchor target = %q, want %q", target, state.Target)
+			}
+			return nil
+		},
+		func(source string, target string, readonly bool) error {
+			bound = true
+			if source != "/stage" || target != state.workspaceTarget() || !readonly {
+				t.Fatalf("bind args = (%q, %q, %v)", source, target, readonly)
+			}
+			return nil
+		},
+		func(string) error {
+			t.Fatal("unmountAll must not be called for a missing workspace mount")
+			return nil
+		},
+		func(string) error {
+			t.Fatal("lazyUnmount must not be called for a missing workspace mount")
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("repairSubtreePublishTargetWithOps error = %v", err)
+	}
+	if !ensured || !bound {
+		t.Fatalf("ensured=%v bound=%v, want both true", ensured, bound)
+	}
+}
+
+func TestRepairSubtreePublishTargetSkipsMatchingWorkspaceChild(t *testing.T) {
+	state := publishState{
+		VolumeID:     "vol-a",
+		Target:       "/var/lib/kubelet/pods/pod/volumes/kubernetes.io~csi/pv/mount",
+		Layout:       publishLayoutSubtree,
+		WorkspaceDir: defaultWorkspaceDir,
+	}
+	err := repairSubtreePublishTargetWithOps("/stage", state,
+		func(target string) (bool, error) {
+			if target != state.workspaceTarget() {
+				t.Fatalf("isMounted target = %q, want workspace target %q", target, state.workspaceTarget())
+			}
+			return true, nil
+		},
+		func(source string, target string) (bool, error) {
+			if source != "/stage" || target != state.workspaceTarget() {
+				t.Fatalf("sameTopMount args = (%q, %q)", source, target)
+			}
+			return true, nil
+		},
+		func(string) error {
+			return nil
+		},
+		func(string, string, bool) error {
+			t.Fatal("bindChild must not be called when workspace already matches")
+			return nil
+		},
+		func(string) error {
+			t.Fatal("unmountAll must not be called when workspace already matches")
+			return nil
+		},
+		func(string) error {
+			t.Fatal("lazyUnmount must not be called when workspace already matches")
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("repairSubtreePublishTargetWithOps error = %v", err)
+	}
+}
+
+func TestRepairSubtreePublishTargetUnmountsStaleWorkspaceChild(t *testing.T) {
+	state := publishState{
+		VolumeID:     "vol-a",
+		Target:       "/var/lib/kubelet/pods/pod/volumes/kubernetes.io~csi/pv/mount",
+		Layout:       publishLayoutSubtree,
+		WorkspaceDir: defaultWorkspaceDir,
+	}
+	var unmounted bool
+	var bound bool
+	err := repairSubtreePublishTargetWithOps("/stage", state,
+		func(string) (bool, error) {
+			return true, nil
+		},
+		func(string, string) (bool, error) {
+			return false, nil
+		},
+		func(string) error {
+			return nil
+		},
+		func(source string, target string, readonly bool) error {
+			bound = true
+			if source != "/stage" || target != state.workspaceTarget() || readonly {
+				t.Fatalf("bind args = (%q, %q, %v)", source, target, readonly)
+			}
+			return nil
+		},
+		func(target string) error {
+			unmounted = true
+			if target != state.workspaceTarget() {
+				t.Fatalf("unmount target = %q, want %q", target, state.workspaceTarget())
+			}
+			return nil
+		},
+		func(string) error {
+			t.Fatal("lazyUnmount must not be called when regular unmount succeeds")
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("repairSubtreePublishTargetWithOps error = %v", err)
+	}
+	if !unmounted || !bound {
+		t.Fatalf("unmounted=%v bound=%v, want both true", unmounted, bound)
+	}
+}
