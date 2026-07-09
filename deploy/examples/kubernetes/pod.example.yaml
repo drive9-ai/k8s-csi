@@ -21,4 +21,4 @@ spec:
   volumes:
     - name: workspace
       persistentVolumeClaim:
-        claimName: drive9-workspace
+        claimName: drive9-workspace-tuned
