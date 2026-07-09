@@ -831,8 +831,8 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 		return nil, status.Error(codes.FailedPrecondition, "publish target state belongs to a different Drive9 volume")
 	}
 	if mounted {
-		if err := unmountPath(target); err != nil {
-			return nil, status.Errorf(codes.Internal, "unpublish unmount: %v", err)
+		if err := unmountAllAt(target); err != nil {
+			return nil, status.Errorf(codes.Internal, "unpublish unmount all layers: %v", err)
 		}
 	}
 	if publishStatus == stateMatching {

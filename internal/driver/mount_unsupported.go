@@ -50,8 +50,16 @@ func unmountPath(string) error {
 	return nil
 }
 
+func unmountAllAt(string) error {
+	return nil
+}
+
 func lazyUnmountPath(string) error {
 	return nil
+}
+
+func topMountsReferToSameMount(string, string) (bool, error) {
+	return false, nil
 }
 
 func isBusyUnmountError(error) bool {
