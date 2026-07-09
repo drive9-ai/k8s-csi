@@ -38,8 +38,8 @@ func TestDefaultStorageClassMountsWorkspaceRoot(t *testing.T) {
 	}
 }
 
-func TestDefaultStorageClassMountTTLs(t *testing.T) {
-	body := readRepoFile(t, "deploy/kubernetes/storageclass.yaml")
+func TestDefaultVolumeAttributesClassMountTTLs(t *testing.T) {
+	body := readRepoFile(t, "deploy/kubernetes/volumeattributesclass.yaml")
 
 	for _, want := range []string{
 		"  attrTTL: 30s",
@@ -47,22 +47,43 @@ func TestDefaultStorageClassMountTTLs(t *testing.T) {
 		"  dirTTL: 30s",
 	} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("storageclass.yaml missing default mount TTL parameter %q", want)
+			t.Fatalf("volumeattributesclass.yaml missing default mount TTL parameter %q", want)
 		}
 	}
 }
 
-func TestDefaultStorageClassMountPerfDisabled(t *testing.T) {
-	body := readRepoFile(t, "deploy/kubernetes/storageclass.yaml")
+func TestDefaultVolumeAttributesClassMountPerfDisabled(t *testing.T) {
+	body := readRepoFile(t, "deploy/kubernetes/volumeattributesclass.yaml")
 
 	want := "  perfEnabled: \"false\""
 	if !strings.Contains(body, want) {
-		t.Fatalf("storageclass.yaml missing default mount perf parameter %q", want)
+		t.Fatalf("volumeattributesclass.yaml missing default mount perf parameter %q", want)
 	}
 }
 
-func TestDefaultStorageClassOmitsExplicitMountTuning(t *testing.T) {
+func TestDefaultStorageClassOmitsMountBehavior(t *testing.T) {
 	body := readRepoFile(t, "deploy/kubernetes/storageclass.yaml")
+
+	for _, forbidden := range []string{
+		"profile:",
+		"attrTTL:",
+		"entryTTL:",
+		"dirTTL:",
+		"perfEnabled:",
+		"readdirPrefetch:",
+		"readdirPrefetchMaxFiles:",
+		"readdirPrefetchMaxFileBytes:",
+		"readdirPrefetchMaxBytes:",
+		"writebackBatchWindow:",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("storageclass.yaml must not set mount behavior parameter %q by default", forbidden)
+		}
+	}
+}
+
+func TestDefaultVolumeAttributesClassOmitsExplicitMountTuning(t *testing.T) {
+	body := readRepoFile(t, "deploy/kubernetes/volumeattributesclass.yaml")
 
 	for _, forbidden := range []string{
 		"readdirPrefetch:",
@@ -72,7 +93,28 @@ func TestDefaultStorageClassOmitsExplicitMountTuning(t *testing.T) {
 		"writebackBatchWindow:",
 	} {
 		if strings.Contains(body, forbidden) {
-			t.Fatalf("storageclass.yaml must not set explicit mount tuning parameter %q by default", forbidden)
+			t.Fatalf("volumeattributesclass.yaml must not set explicit mount tuning parameter %q by default", forbidden)
+		}
+	}
+}
+
+func TestKustomizationIncludesVolumeAttributesClass(t *testing.T) {
+	body := readRepoFile(t, "deploy/kubernetes/kustomization.yaml")
+
+	if !strings.Contains(body, "volumeattributesclass.yaml") {
+		t.Fatal("kustomization.yaml must include volumeattributesclass.yaml")
+	}
+}
+
+func TestControllerUsesVolumeAttributesClassAwareProvisioner(t *testing.T) {
+	body := readRepoFile(t, "deploy/kubernetes/controller.yaml")
+
+	for _, want := range []string{
+		"registry.k8s.io/sig-storage/csi-provisioner:v6.3.0",
+		"--feature-gates=VolumeAttributesClass=true",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("controller.yaml missing VolumeAttributesClass provisioner evidence %q", want)
 		}
 	}
 }
@@ -92,6 +134,14 @@ func TestSidecarFallbackMountTTLs(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("sidecar deployment missing mount TTL evidence %q", want)
 		}
+	}
+}
+
+func TestSidecarFallbackRunsMountInForeground(t *testing.T) {
+	body := readRepoFile(t, "deploy/sidecar/deployment.yaml")
+
+	if !strings.Contains(body, "exec drive9 mount \\\n                --foreground \\") {
+		t.Fatal("sidecar deployment must run drive9 mount with --foreground")
 	}
 }
 
@@ -187,6 +237,14 @@ func TestControllerRBACCanReadPerPVCNamespaceLocalDrive9Secrets(t *testing.T) {
 	}
 }
 
+func TestControllerRBACCanReadVolumeAttributesClasses(t *testing.T) {
+	body := readRepoFile(t, "deploy/kubernetes/rbac.yaml")
+
+	if !strings.Contains(body, "volumeattributesclasses") {
+		t.Fatal("rbac.yaml missing volumeattributesclasses read permission")
+	}
+}
+
 func TestNodeRBACCanReadSecrets(t *testing.T) {
 	body := readRepoFile(t, "deploy/kubernetes/rbac.yaml")
 
@@ -199,10 +257,46 @@ func TestNodeRBACCanReadSecrets(t *testing.T) {
 	}
 }
 
+func TestNodeRBACCanReadPersistentVolumesForRecovery(t *testing.T) {
+	body := readRepoFile(t, "deploy/kubernetes/rbac.yaml")
+	idx := strings.Index(body, "name: drive9-csi-node\nrules:")
+	if idx < 0 {
+		t.Fatal("rbac.yaml missing drive9-csi-node ClusterRole rules")
+	}
+	nodeRole := body[idx:]
+
+	for _, want := range []string{
+		"resources: [\"persistentvolumes\"]",
+		"verbs: [\"get\", \"list\"]",
+	} {
+		if !strings.Contains(nodeRole, want) {
+			t.Fatalf("rbac.yaml missing node PV recovery permission evidence %q", want)
+		}
+	}
+}
+
+func TestRecoverNodeMountsManifestArgs(t *testing.T) {
+	controller := readRepoFile(t, "deploy/kubernetes/controller.yaml")
+	node := readRepoFile(t, "deploy/kubernetes/node.yaml")
+
+	if !strings.Contains(controller, "--recover-node-mounts=disabled") {
+		t.Fatal("controller.yaml must disable node mount recovery")
+	}
+	if !strings.Contains(node, "--recover-node-mounts=enabled") {
+		t.Fatal("node.yaml must enable node mount recovery")
+	}
+	if !strings.Contains(node, "terminationGracePeriodSeconds: 120") {
+		t.Fatal("node.yaml must set terminationGracePeriodSeconds for graceful umount")
+	}
+}
+
 func TestKubernetesExamplesUseAnnotationBasedSecrets(t *testing.T) {
 	pvc := readRepoFile(t, "deploy/examples/kubernetes/pvc.example.yaml")
 	if !strings.Contains(pvc, "drive9.ai/secret-name:") {
 		t.Fatal("pvc.example.yaml must include drive9.ai/secret-name annotation")
+	}
+	if !strings.Contains(pvc, "volumeAttributesClassName: drive9-coding-agent") {
+		t.Fatal("pvc.example.yaml must reference the default VolumeAttributesClass")
 	}
 	// Secret name should NOT follow the old drive9-csi-<pvc-name> pattern.
 	secret := readRepoFile(t, "deploy/examples/kubernetes/secret.example.yaml")
@@ -219,6 +313,8 @@ func TestE2EUsesPerPVCNamespaceLocalDrive9Secret(t *testing.T) {
 
 	for _, want := range []string{
 		"write_storageclass()",
+		"write_volumeattributesclass()",
+		"volumeAttributesClassName: $volume_attributes_class",
 		"using Drive9 workspace root mode",
 		"read after PVC recreate",
 	} {

@@ -75,6 +75,7 @@ func TestDrive9MountArgsIncludesMountTTLs(t *testing.T) {
 
 	want := []string{
 		"mount",
+		"--foreground",
 		"--mode=fuse",
 		"--allow-other",
 		"--cache-dir", cacheDir,
@@ -101,6 +102,7 @@ func TestDrive9MountArgsDefaultsMountTTLs(t *testing.T) {
 
 	want := []string{
 		"mount",
+		"--foreground",
 		"--mode=fuse",
 		"--allow-other",
 		"--cache-dir", cacheDir,
@@ -128,6 +130,7 @@ func TestDrive9MountArgsIncludesPerfDir(t *testing.T) {
 
 	want := []string{
 		"mount",
+		"--foreground",
 		"--mode=fuse",
 		"--allow-other",
 		"--cache-dir", cacheDir,
@@ -161,6 +164,7 @@ func TestDrive9MountArgsIncludesExplicitMountTuning(t *testing.T) {
 
 	want := []string{
 		"mount",
+		"--foreground",
 		"--mode=fuse",
 		"--allow-other",
 		"--cache-dir", cacheDir,
@@ -198,6 +202,35 @@ func TestDrive9MountArgsOmitsFalseReaddirPrefetch(t *testing.T) {
 	}
 }
 
+func TestShutdownOneNodeMountInvokesDrive9Umount(t *testing.T) {
+	argsPath := filepath.Join(t.TempDir(), "args.txt")
+	t.Setenv("DRIVE9_UMOUNT_ARGS", argsPath)
+	fakeDrive9 := filepath.Join(t.TempDir(), "drive9")
+	script := "#!/bin/sh\nprintf '%s\n' \"$@\" > \"$DRIVE9_UMOUNT_ARGS\"\n"
+	if err := os.WriteFile(fakeDrive9, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake drive9: %v", err)
+	}
+
+	d := &Driver{cfg: Config{
+		StateDir:     t.TempDir(),
+		Drive9Binary: fakeDrive9,
+	}}
+	target := "/var/lib/kubelet/plugins/kubernetes.io/csi/pv/vol/globalmount"
+	d.shutdownOneNodeMount(context.Background(), mountState{
+		VolumeID:      "vol",
+		RemoteRoot:    "/k8s/demo",
+		StagingTarget: target,
+	})
+
+	body, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read fake drive9 args: %v", err)
+	}
+	got := strings.Split(strings.TrimSpace(string(body)), "\n")
+	want := []string{"umount", "--timeout", "30s", "--no-auto-pack", target}
+	assertStringSlice(t, got, want)
+}
+
 func TestNodeStageVolumeDefaultsMissingMountTTLsForLegacyVolumeContext(t *testing.T) {
 	fake := newFakeDrive9(t)
 	defer fake.close()
@@ -208,6 +241,8 @@ func TestNodeStageVolumeDefaultsMissingMountTTLsForLegacyVolumeContext(t *testin
 	volumeName := "pvc-root"
 	volumeID := volumeIDForWorkspaceRoot(volumeName, "/")
 	if err := d.writeMountState(mountState{
+		PID:           os.Getpid(),
+		PIDStartTime:  pidStartTime(os.Getpid()),
 		VolumeID:      volumeID,
 		RemoteRoot:    "/",
 		StagingTarget: "/",

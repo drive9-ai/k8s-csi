@@ -13,6 +13,7 @@ spec:
         app: drive9-csi-node
     spec:
       serviceAccountName: drive9-csi-node
+      terminationGracePeriodSeconds: 120
       containers:
         - name: node-driver-registrar
           image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0
@@ -35,6 +36,7 @@ spec:
           args:
             - --endpoint=unix:///csi/csi.sock
             - --node-id=$(NODE_NAME)
+            - --recover-node-mounts=enabled
           env:
             - name: NODE_NAME
               valueFrom:

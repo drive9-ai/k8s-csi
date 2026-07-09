@@ -109,9 +109,26 @@ func extractPVCRef(params map[string]string) (name, namespace string, err error)
 // and returns the Secret reference stored in its volumeAttributes. This is
 // used by DeleteVolume, which only receives volumeID — no volumeContext.
 func resolveSecretRefFromPV(ctx context.Context, k8s kubernetes.Interface, volumeID string) (secretName, secretNamespace string, err error) {
+	attrs, err := resolveVolumeContextFromPV(ctx, k8s, "", volumeID)
+	if err != nil {
+		return "", "", err
+	}
+	name := strings.TrimSpace(attrs[attrSecretName])
+	ns := strings.TrimSpace(attrs[attrSecretNamespace])
+	if name != "" && ns != "" {
+		return name, ns, nil
+	}
+	return "", "", status.Errorf(codes.FailedPrecondition,
+		"no PV with CSI volumeHandle %q found with Secret reference in volumeAttributes", volumeID)
+}
+
+// resolveVolumeContextFromPV looks up a PersistentVolume by its CSI
+// volumeHandle and returns a copy of its volumeAttributes. If driverName is
+// non-empty, the PV must also match that CSI driver.
+func resolveVolumeContextFromPV(ctx context.Context, k8s kubernetes.Interface, driverName string, volumeID string) (map[string]string, error) {
 	pvList, err := k8s.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return "", "", status.Errorf(codes.Internal, "list PVs to resolve Secret for volume %s: %v", volumeID, err)
+		return nil, status.Errorf(codes.Internal, "list PVs to resolve volume attributes for volume %s: %v", volumeID, err)
 	}
 	for i := range pvList.Items {
 		pv := &pvList.Items[i]
@@ -119,14 +136,18 @@ func resolveSecretRefFromPV(ctx context.Context, k8s kubernetes.Interface, volum
 		if csiSource == nil || csiSource.VolumeHandle != volumeID {
 			continue
 		}
-		name := strings.TrimSpace(csiSource.VolumeAttributes[attrSecretName])
-		ns := strings.TrimSpace(csiSource.VolumeAttributes[attrSecretNamespace])
-		if name != "" && ns != "" {
-			return name, ns, nil
+		if driverName != "" && csiSource.Driver != driverName {
+			return nil, status.Errorf(codes.FailedPrecondition,
+				"PV %s for volume %s is owned by CSI driver %q, want %q",
+				pv.Name, volumeID, csiSource.Driver, driverName)
 		}
+		attrs := make(map[string]string, len(csiSource.VolumeAttributes))
+		for k, v := range csiSource.VolumeAttributes {
+			attrs[k] = v
+		}
+		return attrs, nil
 	}
-	return "", "", status.Errorf(codes.FailedPrecondition,
-		"no PV with CSI volumeHandle %q found with Secret reference in volumeAttributes", volumeID)
+	return nil, status.Errorf(codes.FailedPrecondition, "no PV with CSI volumeHandle %q found", volumeID)
 }
 
 // validateNoAPIKeyInAttributes checks that volumeAttributes do not
