@@ -1623,6 +1623,66 @@ func TestStageAndPublishStateMatching(t *testing.T) {
 	}
 }
 
+func TestPublishSubtreeTargetEnsuresAnchorThenBindsWorkspace(t *testing.T) {
+	state := publishState{
+		VolumeID:     "vol",
+		Target:       "/target",
+		Layout:       publishLayoutSubtree,
+		WorkspaceDir: defaultWorkspaceDir,
+		Readonly:     true,
+	}
+	var calls []string
+	err := publishSubtreeTargetWithOps("/stage", state,
+		func(target string) error {
+			calls = append(calls, "ensure:"+target)
+			return nil
+		},
+		func(source string, target string, readonly bool) error {
+			calls = append(calls, "bind:"+source+":"+target)
+			if source != "/stage" || target != "/target/workspace" || !readonly {
+				t.Fatalf("bind args = (%q, %q, %v)", source, target, readonly)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("publishSubtreeTargetWithOps error = %v", err)
+	}
+	want := []string{"ensure:/target", "bind:/stage:/target/workspace"}
+	if strings.Join(calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls = %v, want %v", calls, want)
+	}
+}
+
+func TestCleanupSubtreePublishTargetUnmountsChildBeforeAnchor(t *testing.T) {
+	state := publishState{
+		Target:       "/target",
+		Layout:       publishLayoutSubtree,
+		WorkspaceDir: defaultWorkspaceDir,
+	}
+	var calls []string
+	err := cleanupPublishTargetWithOps(state,
+		func(target string) (bool, error) {
+			return true, nil
+		},
+		func(target string) error {
+			calls = append(calls, "unmount:"+target)
+			return nil
+		},
+		func(target string) error {
+			calls = append(calls, "remove:"+target)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("cleanupPublishTargetWithOps error = %v", err)
+	}
+	want := []string{"unmount:/target/workspace", "remove:/target/workspace", "unmount:/target", "remove:/target"}
+	if strings.Join(calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls = %v, want %v", calls, want)
+	}
+}
+
 func singleNodeMountCapability() *csi.VolumeCapability {
 	return &csi.VolumeCapability{
 		AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},

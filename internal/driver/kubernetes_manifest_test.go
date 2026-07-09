@@ -308,6 +308,67 @@ func TestKubernetesExamplesUseAnnotationBasedSecrets(t *testing.T) {
 	}
 }
 
+func TestKubernetesExamplePodUsesSubtreeMountPath(t *testing.T) {
+	pod := readRepoFile(t, "deploy/examples/kubernetes/pod.example.yaml")
+	for _, want := range []string{
+		"mountPath: /drive9",
+		"mountPropagation: HostToContainer",
+		"/drive9/workspace/hello.txt",
+		"claimName: drive9-workspace-tuned",
+	} {
+		if !strings.Contains(pod, want) {
+			t.Fatalf("pod.example.yaml missing subtree evidence %q", want)
+		}
+	}
+}
+
+func TestKubernetesExamplesIncludeVolumeAttributesClassDependencies(t *testing.T) {
+	controller := readRepoFile(t, "deploy/examples/kubernetes/controller.example.yaml")
+	for _, want := range []string{
+		"registry.k8s.io/sig-storage/csi-provisioner:v6.3.0",
+		"--feature-gates=VolumeAttributesClass=true",
+		"--recover-node-mounts=disabled",
+	} {
+		if !strings.Contains(controller, want) {
+			t.Fatalf("controller.example.yaml missing evidence %q", want)
+		}
+	}
+
+	rbac := readRepoFile(t, "deploy/examples/kubernetes/rbac.example.yaml")
+	for _, want := range []string{
+		"volumeattributesclasses",
+		"resources: [\"persistentvolumes\"]",
+		"verbs: [\"get\", \"list\"]",
+	} {
+		if !strings.Contains(rbac, want) {
+			t.Fatalf("rbac.example.yaml missing evidence %q", want)
+		}
+	}
+
+	node := readRepoFile(t, "deploy/examples/kubernetes/node.example.yaml")
+	for _, want := range []string{
+		"--recover-node-mounts=enabled",
+		"terminationGracePeriodSeconds: 120",
+		"mountPropagation: Bidirectional",
+	} {
+		if !strings.Contains(node, want) {
+			t.Fatalf("node.example.yaml missing evidence %q", want)
+		}
+	}
+}
+
+func TestKubernetesExamplePVCReferencesDefinedVolumeAttributesClass(t *testing.T) {
+	pvc := readRepoFile(t, "deploy/examples/kubernetes/pvc.example.yaml")
+	vac := readRepoFile(t, "deploy/examples/kubernetes/volumeattributesclass.example.yaml")
+
+	if !strings.Contains(pvc, "volumeAttributesClassName: drive9-coding-agent") {
+		t.Fatal("pvc.example.yaml must reference drive9-coding-agent")
+	}
+	if !strings.Contains(vac, "  name: drive9-coding-agent\n") {
+		t.Fatal("volumeattributesclass.example.yaml must define drive9-coding-agent")
+	}
+}
+
 func TestE2EUsesPerPVCNamespaceLocalDrive9Secret(t *testing.T) {
 	body := readRepoFile(t, "hack/e2e-k8s.sh")
 
