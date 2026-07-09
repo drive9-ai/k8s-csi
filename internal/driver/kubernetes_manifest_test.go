@@ -308,6 +308,22 @@ func TestKubernetesExamplesUseAnnotationBasedSecrets(t *testing.T) {
 	}
 }
 
+func TestKubernetesExamplePodUsesSubtreeMountContract(t *testing.T) {
+	pod := readRepoFile(t, "deploy/examples/kubernetes/pod.example.yaml")
+	for _, want := range []string{
+		"mountPath: /drive9",
+		"mountPropagation: HostToContainer",
+		"/drive9/workspace/hello.txt",
+	} {
+		if !strings.Contains(pod, want) {
+			t.Fatalf("pod.example.yaml missing subtree mount evidence %q", want)
+		}
+	}
+	if strings.Contains(pod, "mountPath: /workspace") {
+		t.Fatal("pod.example.yaml must not mount the Drive9 PVC directly at /workspace")
+	}
+}
+
 func TestKubernetesExamplesIncludeVolumeAttributesClassDependencies(t *testing.T) {
 	controller := readRepoFile(t, "deploy/examples/kubernetes/controller.example.yaml")
 	for _, want := range []string{
