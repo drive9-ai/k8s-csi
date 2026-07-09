@@ -2,6 +2,7 @@ package driver
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -128,5 +129,92 @@ func TestPathUnderRoot(t *testing.T) {
 		if pathUnderRoot(path, defaultKubeletRoot) {
 			t.Fatalf("pathUnderRoot(%q) = true, want false", path)
 		}
+	}
+}
+
+func TestRepairPublishTargetUsesRepeatedBindWhenTargetMounted(t *testing.T) {
+	state := publishState{
+		VolumeID: "vol-a",
+		Target:   "/var/lib/kubelet/pods/pod/volumes/kubernetes.io~csi/pv/mount",
+		Readonly: true,
+	}
+	var repeated bool
+	err := repairPublishTargetWithOps("/stage", state,
+		func(target string) (bool, error) {
+			if target != state.Target {
+				t.Fatalf("isMounted target = %q, want %q", target, state.Target)
+			}
+			return true, nil
+		},
+		func(string, string, bool) error {
+			t.Fatal("fresh bind must not be used for an existing publish mount")
+			return nil
+		},
+		func(source string, target string, readonly bool) error {
+			repeated = true
+			if source != "/stage" || target != state.Target || !readonly {
+				t.Fatalf("repeated bind args = (%q, %q, %v)", source, target, readonly)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("repairPublishTargetWithOps error = %v", err)
+	}
+	if !repeated {
+		t.Fatal("expected repeated bind")
+	}
+}
+
+func TestRepairPublishTargetUsesFreshBindWhenTargetUnmounted(t *testing.T) {
+	state := publishState{
+		VolumeID: "vol-a",
+		Target:   "/var/lib/kubelet/pods/pod/volumes/kubernetes.io~csi/pv/mount",
+	}
+	var fresh bool
+	err := repairPublishTargetWithOps("/stage", state,
+		func(string) (bool, error) {
+			return false, nil
+		},
+		func(source string, target string, readonly bool) error {
+			fresh = true
+			if source != "/stage" || target != state.Target || readonly {
+				t.Fatalf("fresh bind args = (%q, %q, %v)", source, target, readonly)
+			}
+			return nil
+		},
+		func(string, string, bool) error {
+			t.Fatal("repeated bind must not be used for an unmounted publish target")
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("repairPublishTargetWithOps error = %v", err)
+	}
+	if !fresh {
+		t.Fatal("expected fresh bind")
+	}
+}
+
+func TestRepairPublishTargetWrapsRepeatedBindError(t *testing.T) {
+	state := publishState{
+		VolumeID: "vol-a",
+		Target:   "/var/lib/kubelet/pods/pod/volumes/kubernetes.io~csi/pv/mount",
+	}
+	errBind := errors.New("mount failed")
+	err := repairPublishTargetWithOps("/stage", state,
+		func(string) (bool, error) {
+			return true, nil
+		},
+		func(string, string, bool) error {
+			t.Fatal("fresh bind must not be used for an existing publish mount")
+			return nil
+		},
+		func(string, string, bool) error {
+			return errBind
+		},
+	)
+	if !errors.Is(err, errBind) {
+		t.Fatalf("error = %v, want wrapping %v", err, errBind)
 	}
 }
