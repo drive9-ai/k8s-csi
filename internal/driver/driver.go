@@ -1199,10 +1199,10 @@ func publishSubtreeTargetWithOps(stagingTarget string, state publishState, ensur
 }
 
 func cleanupPublishTarget(state publishState) error {
-	return cleanupPublishTargetWithOps(state, isMountPoint, unmountAllAt)
+	return cleanupPublishTargetWithOps(state, isMountPoint, unmountAllAt, os.Remove)
 }
 
-func cleanupPublishTargetWithOps(state publishState, isMounted func(string) (bool, error), unmountAll func(string) error) error {
+func cleanupPublishTargetWithOps(state publishState, isMounted func(string) (bool, error), unmountAll func(string) error, removePath func(string) error) error {
 	target := filepath.Clean(state.Target)
 	if state.Layout == publishLayoutSubtree {
 		workspaceTarget := state.workspaceTarget()
@@ -1215,6 +1215,9 @@ func cleanupPublishTargetWithOps(state publishState, isMounted func(string) (boo
 				return fmt.Errorf("unmount %s: %w", workspaceTarget, err)
 			}
 		}
+		if err := removePath(workspaceTarget); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove workspace target %s: %w", workspaceTarget, err)
+		}
 	}
 	mounted, err := isMounted(target)
 	if err != nil {
@@ -1224,6 +1227,9 @@ func cleanupPublishTargetWithOps(state publishState, isMounted func(string) (boo
 		if err := unmountAll(target); err != nil {
 			return fmt.Errorf("unmount %s: %w", target, err)
 		}
+	}
+	if err := removePath(target); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove publish target %s: %w", target, err)
 	}
 	return nil
 }

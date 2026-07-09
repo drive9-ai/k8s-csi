@@ -1660,22 +1660,26 @@ func TestCleanupSubtreePublishTargetUnmountsChildBeforeAnchor(t *testing.T) {
 		Layout:       publishLayoutSubtree,
 		WorkspaceDir: defaultWorkspaceDir,
 	}
-	var unmounted []string
+	var calls []string
 	err := cleanupPublishTargetWithOps(state,
 		func(target string) (bool, error) {
 			return true, nil
 		},
 		func(target string) error {
-			unmounted = append(unmounted, target)
+			calls = append(calls, "unmount:"+target)
+			return nil
+		},
+		func(target string) error {
+			calls = append(calls, "remove:"+target)
 			return nil
 		},
 	)
 	if err != nil {
 		t.Fatalf("cleanupPublishTargetWithOps error = %v", err)
 	}
-	want := []string{"/target/workspace", "/target"}
-	if strings.Join(unmounted, "|") != strings.Join(want, "|") {
-		t.Fatalf("unmounted = %v, want %v", unmounted, want)
+	want := []string{"unmount:/target/workspace", "remove:/target/workspace", "unmount:/target", "remove:/target"}
+	if strings.Join(calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls = %v, want %v", calls, want)
 	}
 }
 
