@@ -161,7 +161,9 @@ If publishing fails before promotion, cleanup should run in child-to-parent orde
 
 ```text
 if targetPath/workspace is mounted: unmountAllAt(targetPath/workspace)
+remove empty targetPath/workspace
 if targetPath is mounted: unmountAllAt(targetPath)
+remove empty targetPath
 remove pending state
 ```
 
@@ -199,15 +201,24 @@ The recovery code must not unmount `targetPath` while a Pod is still published.
 
 ```text
 unmountAllAt(targetPath/workspace)
+remove empty targetPath/workspace
 unmountAllAt(targetPath)
+remove empty targetPath
 remove publish state
 ```
 
-This keeps normal Pod deletion cleanup strict and deterministic.
+This keeps normal Pod deletion cleanup strict and deterministic. The removals must use empty-directory removal semantics, not recursive deletion. If either directory contains unexpected content, unpublish should return an error rather than deleting it.
+
+Kubernetes CSI drivers commonly use the `k8s.io/mount-utils` helper `CleanupMountPoint` for this final mount-point cleanup. For example, JuiceFS unmounts repeated bind layers and then calls `CleanupMountPoint(target, ...)` to remove the target path. Drive9 CSI keeps its own `unmountAllAt` helper because subtree recovery and earlier repeated-bind experiments need multi-layer unmount behavior, but it should mirror the same final cleanup semantics:
+
+```text
+unmount all known layers
+remove the now-empty mount point directory
+```
 
 If `targetPath/workspace` is not mounted, unpublish should continue to the anchor cleanup.
 
-If `targetPath` is not mounted, unpublish should still remove matching publish state.
+If `targetPath` is not mounted, unpublish should still remove empty publish directories and then remove matching publish state.
 
 ## Publish State
 
@@ -247,7 +258,9 @@ Main implementation points:
 
 2. `internal/driver/driver.go:809` `NodeUnpublishVolume`
    - Unmount `targetPath/workspace` first.
+   - Remove empty `targetPath/workspace`.
    - Then unmount the self-bound `targetPath` anchor.
+   - Remove empty `targetPath`.
 
 3. `internal/driver/driver.go:862` `validatePublishedMount`
    - Validate the child mount instead of the publish root for subtree state.
