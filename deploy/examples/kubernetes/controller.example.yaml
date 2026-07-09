@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drive9-csi-controller
+  namespace: drive9-csi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: drive9-csi-controller
+  template:
+    metadata:
+      labels:
+        app: drive9-csi-controller
+    spec:
+      serviceAccountName: drive9-csi-controller
+      containers:
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v6.3.0
+          args:
+            - --csi-address=/csi/csi.sock
+            - --extra-create-metadata
+            - --leader-election
+            - --feature-gates=VolumeAttributesClass=true
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: drive9-csi
+          image: ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2
+          imagePullPolicy: IfNotPresent
+          args:
+            - --endpoint=unix:///csi/csi.sock
+            - --node-id=$(NODE_NAME)
+            - --recover-node-mounts=disabled
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: state-dir
+              mountPath: /var/lib/drive9-csi
+      volumes:
+        - name: socket-dir
+          emptyDir: {}
+        - name: state-dir
+          emptyDir: {}
