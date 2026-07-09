@@ -5,6 +5,7 @@ package driver
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 type drive9MountRequest struct {
@@ -25,6 +26,10 @@ func (d *Driver) startDrive9Mount(context.Context, drive9MountRequest) error {
 	return errors.New("Drive9 CSI node mounts are supported on Linux only")
 }
 
+func (d *Driver) drive9Umount(context.Context, string, time.Duration) error {
+	return errors.New("Drive9 CSI node mounts are supported on Linux only")
+}
+
 func (d *Driver) stopRecordedMount(context.Context, string, string) error {
 	return nil
 }
@@ -39,4 +44,20 @@ func bindMount(string, string, bool) error {
 
 func unmountPath(string) error {
 	return nil
+}
+
+func lazyUnmountPath(string) error {
+	return nil
+}
+
+func isBusyUnmountError(error) bool {
+	return false
+}
+
+func checkFuseDevice() error {
+	return errors.New("Drive9 CSI node mounts are supported on Linux only")
+}
+
+func pidMatchesState(mountState) bool {
+	return false
 }
