@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: drive9-csi-node
+  namespace: drive9-csi
+spec:
+  selector:
+    matchLabels:
+      app: drive9-csi-node
+  template:
+    metadata:
+      labels:
+        app: drive9-csi-node
+    spec:
+      serviceAccountName: drive9-csi-node
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: node-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0
+          args:
+            - --v=2
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/csi.drive9.ai/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+        - name: drive9-csi
+          image: ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["SYS_ADMIN"]
+          args:
+            - --endpoint=unix:///csi/csi.sock
+            - --node-id=$(NODE_NAME)
+            - --recover-node-mounts=enabled
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: DRIVE9_CSI_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: DRIVE9_CSI_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: kubelet-dir
+              mountPath: /var/lib/kubelet
+              mountPropagation: Bidirectional
+            - name: state-dir
+              mountPath: /var/lib/drive9-csi
+            - name: dev-fuse
+              mountPath: /dev/fuse
+      volumes:
+        - name: socket-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/csi.drive9.ai
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: Directory
+        - name: kubelet-dir
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        - name: state-dir
+          hostPath:
+            path: /var/lib/drive9-csi
+            type: DirectoryOrCreate
+        - name: dev-fuse
+          hostPath:
+            path: /dev/fuse
+            type: CharDevice

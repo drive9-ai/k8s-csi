@@ -165,7 +165,7 @@ The default example `StorageClass` uses `Retain`, so deleting the PVC keeps the
 PV and Drive9 workspace data for safety. Even with `reclaimPolicy: Delete`, the
 default workspace-root mode does not delete Drive9 workspace data.
 
-Example StorageClass, Secret, PVC, and smoke Pod manifests live under `deploy/examples/kubernetes/` so that applying `deploy/kubernetes/` does not create placeholder credentials or demo workloads in production clusters. Apply the example Secret with `kubectl -n <workload-namespace> apply -f deploy/examples/kubernetes/secret.example.yaml` after replacing the API key. Each PVC references its Secret via the `drive9.ai/secret-name` annotation — multiple PVCs can share a Secret or use different ones.
+Example driver, StorageClass, VolumeAttributesClass, Secret, PVC, and smoke Pod manifests live under `deploy/examples/kubernetes/` so that applying `deploy/kubernetes/` does not create placeholder credentials or demo workloads in production clusters. Apply the example Secret with `kubectl -n <workload-namespace> apply -f deploy/examples/kubernetes/secret.example.yaml` after replacing the API key. Each PVC references its Secret via the `drive9.ai/secret-name` annotation; multiple PVCs can share a Secret or use different ones.
 
 ## StorageClass
 
@@ -173,20 +173,14 @@ Default example:
 
 ```yaml
 provisioner: csi.drive9.ai
-parameters:
-  profile: coding-agent
-  attrTTL: 30s
-  entryTTL: 30s
-  dirTTL: 30s
-  perfEnabled: "false"
+parameters: {}
 reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer
 ```
 
-The StorageClass does **not** contain any secret template parameters. Credentials
-are resolved from PVC annotations, not StorageClass templates. This avoids the
-implicit `drive9-csi-${pvc.name}` naming convention and makes the Secret binding
-explicit and auditable.
+The StorageClass does **not** contain credentials or mount behavior parameters.
+Credentials are resolved from PVC annotations, not StorageClass templates. Mount
+behavior is selected per PVC through `spec.volumeAttributesClassName`.
 
 `Retain` is the default example because this is customer data. If a customer
 wants a PVC to mount a CSI-managed subdirectory instead of the Drive9 workspace
@@ -195,6 +189,25 @@ root, create a separate `StorageClass` with `remoteRootPrefix`:
 ```yaml
 parameters:
   remoteRootPrefix: /k8s/pvc
+```
+
+In managed directory mode, `CreateVolume` creates a unique child directory under
+that prefix and writes CSI metadata. If that separate `StorageClass` uses
+`reclaimPolicy: Delete`, the driver still refuses to delete paths without both a
+matching metadata index entry and a matching `.drive9-csi-volume.json` marker.
+
+## VolumeAttributesClass
+
+Mount behavior parameters belong in `VolumeAttributesClass`, then PVCs reference
+the chosen class through `spec.volumeAttributesClassName`:
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: VolumeAttributesClass
+metadata:
+  name: drive9-coding-agent
+driverName: csi.drive9.ai
+parameters:
   profile: coding-agent
   attrTTL: 30s
   entryTTL: 30s
@@ -202,10 +215,11 @@ parameters:
   perfEnabled: "false"
 ```
 
-In managed directory mode, `CreateVolume` creates a unique child directory under
-that prefix and writes CSI metadata. If that separate `StorageClass` uses
-`reclaimPolicy: Delete`, the driver still refuses to delete paths without both a
-matching metadata index entry and a matching `.drive9-csi-volume.json` marker.
+```yaml
+spec:
+  storageClassName: drive9-rwo
+  volumeAttributesClassName: drive9-coding-agent
+```
 
 The optional `attrTTL`, `entryTTL`, and `dirTTL` parameters control the matching
 `drive9 mount --attr-ttl`, `--entry-ttl`, and `--dir-ttl` flags. Each value uses
@@ -219,9 +233,9 @@ user-provided perf path and does not automatically delete perf output. Remove
 the perf directory manually after collecting support data.
 
 The following optional tuning parameters have no CSI defaults. The driver passes
-only values explicitly set in the `StorageClass`:
+only values explicitly set in the `VolumeAttributesClass`:
 
-| StorageClass parameter | `drive9 mount` flag |
+| VolumeAttributesClass parameter | `drive9 mount` flag |
 | --- | --- |
 | `readdirPrefetch` | `--readdir-prefetch` |
 | `readdirPrefetchMaxFiles` | `--readdir-prefetch-max-files` |
@@ -237,6 +251,11 @@ supports it.
 Example with explicit tuning enabled:
 
 ```yaml
+apiVersion: storage.k8s.io/v1
+kind: VolumeAttributesClass
+metadata:
+  name: drive9-coding-agent-tuned
+driverName: csi.drive9.ai
 parameters:
   profile: coding-agent
   attrTTL: 30s
