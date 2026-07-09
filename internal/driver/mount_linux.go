@@ -228,6 +228,38 @@ func bindMount(source string, target string, readonly bool) error {
 	return bindMountOverExistingTarget(source, target, readonly)
 }
 
+func ensurePublishAnchor(target string) error {
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return err
+	}
+	mounted, err := isMountPoint(target)
+	if err != nil {
+		return err
+	}
+	created := false
+	if !mounted {
+		if err := selfBindMount(target); err != nil {
+			return err
+		}
+		created = true
+	}
+	if err := makeRShared(target); err != nil {
+		if created {
+			_ = unix.Unmount(target, 0)
+		}
+		return err
+	}
+	return nil
+}
+
+func selfBindMount(target string) error {
+	return unix.Mount(target, target, "", unix.MS_BIND, "")
+}
+
+func makeRShared(target string) error {
+	return unix.Mount("", target, "", unix.MS_SHARED|unix.MS_REC, "")
+}
+
 func bindMountOverExistingTarget(source string, target string, readonly bool) error {
 	if err := unix.Mount(source, target, "", unix.MS_BIND, ""); err != nil {
 		return err

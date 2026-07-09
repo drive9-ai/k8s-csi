@@ -240,10 +240,17 @@ func (d *Driver) repairPublishTargets(volumeID string, stagingTarget string) {
 }
 
 func repairPublishTarget(stagingTarget string, state publishState) error {
-	return repairPublishTargetWithOps(stagingTarget, state, isMountPoint, topMountsReferToSameMount, bindMount, bindMountOverExistingTarget)
+	if state.Layout == publishLayoutSubtree {
+		return repairSubtreePublishTarget(stagingTarget, state)
+	}
+	return repairRootPublishTarget(stagingTarget, state)
 }
 
-func repairPublishTargetWithOps(stagingTarget string, state publishState, isMounted func(string) (bool, error), sameTopMount func(string, string) (bool, error), bindFresh func(string, string, bool) error, bindExisting func(string, string, bool) error) error {
+func repairRootPublishTarget(stagingTarget string, state publishState) error {
+	return repairRootPublishTargetWithOps(stagingTarget, state, isMountPoint, topMountsReferToSameMount, bindMount, bindMountOverExistingTarget)
+}
+
+func repairRootPublishTargetWithOps(stagingTarget string, state publishState, isMounted func(string) (bool, error), sameTopMount func(string, string) (bool, error), bindFresh func(string, string, bool) error, bindExisting func(string, string, bool) error) error {
 	mounted, err := isMounted(state.Target)
 	if err != nil {
 		return fmt.Errorf("check publish target: %w", err)
@@ -266,6 +273,48 @@ func repairPublishTargetWithOps(stagingTarget string, state publishState, isMoun
 
 	if err := bindFresh(stagingTarget, state.Target, state.Readonly); err != nil {
 		return fmt.Errorf("bind mount publish target: %w", err)
+	}
+	return nil
+}
+
+func repairSubtreePublishTarget(stagingTarget string, state publishState) error {
+	return repairSubtreePublishTargetWithOps(stagingTarget, state, isMountPoint, topMountsReferToSameMount, ensurePublishAnchor, bindMount, unmountAllAt, lazyUnmountPath)
+}
+
+func repairSubtreePublishTargetWithOps(stagingTarget string, state publishState, isMounted func(string) (bool, error), sameTopMount func(string, string) (bool, error), ensureAnchor func(string) error, bindChild func(string, string, bool) error, unmountAll func(string) error, lazyUnmount func(string) error) error {
+	if state.Layout != publishLayoutSubtree {
+		return fmt.Errorf("publish layout %q is not %q", state.Layout, publishLayoutSubtree)
+	}
+	if err := ensureAnchor(state.Target); err != nil {
+		return fmt.Errorf("ensure publish anchor: %w", err)
+	}
+	workspaceTarget := state.workspaceTarget()
+	mounted, err := isMounted(workspaceTarget)
+	if err != nil {
+		return fmt.Errorf("check workspace target: %w", err)
+	}
+	if mounted {
+		same, err := sameTopMount(stagingTarget, workspaceTarget)
+		if err != nil {
+			return fmt.Errorf("compare workspace target top mount: %w", err)
+		}
+		if same {
+			log.Printf("drive9-csi: workspace target %s for %s already points to recovered staging mount", workspaceTarget, state.VolumeID)
+			return nil
+		}
+		log.Printf("drive9-csi: repairing workspace target %s for %s by child remount", workspaceTarget, state.VolumeID)
+		if err := unmountAll(workspaceTarget); err != nil {
+			if !isBusyUnmountError(err) {
+				return fmt.Errorf("unmount stale workspace target: %w", err)
+			}
+			log.Printf("drive9-csi: workspace target %s for %s is busy, falling back to lazy unmount", workspaceTarget, state.VolumeID)
+			if lazyErr := lazyUnmount(workspaceTarget); lazyErr != nil {
+				return fmt.Errorf("lazy unmount stale workspace target after busy unmount: %w", lazyErr)
+			}
+		}
+	}
+	if err := bindChild(stagingTarget, workspaceTarget, state.Readonly); err != nil {
+		return fmt.Errorf("bind workspace target: %w", err)
 	}
 	return nil
 }

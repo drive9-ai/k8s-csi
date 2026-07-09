@@ -756,14 +756,50 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 
 	requestedMode := req.GetVolumeCapability().GetAccessMode().GetMode()
 
-	// Idempotent: if target is already mounted, validate and return.
-	if mounted, err := isMountPoint(target); err != nil {
+	targetMounted, err := isMountPoint(target)
+	if err != nil {
 		return nil, status.Errorf(codes.Internal, "check target mount: %v", err)
-	} else if mounted {
-		if err := d.validatePublishedMount(volumeID, stagingTarget, target, req.GetReadonly(), requestedMode.String()); err != nil {
-			return nil, err
+	}
+	state, stateErr := d.readPublishState(target)
+	if stateErr != nil && !errors.Is(stateErr, os.ErrNotExist) {
+		return nil, status.Errorf(codes.FailedPrecondition, "read publish state: %v", stateErr)
+	}
+	if stateErr == nil && publishStateMatches(state, volumeID, stagingTarget, target, req.GetReadonly(), requestedMode.String()) {
+		if state.Status == publishStatusPending {
+			if err := cleanupPublishTarget(state); err != nil {
+				return nil, status.Errorf(codes.Internal, "cleanup pending publish target: %v", err)
+			}
+			_ = os.Remove(d.publishStatePath(target))
+			targetMounted = false
+		} else if state.Layout == publishLayoutSubtree {
+			if err := repairPublishTarget(stagingTarget, state); err != nil {
+				return nil, status.Errorf(codes.Internal, "repair subtree publish target: %v", err)
+			}
+			return &csi.NodePublishVolumeResponse{}, nil
+		} else if targetMounted {
+			if err := d.validatePublishedMount(volumeID, stagingTarget, target, req.GetReadonly(), requestedMode.String()); err != nil {
+				return nil, err
+			}
+			return &csi.NodePublishVolumeResponse{}, nil
+		} else {
+			_ = os.Remove(d.publishStatePath(target))
 		}
-		return &csi.NodePublishVolumeResponse{}, nil
+	} else if targetMounted {
+		if stateErr == nil {
+			return nil, status.Error(codes.FailedPrecondition, "publish target is mounted for a different Drive9 volume or access mode")
+		}
+		workspaceTarget := subtreeWorkspaceTarget(target, defaultWorkspaceDir)
+		workspaceMounted, mountErr := isMountPoint(workspaceTarget)
+		if mountErr != nil {
+			return nil, status.Errorf(codes.Internal, "check workspace target mount: %v", mountErr)
+		}
+		if workspaceMounted {
+			return nil, status.Error(codes.FailedPrecondition, "publish target is mounted but no matching Drive9 state exists")
+		}
+		if err := unmountAllAt(target); err != nil {
+			return nil, status.Errorf(codes.Internal, "cleanup stateless publish anchor: %v", err)
+		}
+		targetMounted = false
 	}
 
 	// Multi-target access mode check: only SINGLE_NODE_MULTI_WRITER
@@ -781,6 +817,8 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 		VolumeID:      volumeID,
 		StagingTarget: filepath.Clean(stagingTarget),
 		Target:        filepath.Clean(target),
+		Layout:        publishLayoutSubtree,
+		WorkspaceDir:  defaultWorkspaceDir,
 		Readonly:      req.GetReadonly(),
 		AccessMode:    requestedMode.String(),
 		Status:        publishStatusPending,
@@ -790,16 +828,16 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 		return nil, status.Errorf(codes.Internal, "write pending publish state: %v", err)
 	}
 
-	if err := bindMount(stagingTarget, target, req.GetReadonly()); err != nil {
-		// Bind failed — clean up pending state.
+	if err := publishSubtreeTarget(stagingTarget, pendingState); err != nil {
+		_ = cleanupPublishTarget(pendingState)
 		_ = os.Remove(d.publishStatePath(target))
-		return nil, status.Errorf(codes.Internal, "bind mount publish target: %v", err)
+		return nil, status.Errorf(codes.Internal, "publish subtree target: %v", err)
 	}
 
 	// Promote to published.
 	pendingState.Status = publishStatusPublished
 	if err := d.writePublishState(pendingState); err != nil {
-		_ = unmountPath(target)
+		_ = cleanupPublishTarget(pendingState)
 		_ = os.Remove(d.publishStatePath(target))
 		return nil, status.Errorf(codes.Internal, "write publish state: %v", err)
 	}
@@ -819,9 +857,21 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 	if !filepath.IsAbs(target) {
 		return nil, status.Error(codes.InvalidArgument, "target path must be absolute")
 	}
-	publishStatus, err := d.publishStateStatus(volumeID, target)
-	if err != nil {
-		return nil, err
+	publishStatus := stateMissing
+	state, err := d.readPublishState(target)
+	if errors.Is(err, os.ErrNotExist) {
+		state = publishState{
+			VolumeID:     volumeID,
+			Target:       filepath.Clean(target),
+			Layout:       publishLayoutSubtree,
+			WorkspaceDir: defaultWorkspaceDir,
+		}
+	} else if err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "read publish state: %v", err)
+	} else if state.VolumeID != volumeID || filepath.Clean(state.Target) != filepath.Clean(target) {
+		publishStatus = stateMismatched
+	} else {
+		publishStatus = stateMatching
 	}
 	mounted, err := isMountPoint(target)
 	if err != nil {
@@ -830,10 +880,11 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 	if mounted && publishStatus == stateMismatched {
 		return nil, status.Error(codes.FailedPrecondition, "publish target state belongs to a different Drive9 volume")
 	}
-	if mounted {
-		if err := unmountAllAt(target); err != nil {
-			return nil, status.Errorf(codes.Internal, "unpublish unmount all layers: %v", err)
-		}
+	if publishStatus == stateMismatched {
+		return &csi.NodeUnpublishVolumeResponse{}, nil
+	}
+	if err := cleanupPublishTarget(state); err != nil {
+		return nil, status.Errorf(codes.Internal, "unpublish cleanup: %v", err)
 	}
 	if publishStatus == stateMatching {
 		if err := os.Remove(d.publishStatePath(target)); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -866,6 +917,23 @@ func (d *Driver) validatePublishedMount(volumeID string, stagingTarget string, t
 	}
 	if !publishStateMatches(state, volumeID, stagingTarget, target, readonly, accessMode) {
 		return status.Error(codes.FailedPrecondition, "publish target is mounted for a different Drive9 volume or access mode")
+	}
+	if state.Layout == publishLayoutSubtree {
+		workspaceTarget := state.workspaceTarget()
+		mounted, err := isMountPoint(workspaceTarget)
+		if err != nil {
+			return status.Errorf(codes.Internal, "check workspace target mount: %v", err)
+		}
+		if !mounted {
+			return status.Error(codes.FailedPrecondition, "workspace target is not mounted")
+		}
+		same, err := topMountsReferToSameMount(stagingTarget, workspaceTarget)
+		if err != nil {
+			return status.Errorf(codes.Internal, "compare workspace target top mount: %v", err)
+		}
+		if !same {
+			return status.Error(codes.FailedPrecondition, "workspace target is mounted for a stale Drive9 mount")
+		}
 	}
 	return nil
 }
@@ -1060,6 +1128,55 @@ func publishStateMatches(state publishState, volumeID string, stagingTarget stri
 		state.AccessMode == accessMode
 }
 
+func subtreeWorkspaceTarget(target string, workspaceDir string) string {
+	workspaceDir = strings.TrimSpace(workspaceDir)
+	if workspaceDir == "" {
+		workspaceDir = defaultWorkspaceDir
+	}
+	return filepath.Join(filepath.Clean(target), workspaceDir)
+}
+
+func publishSubtreeTarget(stagingTarget string, state publishState) error {
+	return publishSubtreeTargetWithOps(stagingTarget, state, ensurePublishAnchor, bindMount)
+}
+
+func publishSubtreeTargetWithOps(stagingTarget string, state publishState, ensureAnchor func(string) error, bindChild func(string, string, bool) error) error {
+	if state.Layout != publishLayoutSubtree {
+		return fmt.Errorf("publish layout %q is not %q", state.Layout, publishLayoutSubtree)
+	}
+	if err := ensureAnchor(state.Target); err != nil {
+		return fmt.Errorf("ensure publish anchor: %w", err)
+	}
+	if err := bindChild(stagingTarget, state.workspaceTarget(), state.Readonly); err != nil {
+		return fmt.Errorf("bind workspace target: %w", err)
+	}
+	return nil
+}
+
+func cleanupPublishTarget(state publishState) error {
+	return cleanupPublishTargetWithOps(state, isMountPoint, unmountAllAt)
+}
+
+func cleanupPublishTargetWithOps(state publishState, isMounted func(string) (bool, error), unmountAll func(string) error) error {
+	targets := []string{filepath.Clean(state.Target)}
+	if state.Layout == publishLayoutSubtree {
+		targets = []string{state.workspaceTarget(), filepath.Clean(state.Target)}
+	}
+	for _, target := range targets {
+		mounted, err := isMounted(target)
+		if err != nil {
+			return fmt.Errorf("check mount %s: %w", target, err)
+		}
+		if !mounted {
+			continue
+		}
+		if err := unmountAll(target); err != nil {
+			return fmt.Errorf("unmount %s: %w", target, err)
+		}
+	}
+	return nil
+}
+
 func validateVolumeCapabilities(caps []*csi.VolumeCapability) error {
 	if len(caps) == 0 {
 		return status.Error(codes.InvalidArgument, "volume capability is required")
@@ -1222,7 +1339,7 @@ func (d *Driver) hasActivePublishTargets(volumeID string, stagingTarget string) 
 		if state.VolumeID != volumeID || filepath.Clean(state.StagingTarget) != stagingTarget {
 			continue
 		}
-		mounted, mountErr := isMountPoint(state.Target)
+		mounted, mountErr := publishStateMounted(state)
 		if mountErr != nil {
 			// Cannot determine mount status — conservative active.
 			log.Printf("drive9-csi: warning: cannot check mount for %s: %v", state.Target, mountErr)
@@ -1238,6 +1355,19 @@ func (d *Driver) hasActivePublishTargets(volumeID string, stagingTarget string) 
 		}
 	}
 	return active, nil
+}
+
+func publishStateMounted(state publishState) (bool, error) {
+	if state.Layout == publishLayoutSubtree {
+		workspaceMounted, err := isMountPoint(state.workspaceTarget())
+		if err != nil {
+			return false, err
+		}
+		if workspaceMounted {
+			return true, nil
+		}
+	}
+	return isMountPoint(state.Target)
 }
 
 func markerPath(remoteRoot string) string {
@@ -1263,16 +1393,25 @@ func nameIndexPath(name string) string {
 const (
 	publishStatusPending   = "pending"
 	publishStatusPublished = "published"
+	publishLayoutRoot      = "root"
+	publishLayoutSubtree   = "subtree"
+	defaultWorkspaceDir    = "workspace"
 )
 
 type publishState struct {
 	VolumeID      string `json:"volumeID"`
 	StagingTarget string `json:"stagingTarget"`
 	Target        string `json:"target"`
+	Layout        string `json:"layout,omitempty"`
+	WorkspaceDir  string `json:"workspaceDir,omitempty"`
 	Readonly      bool   `json:"readonly"`
 	AccessMode    string `json:"accessMode,omitempty"` // e.g. "SINGLE_NODE_MULTI_WRITER"
 	Status        string `json:"status,omitempty"`     // "pending" or "published"
 	PublishedAt   string `json:"publishedAt"`
+}
+
+func (s publishState) workspaceTarget() string {
+	return subtreeWorkspaceTarget(s.Target, s.WorkspaceDir)
 }
 
 // checkMultiTargetAccess decides whether a new publish target is allowed
@@ -1295,14 +1434,20 @@ func checkMultiTargetAccess(active []publishState, requestedMode csi.VolumeCapab
 	return nil
 }
 
-// applyLegacyDefaults fills in zero-value fields from pre-multi-pod
-// publish state files that lack Status and AccessMode.
+// applyLegacyDefaults fills in zero-value fields from older publish state
+// files that lack Status, AccessMode, or subtree layout fields.
 func (s *publishState) applyLegacyDefaults() {
 	if s.Status == "" {
 		s.Status = publishStatusPublished
 	}
 	if s.AccessMode == "" {
 		s.AccessMode = csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER.String()
+	}
+	if s.Layout == "" {
+		s.Layout = publishLayoutRoot
+	}
+	if s.Layout == publishLayoutSubtree && strings.TrimSpace(s.WorkspaceDir) == "" {
+		s.WorkspaceDir = defaultWorkspaceDir
 	}
 }
 

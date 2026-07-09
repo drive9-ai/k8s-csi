@@ -1623,6 +1623,62 @@ func TestStageAndPublishStateMatching(t *testing.T) {
 	}
 }
 
+func TestPublishSubtreeTargetEnsuresAnchorThenBindsWorkspace(t *testing.T) {
+	state := publishState{
+		VolumeID:     "vol",
+		Target:       "/target",
+		Layout:       publishLayoutSubtree,
+		WorkspaceDir: defaultWorkspaceDir,
+		Readonly:     true,
+	}
+	var calls []string
+	err := publishSubtreeTargetWithOps("/stage", state,
+		func(target string) error {
+			calls = append(calls, "ensure:"+target)
+			return nil
+		},
+		func(source string, target string, readonly bool) error {
+			calls = append(calls, "bind:"+source+":"+target)
+			if source != "/stage" || target != "/target/workspace" || !readonly {
+				t.Fatalf("bind args = (%q, %q, %v)", source, target, readonly)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("publishSubtreeTargetWithOps error = %v", err)
+	}
+	want := []string{"ensure:/target", "bind:/stage:/target/workspace"}
+	if strings.Join(calls, "|") != strings.Join(want, "|") {
+		t.Fatalf("calls = %v, want %v", calls, want)
+	}
+}
+
+func TestCleanupSubtreePublishTargetUnmountsChildBeforeAnchor(t *testing.T) {
+	state := publishState{
+		Target:       "/target",
+		Layout:       publishLayoutSubtree,
+		WorkspaceDir: defaultWorkspaceDir,
+	}
+	var unmounted []string
+	err := cleanupPublishTargetWithOps(state,
+		func(target string) (bool, error) {
+			return true, nil
+		},
+		func(target string) error {
+			unmounted = append(unmounted, target)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("cleanupPublishTargetWithOps error = %v", err)
+	}
+	want := []string{"/target/workspace", "/target"}
+	if strings.Join(unmounted, "|") != strings.Join(want, "|") {
+		t.Fatalf("unmounted = %v, want %v", unmounted, want)
+	}
+}
+
 func singleNodeMountCapability() *csi.VolumeCapability {
 	return &csi.VolumeCapability{
 		AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
@@ -2117,13 +2173,18 @@ func TestPublishStateLegacyDefaults(t *testing.T) {
 	if s.AccessMode != csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER.String() {
 		t.Fatalf("legacy AccessMode = %q, want SINGLE_NODE_WRITER", s.AccessMode)
 	}
+	if s.Layout != publishLayoutRoot {
+		t.Fatalf("legacy Layout = %q, want %q", s.Layout, publishLayoutRoot)
+	}
 }
 
 func TestPublishStateLegacyDefaultsDoNotOverwrite(t *testing.T) {
 	s := publishState{
-		VolumeID:   "vol-1",
-		Status:     publishStatusPending,
-		AccessMode: csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER.String(),
+		VolumeID:     "vol-1",
+		Status:       publishStatusPending,
+		Layout:       publishLayoutSubtree,
+		WorkspaceDir: defaultWorkspaceDir,
+		AccessMode:   csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER.String(),
 	}
 	s.applyLegacyDefaults()
 	if s.Status != publishStatusPending {
@@ -2131,6 +2192,12 @@ func TestPublishStateLegacyDefaultsDoNotOverwrite(t *testing.T) {
 	}
 	if s.AccessMode != csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER.String() {
 		t.Fatalf("AccessMode should not be overwritten, got %q", s.AccessMode)
+	}
+	if s.Layout != publishLayoutSubtree {
+		t.Fatalf("Layout should not be overwritten, got %q", s.Layout)
+	}
+	if s.WorkspaceDir != defaultWorkspaceDir {
+		t.Fatalf("WorkspaceDir should not be overwritten, got %q", s.WorkspaceDir)
 	}
 }
 
