@@ -122,7 +122,7 @@ The mount process:
 | yes | yes | yes | no | Stop scope, unmount, re-mount |
 | yes | yes | no | - | Stop scope, re-mount |
 | yes | no | - | - | Stop scope, clean state, re-mount |
-| no | yes | yes | yes | Adopt (create scope? or leave as-is) |
+| no | yes | yes | yes | Adopt: create new scope for the orphan PID so future cleanup has a systemd handle |
 | no | yes | no | - | Kill PID, clean state, re-mount |
 | no | no | yes | - | Kernel unmount, clean state, re-mount |
 | no | no | no | - | Clean state (nothing to recover) |
@@ -174,9 +174,12 @@ Binary layout on host (`/var/lib/drive9-csi/bin/`):
 Mount state records `binaryPath` for auditability. Old mount processes hold
 an open fd to the old binary inode; symlink update doesn't affect them.
 
-**Binary GC**: During recovery, scan all state files for referenced
+**Binary GC**: Runs **after** the full recovery scan completes (not
+interleaved with mount recovery). Scan all state files for referenced
 `binaryPath` values. Remove any `drive9-*` binaries in the bin directory that
-are not referenced by any live mount state.
+are not referenced by any live mount state. This ordering prevents a
+concurrent recovery restart from GC-ing a binary still being referenced by
+a mount being re-adopted.
 
 #### 6. Remove shutdown unmount on SIGTERM
 
@@ -196,7 +199,8 @@ Fixed ordering — each step runs regardless of previous step's result:
 2. If step 1 failed: systemctl stop drive9-mount-<vol>.scope (10s timeout)
 3. Verify: isMountPoint(stagingTarget) == false
    If still mounted: kernel unmount (unix.Unmount)
-   If busy: lazy unmount (MNT_DETACH)
+   If busy: lazy unmount (MNT_DETACH) — existing open fds in business
+   Pods continue to work until closed (no ESTALE mid-operation)
 4. Verify: PID dead (pidMatchesState == false)
    If still alive: SIGKILL + wait 5s
 5. Delete mount state file
