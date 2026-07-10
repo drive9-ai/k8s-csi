@@ -65,22 +65,29 @@ JuiceFS CSI, s3-csi, etc.). Code paths are restricted to:
 On CSI driver startup (before accepting any gRPC calls), run preflight checks:
 
 ```
-1. Open /host-proc/1/ns/mnt (verify host /proc is mounted correctly)
+1. Open /host-proc/1/ns/mnt
+   Failure: "host /proc not mounted at /host-proc or PID 1 namespace inaccessible"
+
 2. nsenter --mount=/host-proc/1/ns/mnt -- /bin/true
-   (verify nsenter into host mount namespace works)
+   Check: exit code == 0
+   Failure: "nsenter into host mount namespace failed (exit=%d): %s"
+
 3. nsenter --mount=/host-proc/1/ns/mnt -- \
-       systemd-run --scope --unit=drive9-preflight -- /bin/true
-   (verify transient scope creation works end-to-end: systemd-run binary
-   exists, D-Bus is accessible, host systemd accepts scope creation,
-   unit reaches active state and exits cleanly)
-4. Verify unit completed: systemctl is-failed drive9-preflight.scope returns
-   non-zero (unit ran /bin/true successfully)
-5. Clean up: systemctl reset-failed drive9-preflight.scope (remove dead unit)
+       systemd-run --wait --collect --scope --unit=drive9-preflight -- /bin/true
+   Check: exit code == 0 (--wait blocks until /bin/true exits, --collect
+   auto-removes the unit on completion, exit code reflects the command's
+   exit status, not systemd-run's own status)
+   Failure classification:
+     - systemd-run not found: "host does not have systemd"
+     - D-Bus connection refused: "host systemd D-Bus inaccessible"
+     - scope creation failed: "host systemd rejected transient scope"
+     - /bin/true failed (exit != 0): "preflight command failed in scope"
 ```
 
-If any check fails → log error with specific failure reason, set driver to
-degraded mode (reject `NodeStageVolume` with `FAILED_PRECONDITION` and
-actionable error message). Do not silently fall back to in-container mount.
+If any check fails → log error with the specific failure classification,
+set driver to degraded mode (reject `NodeStageVolume` with
+`FAILED_PRECONDITION` and actionable error message). Do not silently fall
+back to in-container mount.
 
 #### 2. Host-namespace + host-cgroup mount process
 
@@ -122,7 +129,7 @@ The mount process:
 | yes | yes | yes | no | Stop scope, unmount, re-mount |
 | yes | yes | no | - | Stop scope, re-mount |
 | yes | no | - | - | Stop scope, clean state, re-mount |
-| no | yes | yes | yes | Adopt: create new scope for the orphan PID so future cleanup has a systemd handle |
+| no | yes | yes | yes | Stop + re-mount: kill PID via control socket (`drive9 umount`), kernel unmount staging target, then re-mount with a new scope. Adopting a scopeless PID into a new systemd scope is unreliable; clean re-mount is simpler and guaranteed correct. |
 | no | yes | no | - | Kill PID, clean state, re-mount |
 | no | no | yes | - | Kernel unmount, clean state, re-mount |
 | no | no | no | - | Clean state (nothing to recover) |
@@ -159,17 +166,33 @@ initContainers:
       - sh
       - -c
       - |
-        SHORT_SHA=$(drive9 version --short-sha 2>/dev/null || echo unknown)
-        cp -f /usr/local/bin/drive9 "/host-state/bin/drive9-${SHORT_SHA}"
-        ln -sf "drive9-${SHORT_SHA}" /host-state/bin/drive9
+        set -euo pipefail
+        # Determine unique version identifier (fail if unavailable)
+        VER=$(drive9 version --short-sha 2>/dev/null || true)
+        if [ -z "$VER" ] || [ "$VER" = "unknown" ]; then
+          # Fallback to content hash for auditability
+          VER=$(sha256sum /usr/local/bin/drive9 | cut -c1-12)
+        fi
+        DEST="/host-state/bin/drive9-${VER}"
+        # Atomic install: write to temp, rename (never overwrite existing)
+        if [ ! -f "$DEST" ]; then
+          TMPF=$(mktemp /host-state/bin/.drive9-install-XXXXXX)
+          cp /usr/local/bin/drive9 "$TMPF"
+          chmod 755 "$TMPF"
+          mv "$TMPF" "$DEST"
+        fi
+        ln -sf "drive9-${VER}" /host-state/bin/drive9
     volumeMounts:
       - name: state-dir
         mountPath: /host-state
 ```
 
 Binary layout on host (`/var/lib/drive9-csi/bin/`):
-- `drive9-<sha>` — versioned binary (immutable once written)
+- `drive9-<sha>` — versioned binary (immutable once written, never overwritten)
 - `drive9` — symlink to current version (updated on each CSI Pod start)
+- Install is atomic (temp file + rename) to prevent partial writes
+- Version is determined from `drive9 version --short-sha` or content hash;
+  never falls back to an un-auditable name
 
 Mount state records `binaryPath` for auditability. Old mount processes hold
 an open fd to the old binary inode; symlink update doesn't affect them.
@@ -196,14 +219,18 @@ Fixed ordering — each step runs regardless of previous step's result:
 
 ```
 1. drive9 umount via control socket (30s timeout)
-2. If step 1 failed: systemctl stop drive9-mount-<vol>.scope (10s timeout)
+2. Verify scope: systemctl is-active drive9-mount-<vol>.scope
+   If still active: systemctl stop drive9-mount-<vol>.scope (10s timeout)
+   (This runs regardless of step 1 result — control socket umount may
+   succeed but leave the scope active if the process daemonized or
+   the scope has other processes)
 3. Verify: isMountPoint(stagingTarget) == false
    If still mounted: kernel unmount (unix.Unmount)
    If busy: lazy unmount (MNT_DETACH) — existing open fds in business
    Pods continue to work until closed (no ESTALE mid-operation)
 4. Verify: PID dead (pidMatchesState == false)
    If still alive: SIGKILL + wait 5s
-5. Delete mount state file
+5. Delete mount state file (only if all above verifications pass)
 ```
 
 **Terminal state**: mount gone + PID gone + scope gone + state file gone.
@@ -282,7 +309,9 @@ OOM score adjustment.
 4. **Pod delete**: `kubectl delete pod drive9-csi-node-xxx` — same verification
    as rolling update
 5. **New Pod mount**: create new PVC + Pod after upgrade, confirm new binary
-   version via `readlink /var/lib/drive9-csi/bin/drive9` and state file
+   version by checking: (a) mount state `binaryPath` points to new versioned
+   path, (b) `/proc/<pid>/exe` of the new mount process resolves to the new
+   binary, (c) `drive9 version` via control socket reports the new version
 6. **NodeUnstageVolume**: delete all consumer Pods → mount cleaned up, scope
    stopped, state deleted, mount point gone
 7. **Mount crash**: `kill -9` mount PID → recovery re-mounts, scope recreated
