@@ -109,15 +109,33 @@ The mount process:
 After `systemd-run` returns, CSI cannot use `cmd.Process.Pid` — that is the
 `nsenter`/`systemd-run` wrapper PID, not the long-running `drive9 mount` PID.
 
-**Source of truth**: `drive9 mount --foreground` writes a **pidfile** to a
-well-known host path (`/var/lib/drive9-csi/run/<volume-id>.pid`) and creates
-a **control socket** (`/var/lib/drive9-csi/run/<volume-id>.sock`). Both paths
-are on hostPath volumes that persist across CSI Pod restarts.
+**Source of truth**: `drive9 mount --foreground` writes a **pidfile** and
+creates a **control socket** on hostPath-backed paths that persist across
+CSI Pod restarts.
+
+**Path encoding and ownership**:
+- Volume IDs are encoded using the existing `safeFileName()` helper (replaces
+  `/`, `:`, and other unsafe chars with `_`). This is the same encoding used
+  for mount state JSON files today.
+- Pidfile: `/var/lib/drive9-csi/run/<safe-volume-id>.pid` (mode `0600`, owned
+  by root)
+- Control socket: `/var/lib/drive9-csi/run/<safe-volume-id>.sock` (mode `0600`)
+- Run dir: `/var/lib/drive9-csi/run/` (mode `0700`, created by CSI driver on
+  startup)
+- **Stale file handling**: before starting a new mount, CSI checks for existing
+  pidfile/socket at the expected path. If found, verify PID is alive and
+  matches the expected volume's staging target. If stale (PID dead or wrong
+  volume), delete pidfile/socket before proceeding.
+- **Cross-volume safety**: pidfile path includes the safe-encoded volume ID,
+  so different volumes cannot collide. CSI verifies the pidfile PID's
+  `/host-proc/<pid>/cmdline` contains the expected staging target path
+  before trusting it.
 
 **PID resolution sequence** (after `waitForMount` confirms mount is ready):
-1. Read PID from pidfile at `/var/lib/drive9-csi/run/<volume-id>.pid`
+1. Read PID from pidfile at `/var/lib/drive9-csi/run/<safe-volume-id>.pid`
 2. Read PID startTime from `/host-proc/<pid>/stat` (field 22)
-3. Record `PID`, `PIDStartTime`, `systemdUnit`, `binaryPath` in mount state
+3. Verify `/host-proc/<pid>/cmdline` contains the expected staging target
+4. Record `PID`, `PIDStartTime`, `systemdUnit`, `binaryPath` in mount state
 
 **PID verification** (`pidMatchesState`):
 - All PID-based checks (`pidStartTime`, `pidAlive`, `/proc/<pid>/cgroup`,
@@ -131,15 +149,36 @@ are on hostPath volumes that persist across CSI Pod restarts.
 
 `drive9 mount` requires `DRIVE9_SERVER` and `DRIVE9_API_KEY` env vars.
 
-**Mechanism**: `systemd-run --setenv=DRIVE9_SERVER=... --setenv=DRIVE9_API_KEY=...`
+**Mechanism**: Root-only environment file, not `--setenv`.
 
-**Exposure constraints**:
-- `--setenv` passes env vars directly to the scope's process, not persisted
-  in unit files on disk
-- `systemctl show` does NOT expose env vars set via `--setenv` (they are
-  passed at exec time, not stored in unit properties)
-- Logs: `drive9 mount` must not log the API key; CSI driver must not log
-  the full `systemd-run` command line. Log the command with `DRIVE9_API_KEY=<redacted>`
+Using `systemd-run --setenv=DRIVE9_API_KEY=...` puts the secret in the
+`systemd-run` process argv, visible to any node-root process via
+`/proc/<pid>/cmdline` during launch. While the CSI node plugin already
+runs as node-root (privileged container), minimizing secret surface is
+preferred.
+
+Instead, write a temporary env file:
+```
+1. Write /var/lib/drive9-csi/run/<safe-volume-id>.env (mode 0600, root:root):
+     DRIVE9_SERVER=<server>
+     DRIVE9_API_KEY=<key>
+2. Launch: nsenter ... -- systemd-run --scope ... -- \
+     env $(cat /var/lib/drive9-csi/run/<safe-vol>.env) \
+     /var/lib/drive9-csi/bin/drive9 mount ...
+   Or use systemd-run --property=EnvironmentFile=/var/lib/drive9-csi/run/<safe-vol>.env
+3. After mount is confirmed ready (pidfile + isMountPoint), delete the env file.
+   The mount process already has the env vars in its address space.
+```
+
+**Exposure constraints under node-root threat model**:
+- Env file exists only during mount startup (seconds), mode 0600
+- After deletion, secrets live only in `/proc/<pid>/environ` (readable by
+  root only, which is acceptable under node-root threat model)
+- `systemctl show` does not expose the env vars
+- Journal/logs: `drive9 mount` must not log the API key
+- CSI driver logs the launch command with `DRIVE9_API_KEY=<redacted>`
+- **E2e check**: after mount ready, verify env file deleted, verify
+  `systemctl show` output does not contain the API key
 
 **Secret rotation**: if the K8s Secret changes, `NodeUnstageVolume` +
 `NodeStageVolume` re-mount with the new credentials. Old mount processes
@@ -351,6 +390,22 @@ V1: `drive9 mount` manages its own cache memory via `--cache-dir` configuration.
 Future: per-scope resource limits via `systemd-run --property=MemoryMax=...` and
 OOM score adjustment.
 
+### Cross-repo Drive9 CLI requirements
+
+This design depends on `drive9 mount` (in `mem9-ai/drive9`) supporting:
+
+| Capability | Current status | Required for this design |
+|---|---|---|
+| `--foreground` flag | Exists | Keep mount process in foreground (no double-fork) |
+| Pidfile at configurable path | Exists: `--pid-file` flag writes PID to given path | CSI passes `--pid-file /var/lib/drive9-csi/run/<vol>.pid` |
+| Control socket | Exists: written to staging target dir | CSI reads socket path from state or convention |
+| `drive9 umount` via control socket | Exists | No change needed |
+| `drive9 version` via control socket | **Not yet implemented** | Add version query to control protocol (paired PR in drive9) |
+
+If `drive9 version` via control socket is not available for V1, the e2e
+binary version check falls back to `/host-proc/<pid>/exe` readlink only.
+The control socket version query is a nice-to-have, not a blocker.
+
 ### Changes required
 
 | File | Change |
@@ -366,8 +421,10 @@ OOM score adjustment.
 ### Verification plan (e2e)
 
 1. **Preflight**: CSI driver starts, passes all preflight checks, logs success
-2. **Mount**: `NodeStageVolume` creates mount via systemd scope; verify
-   `/proc/<pid>/cgroup` shows `system.slice/drive9-mount-*`, NOT `kubepods/`
+2. **Mount + cgroup**: `NodeStageVolume` creates mount via systemd scope; verify
+   `/host-proc/<pid>/cgroup` shows `system.slice/drive9-mount-*`, NOT `kubepods/`
+   (all `/proc/<pid>` checks in e2e run against `/host-proc/<pid>` since mount
+   process is in host PID namespace)
 3. **Rolling update**: `kubectl rollout restart ds/drive9-csi-node` — business
    Pod maintains open fd loop (read/write/fsync), verify mount PID/startTime/
    mount id unchanged
@@ -375,8 +432,9 @@ OOM score adjustment.
    as rolling update
 5. **New Pod mount**: create new PVC + Pod after upgrade, confirm new binary
    version by checking: (a) mount state `binaryPath` points to new versioned
-   path, (b) `/proc/<pid>/exe` of the new mount process resolves to the new
-   binary, (c) `drive9 version` via control socket reports the new version
+   path, (b) `/host-proc/<pid>/exe` of the new mount process resolves to the
+   new binary, (c) `drive9 version` via control socket reports the new version
+   (if available, otherwise skip)
 6. **NodeUnstageVolume**: delete all consumer Pods → mount cleaned up, scope
    stopped, state deleted, mount point gone
 7. **Mount crash**: `kill -9` mount PID → recovery re-mounts, scope recreated
@@ -385,3 +443,6 @@ OOM score adjustment.
 9. **Binary GC**: after all old mounts cleaned, old binary removed
 10. **Node drain**: `kubectl drain` — consumer Pods evicted first, mounts
     cleaned via `NodeUnstageVolume`, CSI Pod evicted last
+11. **Secret hygiene**: after mount ready, verify env file deleted, verify
+    `systemctl show drive9-mount-<vol>.scope` does not contain API key,
+    verify CSI driver logs contain `DRIVE9_API_KEY=<redacted>` not the real key
