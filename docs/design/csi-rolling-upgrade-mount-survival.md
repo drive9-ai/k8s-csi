@@ -27,9 +27,9 @@ and "intentional volume cleanup." It unconditionally calls `drive9 umount` +
 ### Core Idea
 
 Run `drive9 mount` processes in the **host mount namespace** AND in a
-**host-managed systemd scope** so they are fully decoupled from the CSI Pod's
-container lifecycle. The CSI driver process never actively unmounts on exit; all
-mount cleanup is driven by the CSI lifecycle API (`NodeUnstageVolume`).
+**host-managed systemd transient service** so they are fully decoupled from the
+CSI Pod's container lifecycle. The CSI driver process never actively unmounts on
+exit; all mount cleanup is driven by the CSI lifecycle API (`NodeUnstageVolume`).
 
 ### Why both nsenter and systemd-run are required
 
@@ -37,9 +37,23 @@ mount cleanup is driven by the CSI lifecycle API (`NodeUnstageVolume`).
   directly on the host filesystem. But nsenter alone does NOT move the process
   out of the CSI container's cgroup — kubelet's cgroup cleanup on Pod deletion
   would still kill it.
-- **`systemd-run --scope`** places the process into a host-managed systemd
-  transient scope (`system.slice/drive9-mount-<vol>.scope`), outside the CSI
+- **`systemd-run` (transient service)** places the process into a host-managed
+  systemd unit (`system.slice/drive9-mount-<vol>.service`), outside the CSI
   Pod's cgroup hierarchy. This is what makes the process survive Pod deletion.
+
+### Why transient service, not scope
+
+`systemd-run --scope` executes the command synchronously — `systemd-run`
+itself blocks until the scoped process exits. With `drive9 mount --foreground`,
+this means the CSI `NodeStageVolume` goroutine would block forever.
+
+`systemd-run` without `--scope` (default mode) creates a **transient service
+unit**. With `--service-type=exec`, `systemd-run` returns as soon as the
+service's main process calls `exec()` successfully (the `ExecStart` binary is
+running). This gives CSI a clear "process launched" signal without blocking.
+
+The unit type is `.service` (not `.scope`). All unit naming, cgroup
+verification, cleanup commands, and e2e expectations use `.service` throughout.
 
 ### Support matrix and prerequisites
 
@@ -55,7 +69,7 @@ CentOS, RHEL, Flatcar, Bottlerocket). This covers >95% of production K8s nodes.
 capability, which is the standard security model for CSI FUSE drivers (same as
 JuiceFS CSI, s3-csi, etc.). Code paths are restricted to:
 - `/host-proc/1/ns/mnt` — enter host mount namespace
-- `systemd-run` / `systemctl` — manage drive9 mount scopes only
+- `systemd-run` / `systemctl` — manage drive9 mount services only
 - No arbitrary host `/proc` operations
 
 ### Design
@@ -73,15 +87,17 @@ On CSI driver startup (before accepting any gRPC calls), run preflight checks:
    Failure: "nsenter into host mount namespace failed (exit=%d): %s"
 
 3. nsenter --mount=/host-proc/1/ns/mnt -- \
-       systemd-run --wait --collect --scope --unit=drive9-preflight -- /bin/true
+       systemd-run --wait --collect --unit=drive9-preflight -- /bin/true
    Check: exit code == 0 (--wait blocks until /bin/true exits, --collect
    auto-removes the unit on completion, exit code reflects the command's
    exit status, not systemd-run's own status)
+   Note: preflight uses --wait (acceptable for short-lived /bin/true).
+   Production mounts use --service-type=exec without --wait.
    Failure classification:
      - systemd-run not found: "host does not have systemd"
      - D-Bus connection refused: "host systemd D-Bus inaccessible"
-     - scope creation failed: "host systemd rejected transient scope"
-     - /bin/true failed (exit != 0): "preflight command failed in scope"
+     - unit creation failed: "host systemd rejected transient unit"
+     - /bin/true failed (exit != 0): "preflight command failed in transient unit"
 ```
 
 If any check fails → log error with the specific failure classification,
@@ -91,18 +107,25 @@ back to in-container mount.
 
 #### 2. Host-namespace + host-cgroup mount process
 
-Change `startDrive9Mount` to launch `drive9 mount` via `nsenter` + `systemd-run`:
+Change `startDrive9Mount` to launch `drive9 mount` via `nsenter` + `systemd-run`
+(transient service):
 
 ```
 nsenter --mount=/host-proc/1/ns/mnt -- \
-    systemd-run --scope --unit=drive9-mount-<escaped-volume-id> -- \
-    /var/lib/drive9-csi/bin/drive9 mount --foreground ... <staging-target>
+    systemd-run --service-type=exec \
+    --unit=drive9-mount-<hex-volume-id> \
+    --remain-after-exit=false -- \
+    /var/lib/drive9-csi/run/<hex-volume-id>.sh
 ```
+
+`systemd-run` returns as soon as the service's main process has successfully
+called `exec()`. This is the "process launched" signal. CSI then proceeds to
+`waitForMount` to poll for FUSE readiness.
 
 The mount process:
 - Runs in the host's mount namespace (FUSE mount directly on host)
-- Lives in a host systemd scope cgroup (`system.slice/drive9-mount-<vol>.scope`)
-- Survives CSI Pod restart — kubelet cleans Pod cgroup, not host systemd scopes
+- Lives in a host systemd service cgroup (`system.slice/drive9-mount-<vol>.service`)
+- Survives CSI Pod restart — kubelet cleans Pod cgroup, not host systemd services
 
 ##### Host PID discovery and identity (B6)
 
@@ -121,7 +144,7 @@ CSI Pod restarts.
   The hex encoding is used for pidfile, env file, wrapper script, and systemd
   unit naming. Mount state JSON files continue to use the existing
   `safeFileName()` for backward compatibility.
-- Pidfile: `/var/lib/drive9-csi/run/<safe-volume-id>.pid` (mode `0600`, owned
+- Pidfile: `/var/lib/drive9-csi/run/<hex-volume-id>.pid` (mode `0600`, owned
   by root). CSI passes `--pid-file` flag to `drive9 mount`.
 - Control socket: `drive9 mount` currently writes the control socket to the
   staging target directory (e.g., `<staging-target>/.drive9.sock`). This is
@@ -140,7 +163,7 @@ CSI Pod restarts.
   1. Parse `/host-proc/<pid>/cmdline` (NUL-separated argv) and verify the
      exact staging target path appears as the final positional argument
      (not a substring match — exact argv element comparison)
-  2. Verify PID belongs to the expected systemd scope by checking
+  2. Verify PID belongs to the expected systemd service by checking
      `/host-proc/<pid>/cgroup` contains the expected unit name
   3. Verify `PIDStartTime` matches the recorded value (guards against
      PID reuse after process death)
@@ -176,29 +199,36 @@ preferred.
 
 Instead, use a root-owned wrapper script that reads an env file and execs:
 ```
-1. Write /var/lib/drive9-csi/run/<safe-volume-id>.env (mode 0600, root:root):
+1. Write /var/lib/drive9-csi/run/<hex-volume-id>.env (mode 0600, root:root):
      DRIVE9_SERVER=<server>
      DRIVE9_API_KEY=<key>
 
-2. Write /var/lib/drive9-csi/run/<safe-volume-id>.sh (mode 0700, root:root):
+2. Write /var/lib/drive9-csi/run/<hex-volume-id>.sh (mode 0700, root:root):
      #!/bin/sh
      set -eu
-     . /var/lib/drive9-csi/run/<safe-volume-id>.env
+     . /var/lib/drive9-csi/run/<hex-volume-id>.env
      export DRIVE9_SERVER DRIVE9_API_KEY
      exec /var/lib/drive9-csi/bin/drive9 mount --foreground ...
    (CSI generates this script with the exact mount args)
 
 3. Launch:
      nsenter --mount=/host-proc/1/ns/mnt -- \
-       systemd-run --scope --unit=drive9-mount-<escaped-vol> -- \
-       /var/lib/drive9-csi/run/<safe-volume-id>.sh
+       systemd-run --service-type=exec \
+       --unit=drive9-mount-<hex-volume-id> -- \
+       /var/lib/drive9-csi/run/<hex-volume-id>.sh
 
    This keeps secrets out of systemd-run's argv entirely. The wrapper
    script sources the env file, exports the vars, then execs drive9.
 
-4. After mount is confirmed ready (pidfile + isMountPoint), delete both
-   the .env and .sh files. The mount process already has the env vars
-   in its address space.
+4. Cleanup of .env and .sh files runs on BOTH success and failure paths:
+   - Success: after mount is confirmed ready (pidfile + isMountPoint),
+     delete both files. The mount process already has the env vars in
+     its address space.
+   - Failure (timeout, crash, bad credentials): cleanup runs in the
+     same defer/finally block that handles service stop and state cleanup.
+     Files are deleted after the service is stopped/confirmed dead.
+   In all cases, .env and .sh files are ephemeral — they must not persist
+   beyond the mount startup attempt.
 ```
 
 **Exposure constraints under node-root threat model**:
@@ -218,17 +248,20 @@ continue with old credentials until cleaned up.
 ##### Readiness and failure attribution (B9)
 
 **Readiness detection**:
-1. `systemd-run` returns (wrapper exits) — this only means the scope was
-   created and the command was launched, NOT that `drive9 mount` is ready
+1. `systemd-run --service-type=exec` returns once `drive9 mount` has been
+   exec'd successfully (the process is running). This confirms the service
+   unit is active, but does NOT mean FUSE is ready.
 2. `waitForMount(stagingTarget, timeout)` polls `isMountPoint(stagingTarget)`
    until the FUSE mount appears (same as today, no `processDone` channel)
-3. If mount appears → read pidfile → record state → return success
-4. If timeout → check scope status:
-   - Scope inactive/failed: `drive9 mount` crashed before mounting.
-     Read logs via `journalctl --unit=drive9-mount-<vol>.scope --no-pager -n 50`
-     for error attribution. Clean up scope, return error.
-   - Scope active but no mount: `drive9 mount` is running but not mounting.
-     Stop scope, return error with log snippet.
+3. If mount appears → read pidfile → record state → clean up .env/.sh →
+   return success
+4. If timeout → check service status via
+   `systemctl is-active drive9-mount-<hex-volume-id>.service`:
+   - Service inactive/failed: `drive9 mount` crashed before mounting.
+     Read logs via `journalctl --unit=drive9-mount-<hex-volume-id>.service --no-pager -n 50`
+     for error attribution. Clean up .env/.sh files, return error.
+   - Service active but no mount: `drive9 mount` is running but not mounting.
+     Stop service, clean up .env/.sh files, return error with log snippet.
 
 **State write timing**: mount state JSON is written ONLY after ALL of:
 - `isMountPoint(stagingTarget)` returns true
@@ -237,33 +270,41 @@ continue with old credentials until cleaned up.
 
 This prevents partial state from persisting if `drive9 mount` crashes
 during startup.
-- Cleaned up via `NodeUnstageVolume` → `drive9 umount` (control socket), with
-  `systemctl stop` as fallback
+Cleanup via `NodeUnstageVolume` → `drive9 umount` (control socket), with
+`systemctl stop` as fallback.
 
 #### 3. Systemd unit naming and idempotency
 
-**Unit naming**: `drive9-mount-<escaped-volume-id>.scope`
-- Use `systemd-escape` to safely encode volume IDs containing `/`, `.`, or
-  other special characters
-- Mount state JSON records `systemdUnit` field for reverse lookup
+**Canonical volume ID encoding**: `hex.EncodeToString([]byte(volumeID))`.
+This single encoding is used for ALL per-volume artifacts:
+- Systemd unit: `drive9-mount-<hex-volume-id>.service`
+- Pidfile: `/var/lib/drive9-csi/run/<hex-volume-id>.pid`
+- Env file: `/var/lib/drive9-csi/run/<hex-volume-id>.env`
+- Wrapper script: `/var/lib/drive9-csi/run/<hex-volume-id>.sh`
+
+Hex encoding is collision-free (bijective) and systemd-safe (only `[0-9a-f]`).
+No `systemd-escape` needed. Mount state JSON files continue to use the
+existing `safeFileName()` for backward compatibility with kubelet conventions.
+
+Mount state JSON records `systemdUnit` field for reverse lookup.
 
 **Idempotency** (`NodeStageVolume` retry):
-- If scope already exists AND pid matches state AND mount point exists →
+- If service already exists AND pid matches state AND mount point exists →
   return success (idempotent)
-- If scope exists but pid doesn't match → `systemctl stop` scope, then
+- If service exists but pid doesn't match → `systemctl stop` service, then
   re-mount
-- If scope doesn't exist but state file exists → state is stale, clean up
+- If service doesn't exist but state file exists → state is stale, clean up
   and re-mount
 
 **Recovery split-state handling** (on CSI driver restart):
 
-| Scope exists | PID matches | Mount exists | Control socket | Action |
+| Service exists | PID matches | Mount exists | Control socket | Action |
 |---|---|---|---|---|
 | yes | yes | yes | yes | Skip (healthy) |
-| yes | yes | yes | no | Stop scope, unmount, re-mount |
-| yes | yes | no | - | Stop scope, re-mount |
-| yes | no | - | - | Stop scope, clean state, re-mount |
-| no | yes | yes | yes | Stop + re-mount: kill PID via control socket (`drive9 umount`), kernel unmount staging target, then re-mount with a new scope. Adopting a scopeless PID into a new systemd scope is unreliable; clean re-mount is simpler and guaranteed correct. |
+| yes | yes | yes | no | Stop service, unmount, re-mount |
+| yes | yes | no | - | Stop service, re-mount |
+| yes | no | - | - | Stop service, clean state, re-mount |
+| no | yes | yes | yes | Stop + re-mount: kill PID via control socket (`drive9 umount`), kernel unmount staging target, then re-mount with a new service. Adopting an orphan PID into a new systemd service is unreliable; clean re-mount is simpler and guaranteed correct. |
 | no | yes | no | - | Kill PID, clean state, re-mount |
 | no | no | yes | - | Kernel unmount, clean state, re-mount |
 | no | no | no | - | Clean state (nothing to recover) |
@@ -353,11 +394,10 @@ Fixed ordering — each step runs regardless of previous step's result:
 
 ```
 1. drive9 umount via control socket (30s timeout)
-2. Verify scope: systemctl is-active drive9-mount-<vol>.scope
-   If still active: systemctl stop drive9-mount-<vol>.scope (10s timeout)
+2. Verify service: systemctl is-active drive9-mount-<hex-volume-id>.service
+   If still active: systemctl stop drive9-mount-<hex-volume-id>.service (10s timeout)
    (This runs regardless of step 1 result — control socket umount may
-   succeed but leave the scope active if the process daemonized or
-   the scope has other processes)
+   succeed but leave the service active)
 3. Verify: isMountPoint(stagingTarget) == false
    If still mounted: kernel unmount (unix.Unmount)
    If busy: lazy unmount (MNT_DETACH) — existing open fds in business
@@ -367,13 +407,13 @@ Fixed ordering — each step runs regardless of previous step's result:
 5. Delete mount state file (only if all above verifications pass)
 ```
 
-**Terminal state**: mount gone + PID gone + scope gone + state file gone.
+**Terminal state**: mount gone + PID gone + service gone + state file gone.
 
 **State file deletion rule**: state file is deleted ONLY after all of the
 following are confirmed:
 - `isMountPoint(stagingTarget)` returns false
 - PID is dead (`pidMatchesState` returns false)
-- Scope is inactive or doesn't exist
+- Service is inactive or doesn't exist
 
 If any of these conditions is NOT met after all cleanup attempts, the state
 file is **preserved** and `NodeUnstageVolume` returns an error. This ensures
@@ -383,8 +423,8 @@ unresolvable orphan — that makes it permanently unmanageable.
 
 #### 8. Recovery (minimal change to existing code)
 
-`recoverNodeMounts()` enhanced with systemd scope awareness:
-- Check `pidMatchesState(state)` AND scope active → skip (healthy)
+`recoverNodeMounts()` enhanced with systemd service awareness:
+- Check `pidMatchesState(state)` AND service active → skip (healthy)
 - Otherwise → run split-state matrix (section 3 above)
 - After successful re-mount → `repairPublishTargets` (existing code, unchanged)
 
@@ -414,11 +454,11 @@ for `isMountPoint()` checks.
 
 ### Resource isolation
 
-Mount processes in host systemd scopes are not constrained by CSI Pod cgroup
+Mount processes in host systemd services are not constrained by CSI Pod cgroup
 limits. This is the standard model for production FUSE mount daemons.
 
 V1: `drive9 mount` manages its own cache memory via `--cache-dir` configuration.
-Future: per-scope resource limits via `systemd-run --property=MemoryMax=...` and
+Future: per-service resource limits via `systemd-run --property=MemoryMax=...` and
 OOM score adjustment.
 
 ### Cross-repo Drive9 CLI requirements
@@ -441,21 +481,21 @@ The control socket version query is a nice-to-have, not a blocker.
 
 | File | Change |
 |---|---|
-| `internal/driver/mount_linux.go` | `startDrive9Mount`: nsenter + systemd-run + wrapper script; unit naming with systemd-escape; PID discovery from pidfile; env via root-only wrapper script (no argv secrets) |
+| `internal/driver/mount_linux.go` | `startDrive9Mount`: nsenter + systemd-run (transient service); hex-encoded unit naming; PID discovery from pidfile; env via root-only wrapper script (no argv secrets) |
 | `internal/driver/mount_linux.go` | `drive9Umount` / cleanup: fixed 5-step sequence with systemctl stop fallback |
 | `internal/driver/mount_linux.go` | `pidStartTime`, `pidMatchesState`, `pidAlive`: read from `/host-proc/<pid>/...` instead of `/proc/<pid>/...` |
 | `internal/driver/driver.go` | Startup preflight; remove `shutdownNodeMounts()` from SIGTERM handler |
-| `internal/driver/node_recovery.go` | Split-state matrix handling; systemd scope liveness check |
+| `internal/driver/node_recovery.go` | Split-state matrix handling; systemd service liveness check |
 | `deploy/kubernetes/node.yaml` | Init container (versioned binary), host-proc volume, priorityClassName |
 | Mount state JSON | Add `binaryPath` and `systemdUnit` fields |
 
 ### Verification plan (e2e)
 
 1. **Preflight**: CSI driver starts, passes all preflight checks, logs success
-2. **Mount + cgroup**: `NodeStageVolume` creates mount via systemd scope; verify
-   `/host-proc/<pid>/cgroup` shows `system.slice/drive9-mount-*`, NOT `kubepods/`
-   (all `/proc/<pid>` checks in e2e run against `/host-proc/<pid>` since mount
-   process is in host PID namespace)
+2. **Mount + cgroup**: `NodeStageVolume` creates mount via systemd service; verify
+   `/host-proc/<pid>/cgroup` shows `system.slice/drive9-mount-*.service`, NOT
+   `kubepods/` (all `/proc/<pid>` checks in e2e run against `/host-proc/<pid>`
+   since mount process is in host PID namespace)
 3. **Rolling update**: `kubectl rollout restart ds/drive9-csi-node` — business
    Pod maintains open fd loop (read/write/fsync), verify mount PID/startTime/
    mount id unchanged
@@ -466,14 +506,19 @@ The control socket version query is a nice-to-have, not a blocker.
    path, (b) `/host-proc/<pid>/exe` of the new mount process resolves to the
    new binary, (c) `drive9 version` via control socket reports the new version
    (if available, otherwise skip)
-6. **NodeUnstageVolume**: delete all consumer Pods → mount cleaned up, scope
+6. **NodeUnstageVolume**: delete all consumer Pods → mount cleaned up, service
    stopped, state deleted, mount point gone
-7. **Mount crash**: `kill -9` mount PID → recovery re-mounts, scope recreated
+7. **Mount crash**: `kill -9` mount PID → recovery re-mounts, service recreated
 8. **Idempotency**: call `NodeStageVolume` twice for same volume → second call
    returns success without creating duplicate mount
 9. **Binary GC**: after all old mounts cleaned, old binary removed
 10. **Node drain**: `kubectl drain` — consumer Pods evicted first, mounts
     cleaned via `NodeUnstageVolume`, CSI Pod evicted last
-11. **Secret hygiene**: after mount ready, verify env file deleted, verify
-    `systemctl show drive9-mount-<vol>.scope` does not contain API key,
-    verify CSI driver logs contain `DRIVE9_API_KEY=<redacted>` not the real key
+11. **Secret hygiene (success)**: after mount ready, verify .env and .sh files
+    deleted, verify `systemctl show drive9-mount-<hex-volume-id>.service` does
+    not contain API key, verify CSI driver logs contain
+    `DRIVE9_API_KEY=<redacted>` not the real key
+12. **Secret hygiene (failure)**: trigger a mount failure (e.g., bad
+    credentials), verify .env and .sh files are still cleaned up after the
+    failed mount attempt, verify no secret files persist under
+    `/var/lib/drive9-csi/run/`
