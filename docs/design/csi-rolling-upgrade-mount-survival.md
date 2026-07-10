@@ -105,6 +105,11 @@ On CSI driver startup (before accepting any gRPC calls), run preflight checks:
      - D-Bus connection refused: "host systemd D-Bus inaccessible"
      - unit creation failed: "host systemd rejected transient unit"
      - /bin/true failed (exit != 0): "preflight command failed in transient unit"
+
+4. Verify drive9-csi-launcher exists and is executable:
+   stat /var/lib/drive9-csi/bin/drive9-csi-launcher
+   Check: file exists and is executable
+   Failure: "drive9-csi-launcher not found — init container may have failed"
 ```
 
 If any check fails → log error with the specific failure classification,
@@ -122,7 +127,9 @@ nsenter --mount=/host-proc/1/ns/mnt -- \
     systemd-run --service-type=exec \
     --unit=drive9-mount-<vol-hash> \
     --remain-after-exit=false -- \
-    /var/lib/drive9-csi/run/<vol-hash>.sh
+    /var/lib/drive9-csi/bin/drive9-csi-launcher \
+    /var/lib/drive9-csi/run/<vol-hash>.env \
+    /var/lib/drive9-csi/run/<vol-hash>.args
 ```
 
 `systemd-run` returns as soon as the service's main process has successfully
@@ -279,15 +286,15 @@ continue with old credentials until cleaned up.
    unit is active, but does NOT mean FUSE is ready.
 2. `waitForMount(stagingTarget, timeout)` polls `isMountPoint(stagingTarget)`
    until the FUSE mount appears (same as today, no `processDone` channel)
-3. If mount appears → read pidfile → record state → clean up .env/.sh →
+3. If mount appears → read pidfile → record state → clean up .env/.args →
    return success
 4. If timeout → check service status via
    `systemctl is-active drive9-mount-<vol-hash>.service`:
    - Service inactive/failed: `drive9 mount` crashed before mounting.
      Read logs via `journalctl --unit=drive9-mount-<vol-hash>.service --no-pager -n 50`
-     for error attribution. Clean up .env/.sh files, return error.
+     for error attribution. Clean up .env/.args files, return error.
    - Service active but no mount: `drive9 mount` is running but not mounting.
-     Stop service, clean up .env/.sh files, return error with log snippet.
+     Stop service, clean up .env/.args files, return error with log snippet.
 
 **State write timing**: mount state JSON is written ONLY after ALL of:
 - `isMountPoint(stagingTarget)` returns true
@@ -311,7 +318,7 @@ This single encoding is used for ALL per-volume artifacts:
 - Systemd unit: `drive9-mount-<vol-hash>.service` (37 chars total, well under 255)
 - Pidfile: `/var/lib/drive9-csi/run/<vol-hash>.pid`
 - Env file: `/var/lib/drive9-csi/run/<vol-hash>.env`
-- Wrapper script: `/var/lib/drive9-csi/run/<vol-hash>.sh`
+- Args file: `/var/lib/drive9-csi/run/<vol-hash>.args`
 
 **Collision resistance**: 8 bytes (64 bits) of SHA-256 gives a collision
 probability of ~1/2^32 per pair. With <1000 volumes per node, the birthday
@@ -387,16 +394,20 @@ initContainers:
           VER=$(sha256sum /usr/local/bin/drive9 | cut -c1-12)
         fi
         DEST="/host-state/bin/drive9-${VER}"
-        # Atomic install: write to temp, rename (never overwrite existing)
+        # Atomic install of drive9: write to temp, rename
         if [ ! -f "$DEST" ]; then
           TMPF=$(mktemp /host-state/bin/.drive9-install-XXXXXX)
           cp /usr/local/bin/drive9 "$TMPF"
-        # Also install the launcher (small, rarely changes)
-        cp /usr/local/bin/drive9-csi-launcher /host-state/bin/drive9-csi-launcher
           chmod 755 "$TMPF"
           mv "$TMPF" "$DEST"
         fi
         ln -sf "drive9-${VER}" /host-state/bin/drive9
+        # Launcher: compatibility-stable, always installed atomically
+        # on every init run (independent of drive9 version).
+        LTMPF=$(mktemp /host-state/bin/.launcher-install-XXXXXX)
+        cp /usr/local/bin/drive9-csi-launcher "$LTMPF"
+        chmod 755 "$LTMPF"
+        mv "$LTMPF" /host-state/bin/drive9-csi-launcher
     volumeMounts:
       - name: state-dir
         mountPath: /host-state
@@ -405,7 +416,11 @@ initContainers:
 Binary layout on host (`/var/lib/drive9-csi/bin/`):
 - `drive9-<sha>` — versioned binary (immutable once written, never overwritten)
 - `drive9` — symlink to current version (updated on each CSI Pod start)
-- `drive9-csi-launcher` — env/arg loader, calls execve (small, rarely changes)
+- `drive9-csi-launcher` — env/arg loader, calls execve. Compatibility-stable
+  (its contract is: read NUL-separated .env + .args, exec argv[0]). Installed
+  atomically (temp + rename) on every init container run, independent of
+  drive9 version. Not versioned because its interface is stable; if the
+  interface ever changes, it will be versioned alongside drive9.
 - Install is atomic (temp file + rename) to prevent partial writes
 - Version is determined from `drive9 version --short-sha` or content hash;
   never falls back to an un-auditable name
