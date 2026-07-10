@@ -114,28 +114,45 @@ creates a **control socket** on hostPath-backed paths that persist across
 CSI Pod restarts.
 
 **Path encoding and ownership**:
-- Volume IDs are encoded using the existing `safeFileName()` helper (replaces
-  `/`, `:`, and other unsafe chars with `_`). This is the same encoding used
-  for mount state JSON files today.
+- Volume IDs are encoded using a **collision-resistant** scheme: hex-encode
+  the volume ID (`hex.EncodeToString([]byte(volumeID))`). This guarantees
+  no two distinct volume IDs map to the same filename, unlike the existing
+  `safeFileName()` which can collide (e.g., `a/b` and `a_b` → same output).
+  The hex encoding is used for pidfile, env file, wrapper script, and systemd
+  unit naming. Mount state JSON files continue to use the existing
+  `safeFileName()` for backward compatibility.
 - Pidfile: `/var/lib/drive9-csi/run/<safe-volume-id>.pid` (mode `0600`, owned
-  by root)
-- Control socket: `/var/lib/drive9-csi/run/<safe-volume-id>.sock` (mode `0600`)
+  by root). CSI passes `--pid-file` flag to `drive9 mount`.
+- Control socket: `drive9 mount` currently writes the control socket to the
+  staging target directory (e.g., `<staging-target>/.drive9.sock`). This is
+  the **source of truth** — CSI reads the socket path from the staging target
+  dir, not from the run dir. No change to Drive9 CLI needed. Mount state
+  records the resolved control socket path for recovery.
 - Run dir: `/var/lib/drive9-csi/run/` (mode `0700`, created by CSI driver on
   startup)
 - **Stale file handling**: before starting a new mount, CSI checks for existing
   pidfile/socket at the expected path. If found, verify PID is alive and
   matches the expected volume's staging target. If stale (PID dead or wrong
   volume), delete pidfile/socket before proceeding.
-- **Cross-volume safety**: pidfile path includes the safe-encoded volume ID,
-  so different volumes cannot collide. CSI verifies the pidfile PID's
-  `/host-proc/<pid>/cmdline` contains the expected staging target path
-  before trusting it.
+- **Cross-volume safety**: pidfile path includes the hex-encoded volume ID,
+  so different volumes cannot collide. Before trusting a pidfile, CSI
+  performs a three-way ownership check:
+  1. Parse `/host-proc/<pid>/cmdline` (NUL-separated argv) and verify the
+     exact staging target path appears as the final positional argument
+     (not a substring match — exact argv element comparison)
+  2. Verify PID belongs to the expected systemd scope by checking
+     `/host-proc/<pid>/cgroup` contains the expected unit name
+  3. Verify `PIDStartTime` matches the recorded value (guards against
+     PID reuse after process death)
 
 **PID resolution sequence** (after `waitForMount` confirms mount is ready):
-1. Read PID from pidfile at `/var/lib/drive9-csi/run/<safe-volume-id>.pid`
+1. Read PID from pidfile at `/var/lib/drive9-csi/run/<hex-volume-id>.pid`
 2. Read PID startTime from `/host-proc/<pid>/stat` (field 22)
-3. Verify `/host-proc/<pid>/cmdline` contains the expected staging target
-4. Record `PID`, `PIDStartTime`, `systemdUnit`, `binaryPath` in mount state
+3. Parse `/host-proc/<pid>/cmdline` (NUL-separated), verify the exact
+   staging target path as the final argv element
+4. Verify `/host-proc/<pid>/cgroup` contains expected systemd unit name
+5. Record `PID`, `PIDStartTime`, `systemdUnit`, `binaryPath`,
+   `controlSocketPath` in mount state
 
 **PID verification** (`pidMatchesState`):
 - All PID-based checks (`pidStartTime`, `pidAlive`, `/proc/<pid>/cgroup`,
@@ -157,17 +174,31 @@ Using `systemd-run --setenv=DRIVE9_API_KEY=...` puts the secret in the
 runs as node-root (privileged container), minimizing secret surface is
 preferred.
 
-Instead, write a temporary env file:
+Instead, use a root-owned wrapper script that reads an env file and execs:
 ```
 1. Write /var/lib/drive9-csi/run/<safe-volume-id>.env (mode 0600, root:root):
      DRIVE9_SERVER=<server>
      DRIVE9_API_KEY=<key>
-2. Launch: nsenter ... -- systemd-run --scope ... -- \
-     env $(cat /var/lib/drive9-csi/run/<safe-vol>.env) \
-     /var/lib/drive9-csi/bin/drive9 mount ...
-   Or use systemd-run --property=EnvironmentFile=/var/lib/drive9-csi/run/<safe-vol>.env
-3. After mount is confirmed ready (pidfile + isMountPoint), delete the env file.
-   The mount process already has the env vars in its address space.
+
+2. Write /var/lib/drive9-csi/run/<safe-volume-id>.sh (mode 0700, root:root):
+     #!/bin/sh
+     set -eu
+     . /var/lib/drive9-csi/run/<safe-volume-id>.env
+     export DRIVE9_SERVER DRIVE9_API_KEY
+     exec /var/lib/drive9-csi/bin/drive9 mount --foreground ...
+   (CSI generates this script with the exact mount args)
+
+3. Launch:
+     nsenter --mount=/host-proc/1/ns/mnt -- \
+       systemd-run --scope --unit=drive9-mount-<escaped-vol> -- \
+       /var/lib/drive9-csi/run/<safe-volume-id>.sh
+
+   This keeps secrets out of systemd-run's argv entirely. The wrapper
+   script sources the env file, exports the vars, then execs drive9.
+
+4. After mount is confirmed ready (pidfile + isMountPoint), delete both
+   the .env and .sh files. The mount process already has the env vars
+   in its address space.
 ```
 
 **Exposure constraints under node-root threat model**:
@@ -398,7 +429,7 @@ This design depends on `drive9 mount` (in `mem9-ai/drive9`) supporting:
 |---|---|---|
 | `--foreground` flag | Exists | Keep mount process in foreground (no double-fork) |
 | Pidfile at configurable path | Exists: `--pid-file` flag writes PID to given path | CSI passes `--pid-file /var/lib/drive9-csi/run/<vol>.pid` |
-| Control socket | Exists: written to staging target dir | CSI reads socket path from state or convention |
+| Control socket | Exists: written to staging target dir (`<staging>/.drive9.sock`) | CSI reads from staging target dir (no change needed) |
 | `drive9 umount` via control socket | Exists | No change needed |
 | `drive9 version` via control socket | **Not yet implemented** | Add version query to control protocol (paired PR in drive9) |
 
@@ -410,7 +441,7 @@ The control socket version query is a nice-to-have, not a blocker.
 
 | File | Change |
 |---|---|
-| `internal/driver/mount_linux.go` | `startDrive9Mount`: nsenter + systemd-run wrapper; unit naming with systemd-escape; PID discovery from pidfile; env via --setenv with key redaction |
+| `internal/driver/mount_linux.go` | `startDrive9Mount`: nsenter + systemd-run + wrapper script; unit naming with systemd-escape; PID discovery from pidfile; env via root-only wrapper script (no argv secrets) |
 | `internal/driver/mount_linux.go` | `drive9Umount` / cleanup: fixed 5-step sequence with systemctl stop fallback |
 | `internal/driver/mount_linux.go` | `pidStartTime`, `pidMatchesState`, `pidAlive`: read from `/host-proc/<pid>/...` instead of `/proc/<pid>/...` |
 | `internal/driver/driver.go` | Startup preflight; remove `shutdownNodeMounts()` from SIGTERM handler |
