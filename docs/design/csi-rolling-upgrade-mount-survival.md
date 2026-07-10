@@ -67,10 +67,17 @@ CentOS, RHEL, Flatcar, Bottlerocket). This covers >95% of production K8s nodes.
 **Security posture**: The CSI node plugin runs with `privileged: true` +
 `SYS_ADMIN` + host kubelet path + host `/proc` access. This is node-root level
 capability, which is the standard security model for CSI FUSE drivers (same as
-JuiceFS CSI, s3-csi, etc.). Code paths are restricted to:
-- `/host-proc/1/ns/mnt` — enter host mount namespace
+JuiceFS CSI, s3-csi, etc.). Host `/proc` access paths used by this design:
+- `/host-proc/1/ns/mnt` — enter host mount namespace (nsenter)
+- `/host-proc/<pid>/stat` — read PID start time for reuse detection
+- `/host-proc/<pid>/cmdline` — verify mount process argv ownership
+- `/host-proc/<pid>/cgroup` — verify process belongs to expected systemd unit
+- `/host-proc/<pid>/exe` — readlink to verify binary version (audit)
 - `systemd-run` / `systemctl` — manage drive9 mount services only
-- No arbitrary host `/proc` operations
+
+All `/host-proc/<pid>` access is scoped to PIDs recorded in mount state files
+and verified via the three-way ownership check. No enumeration or scanning of
+arbitrary host PIDs is performed.
 
 ### Design
 
@@ -113,9 +120,9 @@ Change `startDrive9Mount` to launch `drive9 mount` via `nsenter` + `systemd-run`
 ```
 nsenter --mount=/host-proc/1/ns/mnt -- \
     systemd-run --service-type=exec \
-    --unit=drive9-mount-<hex-volume-id> \
+    --unit=drive9-mount-<vol-hash> \
     --remain-after-exit=false -- \
-    /var/lib/drive9-csi/run/<hex-volume-id>.sh
+    /var/lib/drive9-csi/run/<vol-hash>.sh
 ```
 
 `systemd-run` returns as soon as the service's main process has successfully
@@ -137,14 +144,12 @@ creates a **control socket** on hostPath-backed paths that persist across
 CSI Pod restarts.
 
 **Path encoding and ownership**:
-- Volume IDs are encoded using a **collision-resistant** scheme: hex-encode
-  the volume ID (`hex.EncodeToString([]byte(volumeID))`). This guarantees
-  no two distinct volume IDs map to the same filename, unlike the existing
-  `safeFileName()` which can collide (e.g., `a/b` and `a_b` → same output).
-  The hex encoding is used for pidfile, env file, wrapper script, and systemd
-  unit naming. Mount state JSON files continue to use the existing
-  `safeFileName()` for backward compatibility.
-- Pidfile: `/var/lib/drive9-csi/run/<hex-volume-id>.pid` (mode `0600`, owned
+- Volume IDs are encoded using a **bounded, collision-resistant** scheme:
+  `sha256(volumeID)[:16]` (first 16 hex chars). This produces a fixed-length
+  identifier safe for systemd unit names and filenames regardless of volume
+  ID length. The full volume ID is stored in mount state JSON for audit.
+  See section 3 for collision analysis and failure-on-collision guarantee.
+- Pidfile: `/var/lib/drive9-csi/run/<vol-hash>.pid` (mode `0600`, owned
   by root). CSI passes `--pid-file` flag to `drive9 mount`.
 - Control socket: `drive9 mount` currently writes the control socket to the
   staging target directory (e.g., `<staging-target>/.drive9.sock`). This is
@@ -169,7 +174,7 @@ CSI Pod restarts.
      PID reuse after process death)
 
 **PID resolution sequence** (after `waitForMount` confirms mount is ready):
-1. Read PID from pidfile at `/var/lib/drive9-csi/run/<hex-volume-id>.pid`
+1. Read PID from pidfile at `/var/lib/drive9-csi/run/<vol-hash>.pid`
 2. Read PID startTime from `/host-proc/<pid>/stat` (field 22)
 3. Parse `/host-proc/<pid>/cmdline` (NUL-separated), verify the exact
    staging target path as the final argv element
@@ -197,28 +202,44 @@ Using `systemd-run --setenv=DRIVE9_API_KEY=...` puts the secret in the
 runs as node-root (privileged container), minimizing secret surface is
 preferred.
 
-Instead, use a root-owned wrapper script that reads an env file and execs:
+Instead, use a root-owned wrapper script with binary-safe env file:
 ```
-1. Write /var/lib/drive9-csi/run/<hex-volume-id>.env (mode 0600, root:root):
-     DRIVE9_SERVER=<server>
-     DRIVE9_API_KEY=<key>
+1. Write /var/lib/drive9-csi/run/<vol-hash>.env (mode 0600, root:root):
+   Format: NUL-separated KEY=VALUE pairs, no shell parsing.
+     DRIVE9_SERVER=<server>\0DRIVE9_API_KEY=<key>\0
+   CSI writes this file directly from Go using os.WriteFile with the
+   exact byte values — no shell quoting, escaping, or interpretation.
+   Values may contain any byte except NUL.
 
-2. Write /var/lib/drive9-csi/run/<hex-volume-id>.sh (mode 0700, root:root):
+2. Write /var/lib/drive9-csi/run/<vol-hash>.sh (mode 0700, root:root):
      #!/bin/sh
      set -eu
-     . /var/lib/drive9-csi/run/<hex-volume-id>.env
-     export DRIVE9_SERVER DRIVE9_API_KEY
-     exec /var/lib/drive9-csi/bin/drive9 mount --foreground ...
-   (CSI generates this script with the exact mount args)
+     exec env -i \
+       $(xargs -0 printf '%s\n' < /var/lib/drive9-csi/run/<vol-hash>.env \
+         | sed "s/'/'\\\\''/g; s/^/'/; s/$/'/") \
+       /var/lib/drive9-csi/bin/drive9 mount --foreground \
+       <shell-quoted-args>
+   (CSI generates this script; ALL dynamic values — mount args, paths —
+   are single-quoted with internal single quotes escaped as '\'' by Go's
+   shellescape function. No unquoted variable expansion occurs.)
+
+   Alternative (simpler, preferred): CSI writes the wrapper as a Go
+   text/template that uses env(1) with explicit --null flag:
+     #!/bin/sh
+     set -eu
+     exec env -i $(env --null < /var/lib/drive9-csi/run/<vol-hash>.env) \
+       '/var/lib/drive9-csi/bin/drive9' 'mount' '--foreground' \
+       '--staging-target' '<staging-target>' ...
+   Every argument is individually single-quoted by Go at generation time.
 
 3. Launch:
      nsenter --mount=/host-proc/1/ns/mnt -- \
        systemd-run --service-type=exec \
-       --unit=drive9-mount-<hex-volume-id> -- \
-       /var/lib/drive9-csi/run/<hex-volume-id>.sh
+       --unit=drive9-mount-<vol-hash> -- \
+       /var/lib/drive9-csi/run/<vol-hash>.sh
 
-   This keeps secrets out of systemd-run's argv entirely. The wrapper
-   script sources the env file, exports the vars, then execs drive9.
+   Secrets never appear in systemd-run's argv. The wrapper reads env
+   from the NUL-separated file and execs drive9.
 
 4. Cleanup of .env and .sh files runs on BOTH success and failure paths:
    - Success: after mount is confirmed ready (pidfile + isMountPoint),
@@ -230,6 +251,14 @@ Instead, use a root-owned wrapper script that reads an env file and execs:
    In all cases, .env and .sh files are ephemeral — they must not persist
    beyond the mount startup attempt.
 ```
+
+**Shell quoting contract**: CSI generates the wrapper script using Go code
+that single-quotes every dynamic value (args, paths, env var names). The
+quoting function escapes embedded single quotes as `'\''` (end quote,
+escaped literal quote, start quote). No dynamic value is ever interpolated
+unquoted into shell text. E2e test case includes a credential value
+containing `$`, backticks, spaces, quotes, and newlines to prove no
+injection occurs.
 
 **Exposure constraints under node-root threat model**:
 - Env file exists only during mount startup (seconds), mode 0600
@@ -256,9 +285,9 @@ continue with old credentials until cleaned up.
 3. If mount appears → read pidfile → record state → clean up .env/.sh →
    return success
 4. If timeout → check service status via
-   `systemctl is-active drive9-mount-<hex-volume-id>.service`:
+   `systemctl is-active drive9-mount-<vol-hash>.service`:
    - Service inactive/failed: `drive9 mount` crashed before mounting.
-     Read logs via `journalctl --unit=drive9-mount-<hex-volume-id>.service --no-pager -n 50`
+     Read logs via `journalctl --unit=drive9-mount-<vol-hash>.service --no-pager -n 50`
      for error attribution. Clean up .env/.sh files, return error.
    - Service active but no mount: `drive9 mount` is running but not mounting.
      Stop service, clean up .env/.sh files, return error with log snippet.
@@ -275,18 +304,30 @@ Cleanup via `NodeUnstageVolume` → `drive9 umount` (control socket), with
 
 #### 3. Systemd unit naming and idempotency
 
-**Canonical volume ID encoding**: `hex.EncodeToString([]byte(volumeID))`.
+**Canonical volume ID encoding**: `sha256(volumeID)[:16]` — the first 16 hex
+characters (8 bytes) of the SHA-256 hash. This produces a fixed-length,
+bounded, systemd-safe identifier (`[0-9a-f]`, always 16 chars) regardless of
+volume ID length. The full original volume ID is stored in mount state JSON
+for audit/debug and reverse lookup.
+
 This single encoding is used for ALL per-volume artifacts:
-- Systemd unit: `drive9-mount-<hex-volume-id>.service`
-- Pidfile: `/var/lib/drive9-csi/run/<hex-volume-id>.pid`
-- Env file: `/var/lib/drive9-csi/run/<hex-volume-id>.env`
-- Wrapper script: `/var/lib/drive9-csi/run/<hex-volume-id>.sh`
+- Systemd unit: `drive9-mount-<vol-hash>.service` (37 chars total, well under 255)
+- Pidfile: `/var/lib/drive9-csi/run/<vol-hash>.pid`
+- Env file: `/var/lib/drive9-csi/run/<vol-hash>.env`
+- Wrapper script: `/var/lib/drive9-csi/run/<vol-hash>.sh`
 
-Hex encoding is collision-free (bijective) and systemd-safe (only `[0-9a-f]`).
-No `systemd-escape` needed. Mount state JSON files continue to use the
-existing `safeFileName()` for backward compatibility with kubelet conventions.
+**Collision resistance**: 8 bytes (64 bits) of SHA-256 gives a collision
+probability of ~1/2^32 per pair. With <1000 volumes per node, the birthday
+bound is ~1 in 8 billion — negligible. If a collision were to occur (same hash
+for two different volume IDs), the second `NodeStageVolume` would find an
+existing service unit with a mismatched PID/staging-target and fail with an
+explicit error, never silently stomping the first mount.
 
-Mount state JSON records `systemdUnit` field for reverse lookup.
+Mount state JSON files continue to use the existing `safeFileName()` for
+backward compatibility with kubelet conventions.
+
+Mount state JSON records `systemdUnit` and the original `volumeID` for
+reverse lookup and audit.
 
 **Idempotency** (`NodeStageVolume` retry):
 - If service already exists AND pid matches state AND mount point exists →
@@ -394,8 +435,8 @@ Fixed ordering — each step runs regardless of previous step's result:
 
 ```
 1. drive9 umount via control socket (30s timeout)
-2. Verify service: systemctl is-active drive9-mount-<hex-volume-id>.service
-   If still active: systemctl stop drive9-mount-<hex-volume-id>.service (10s timeout)
+2. Verify service: systemctl is-active drive9-mount-<vol-hash>.service
+   If still active: systemctl stop drive9-mount-<vol-hash>.service (10s timeout)
    (This runs regardless of step 1 result — control socket umount may
    succeed but leave the service active)
 3. Verify: isMountPoint(stagingTarget) == false
@@ -515,10 +556,17 @@ The control socket version query is a nice-to-have, not a blocker.
 10. **Node drain**: `kubectl drain` — consumer Pods evicted first, mounts
     cleaned via `NodeUnstageVolume`, CSI Pod evicted last
 11. **Secret hygiene (success)**: after mount ready, verify .env and .sh files
-    deleted, verify `systemctl show drive9-mount-<hex-volume-id>.service` does
+    deleted, verify `systemctl show drive9-mount-<vol-hash>.service` does
     not contain API key, verify CSI driver logs contain
     `DRIVE9_API_KEY=<redacted>` not the real key
 12. **Secret hygiene (failure)**: trigger a mount failure (e.g., bad
     credentials), verify .env and .sh files are still cleaned up after the
     failed mount attempt, verify no secret files persist under
     `/var/lib/drive9-csi/run/`
+13. **Shell metachar safety**: mount with a credential containing `$`,
+    backticks, spaces, single/double quotes, newlines, and semicolons.
+    Verify mount succeeds, no command injection occurs, env file is
+    properly cleaned up, and `drive9 mount` receives the exact credential
+14. **Long volume ID**: mount with a volume ID >200 characters. Verify
+    the SHA-256 hash produces a bounded unit name, service starts
+    correctly, and the full volume ID is recoverable from mount state JSON
