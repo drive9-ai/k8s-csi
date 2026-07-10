@@ -259,10 +259,22 @@ in the secret/arg parsing path.
 **No shell in secret path**: The entire chain from K8s Secret → env file →
 `execve` env array is binary-safe and never passes through `/bin/sh`,
 command substitution, or word splitting. The only constraint is that
-values cannot contain NUL bytes (which K8s Secrets cannot contain either,
-as they are base64-encoded). E2e test case includes credentials with `$`,
-backticks, spaces, quotes, newlines, and semicolons to prove exact
-byte-for-byte preservation.
+values cannot contain NUL bytes (NUL is the separator in the file format
+and cannot be represented in `execve(2)` env strings).
+
+**NUL byte validation**: Before writing `.env` or `.args` files, CSI
+validates that every env key, env value, and argv element contains no NUL
+bytes (`bytes.ContainsRune(v, 0)`). If any value contains NUL:
+- `NodeStageVolume` returns `INVALID_ARGUMENT` with error:
+  `"drive9-csi: secret value contains NUL byte, cannot pass to mount process"`
+- `.env` and `.args` files are NOT written (validation runs before file I/O)
+- No cleanup needed since no files were created
+- E2e test case: attempt mount with a secret containing a NUL byte, verify
+  `NodeStageVolume` returns the expected error and no .env/.args files persist
+
+E2e test case #13 includes credentials with `$`, backticks, spaces, quotes,
+newlines, and semicolons to prove exact byte-for-byte preservation through
+the launcher's `execve` path.
 
 **Exposure constraints under node-root threat model**:
 - Env file exists only during mount startup (seconds), mode 0600
@@ -587,3 +599,7 @@ The control socket version query is a nice-to-have, not a blocker.
 14. **Long volume ID**: mount with a volume ID >200 characters. Verify
     the SHA-256 hash produces a bounded unit name, service starts
     correctly, and the full volume ID is recoverable from mount state JSON
+15. **NUL byte rejection**: attempt mount with a K8s Secret value
+    containing a NUL byte. Verify `NodeStageVolume` returns
+    `INVALID_ARGUMENT`, no .env/.args files are created, and no
+    service unit is started
