@@ -103,6 +103,70 @@ The mount process:
 - Runs in the host's mount namespace (FUSE mount directly on host)
 - Lives in a host systemd scope cgroup (`system.slice/drive9-mount-<vol>.scope`)
 - Survives CSI Pod restart — kubelet cleans Pod cgroup, not host systemd scopes
+
+##### Host PID discovery and identity (B6)
+
+After `systemd-run` returns, CSI cannot use `cmd.Process.Pid` — that is the
+`nsenter`/`systemd-run` wrapper PID, not the long-running `drive9 mount` PID.
+
+**Source of truth**: `drive9 mount --foreground` writes a **pidfile** to a
+well-known host path (`/var/lib/drive9-csi/run/<volume-id>.pid`) and creates
+a **control socket** (`/var/lib/drive9-csi/run/<volume-id>.sock`). Both paths
+are on hostPath volumes that persist across CSI Pod restarts.
+
+**PID resolution sequence** (after `waitForMount` confirms mount is ready):
+1. Read PID from pidfile at `/var/lib/drive9-csi/run/<volume-id>.pid`
+2. Read PID startTime from `/host-proc/<pid>/stat` (field 22)
+3. Record `PID`, `PIDStartTime`, `systemdUnit`, `binaryPath` in mount state
+
+**PID verification** (`pidMatchesState`):
+- All PID-based checks (`pidStartTime`, `pidAlive`, `/proc/<pid>/cgroup`,
+  `/proc/<pid>/exe`) read from **`/host-proc/<pid>/...`**, not `/proc/<pid>/...`
+- This is mandatory because the mount process runs in host PID namespace
+  (via nsenter) and the CSI driver does not use `hostPID: true`
+- Reused-PID protection: `pidStartTime` comparison catches PID reuse —
+  kernel guarantees monotonically increasing startTime per boot
+
+##### Environment and secret propagation (B8)
+
+`drive9 mount` requires `DRIVE9_SERVER` and `DRIVE9_API_KEY` env vars.
+
+**Mechanism**: `systemd-run --setenv=DRIVE9_SERVER=... --setenv=DRIVE9_API_KEY=...`
+
+**Exposure constraints**:
+- `--setenv` passes env vars directly to the scope's process, not persisted
+  in unit files on disk
+- `systemctl show` does NOT expose env vars set via `--setenv` (they are
+  passed at exec time, not stored in unit properties)
+- Logs: `drive9 mount` must not log the API key; CSI driver must not log
+  the full `systemd-run` command line. Log the command with `DRIVE9_API_KEY=<redacted>`
+
+**Secret rotation**: if the K8s Secret changes, `NodeUnstageVolume` +
+`NodeStageVolume` re-mount with the new credentials. Old mount processes
+continue with old credentials until cleaned up.
+
+##### Readiness and failure attribution (B9)
+
+**Readiness detection**:
+1. `systemd-run` returns (wrapper exits) — this only means the scope was
+   created and the command was launched, NOT that `drive9 mount` is ready
+2. `waitForMount(stagingTarget, timeout)` polls `isMountPoint(stagingTarget)`
+   until the FUSE mount appears (same as today, no `processDone` channel)
+3. If mount appears → read pidfile → record state → return success
+4. If timeout → check scope status:
+   - Scope inactive/failed: `drive9 mount` crashed before mounting.
+     Read logs via `journalctl --unit=drive9-mount-<vol>.scope --no-pager -n 50`
+     for error attribution. Clean up scope, return error.
+   - Scope active but no mount: `drive9 mount` is running but not mounting.
+     Stop scope, return error with log snippet.
+
+**State write timing**: mount state JSON is written ONLY after ALL of:
+- `isMountPoint(stagingTarget)` returns true
+- Pidfile exists and PID is alive (verified via `/host-proc/<pid>/stat`)
+- `binaryPath`, `systemdUnit` are known
+
+This prevents partial state from persisting if `drive9 mount` crashes
+during startup.
 - Cleaned up via `NodeUnstageVolume` → `drive9 umount` (control socket), with
   `systemctl stop` as fallback
 
@@ -291,8 +355,9 @@ OOM score adjustment.
 
 | File | Change |
 |---|---|
-| `internal/driver/mount_linux.go` | `startDrive9Mount`: nsenter + systemd-run wrapper; unit naming with systemd-escape |
+| `internal/driver/mount_linux.go` | `startDrive9Mount`: nsenter + systemd-run wrapper; unit naming with systemd-escape; PID discovery from pidfile; env via --setenv with key redaction |
 | `internal/driver/mount_linux.go` | `drive9Umount` / cleanup: fixed 5-step sequence with systemctl stop fallback |
+| `internal/driver/mount_linux.go` | `pidStartTime`, `pidMatchesState`, `pidAlive`: read from `/host-proc/<pid>/...` instead of `/proc/<pid>/...` |
 | `internal/driver/driver.go` | Startup preflight; remove `shutdownNodeMounts()` from SIGTERM handler |
 | `internal/driver/node_recovery.go` | Split-state matrix handling; systemd scope liveness check |
 | `deploy/kubernetes/node.yaml` | Init container (versioned binary), host-proc volume, priorityClassName |
