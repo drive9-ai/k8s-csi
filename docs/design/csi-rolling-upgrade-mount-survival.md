@@ -202,63 +202,60 @@ Using `systemd-run --setenv=DRIVE9_API_KEY=...` puts the secret in the
 runs as node-root (privileged container), minimizing secret surface is
 preferred.
 
-Instead, use a root-owned wrapper script with binary-safe env file:
+Instead, use a compiled Go launcher binary (`drive9-csi-launcher`) that
+reads env from a root-only file and calls `execve` directly — no shell
+in the secret/arg parsing path.
+
 ```
 1. Write /var/lib/drive9-csi/run/<vol-hash>.env (mode 0600, root:root):
-   Format: NUL-separated KEY=VALUE pairs, no shell parsing.
+   Format: NUL-separated KEY=VALUE pairs, written by Go os.WriteFile.
      DRIVE9_SERVER=<server>\0DRIVE9_API_KEY=<key>\0
-   CSI writes this file directly from Go using os.WriteFile with the
-   exact byte values — no shell quoting, escaping, or interpretation.
-   Values may contain any byte except NUL.
+   Values may contain any byte except NUL. No shell parsing, quoting,
+   or escaping is applied — raw bytes are preserved exactly.
 
-2. Write /var/lib/drive9-csi/run/<vol-hash>.sh (mode 0700, root:root):
-     #!/bin/sh
-     set -eu
-     exec env -i \
-       $(xargs -0 printf '%s\n' < /var/lib/drive9-csi/run/<vol-hash>.env \
-         | sed "s/'/'\\\\''/g; s/^/'/; s/$/'/") \
-       /var/lib/drive9-csi/bin/drive9 mount --foreground \
-       <shell-quoted-args>
-   (CSI generates this script; ALL dynamic values — mount args, paths —
-   are single-quoted with internal single quotes escaped as '\'' by Go's
-   shellescape function. No unquoted variable expansion occurs.)
-
-   Alternative (simpler, preferred): CSI writes the wrapper as a Go
-   text/template that uses env(1) with explicit --null flag:
-     #!/bin/sh
-     set -eu
-     exec env -i $(env --null < /var/lib/drive9-csi/run/<vol-hash>.env) \
-       '/var/lib/drive9-csi/bin/drive9' 'mount' '--foreground' \
-       '--staging-target' '<staging-target>' ...
-   Every argument is individually single-quoted by Go at generation time.
+2. Write /var/lib/drive9-csi/run/<vol-hash>.args (mode 0600, root:root):
+   Format: NUL-separated argv elements, written by Go os.WriteFile.
+     /var/lib/drive9-csi/bin/drive9\0mount\0--foreground\0
+     --staging-target\0<staging-target>\0--pid-file\0<pidfile-path>\0
+   Same binary-safe encoding — no shell interpretation.
 
 3. Launch:
      nsenter --mount=/host-proc/1/ns/mnt -- \
        systemd-run --service-type=exec \
        --unit=drive9-mount-<vol-hash> -- \
-       /var/lib/drive9-csi/run/<vol-hash>.sh
+       /var/lib/drive9-csi/bin/drive9-csi-launcher \
+       /var/lib/drive9-csi/run/<vol-hash>.env \
+       /var/lib/drive9-csi/run/<vol-hash>.args
 
-   Secrets never appear in systemd-run's argv. The wrapper reads env
-   from the NUL-separated file and execs drive9.
+   drive9-csi-launcher:
+   a. Reads .env file, splits on NUL → []string env pairs
+   b. Reads .args file, splits on NUL → []string argv
+   c. Calls syscall.Exec(argv[0], argv, env) — direct execve(2),
+      no shell, no command substitution, no word splitting
+   d. If execve fails, exits non-zero (systemd marks service failed)
 
-4. Cleanup of .env and .sh files runs on BOTH success and failure paths:
+   The launcher is a ~50-line Go binary, compiled and installed alongside
+   drive9 by the init container (same versioned install mechanism).
+   It never interprets, quotes, or transforms the env/arg values.
+
+4. Cleanup of .env and .args files runs on BOTH success and failure paths:
    - Success: after mount is confirmed ready (pidfile + isMountPoint),
      delete both files. The mount process already has the env vars in
      its address space.
    - Failure (timeout, crash, bad credentials): cleanup runs in the
      same defer/finally block that handles service stop and state cleanup.
      Files are deleted after the service is stopped/confirmed dead.
-   In all cases, .env and .sh files are ephemeral — they must not persist
-   beyond the mount startup attempt.
+   In all cases, .env and .args files are ephemeral — they must not
+   persist beyond the mount startup attempt.
 ```
 
-**Shell quoting contract**: CSI generates the wrapper script using Go code
-that single-quotes every dynamic value (args, paths, env var names). The
-quoting function escapes embedded single quotes as `'\''` (end quote,
-escaped literal quote, start quote). No dynamic value is ever interpolated
-unquoted into shell text. E2e test case includes a credential value
-containing `$`, backticks, spaces, quotes, and newlines to prove no
-injection occurs.
+**No shell in secret path**: The entire chain from K8s Secret → env file →
+`execve` env array is binary-safe and never passes through `/bin/sh`,
+command substitution, or word splitting. The only constraint is that
+values cannot contain NUL bytes (which K8s Secrets cannot contain either,
+as they are base64-encoded). E2e test case includes credentials with `$`,
+backticks, spaces, quotes, newlines, and semicolons to prove exact
+byte-for-byte preservation.
 
 **Exposure constraints under node-root threat model**:
 - Env file exists only during mount startup (seconds), mode 0600
@@ -394,6 +391,8 @@ initContainers:
         if [ ! -f "$DEST" ]; then
           TMPF=$(mktemp /host-state/bin/.drive9-install-XXXXXX)
           cp /usr/local/bin/drive9 "$TMPF"
+        # Also install the launcher (small, rarely changes)
+        cp /usr/local/bin/drive9-csi-launcher /host-state/bin/drive9-csi-launcher
           chmod 755 "$TMPF"
           mv "$TMPF" "$DEST"
         fi
@@ -406,6 +405,7 @@ initContainers:
 Binary layout on host (`/var/lib/drive9-csi/bin/`):
 - `drive9-<sha>` — versioned binary (immutable once written, never overwritten)
 - `drive9` — symlink to current version (updated on each CSI Pod start)
+- `drive9-csi-launcher` — env/arg loader, calls execve (small, rarely changes)
 - Install is atomic (temp file + rename) to prevent partial writes
 - Version is determined from `drive9 version --short-sha` or content hash;
   never falls back to an un-auditable name
@@ -522,7 +522,8 @@ The control socket version query is a nice-to-have, not a blocker.
 
 | File | Change |
 |---|---|
-| `internal/driver/mount_linux.go` | `startDrive9Mount`: nsenter + systemd-run (transient service); hex-encoded unit naming; PID discovery from pidfile; env via root-only wrapper script (no argv secrets) |
+| `internal/driver/mount_linux.go` | `startDrive9Mount`: nsenter + systemd-run (transient service); sha256-hashed unit naming; PID discovery from pidfile; env/args via NUL-separated files + drive9-csi-launcher (no shell in secret path) |
+| `cmd/drive9-csi-launcher/main.go` | New ~50-line binary: reads NUL-separated .env and .args files, calls syscall.Exec |
 | `internal/driver/mount_linux.go` | `drive9Umount` / cleanup: fixed 5-step sequence with systemctl stop fallback |
 | `internal/driver/mount_linux.go` | `pidStartTime`, `pidMatchesState`, `pidAlive`: read from `/host-proc/<pid>/...` instead of `/proc/<pid>/...` |
 | `internal/driver/driver.go` | Startup preflight; remove `shutdownNodeMounts()` from SIGTERM handler |
@@ -555,18 +556,19 @@ The control socket version query is a nice-to-have, not a blocker.
 9. **Binary GC**: after all old mounts cleaned, old binary removed
 10. **Node drain**: `kubectl drain` — consumer Pods evicted first, mounts
     cleaned via `NodeUnstageVolume`, CSI Pod evicted last
-11. **Secret hygiene (success)**: after mount ready, verify .env and .sh files
-    deleted, verify `systemctl show drive9-mount-<vol-hash>.service` does
-    not contain API key, verify CSI driver logs contain
+11. **Secret hygiene (success)**: after mount ready, verify .env and .args
+    files deleted, verify `systemctl show drive9-mount-<vol-hash>.service`
+    does not contain API key, verify CSI driver logs contain
     `DRIVE9_API_KEY=<redacted>` not the real key
 12. **Secret hygiene (failure)**: trigger a mount failure (e.g., bad
-    credentials), verify .env and .sh files are still cleaned up after the
-    failed mount attempt, verify no secret files persist under
+    credentials), verify .env and .args files are still cleaned up after
+    the failed mount attempt, verify no secret files persist under
     `/var/lib/drive9-csi/run/`
-13. **Shell metachar safety**: mount with a credential containing `$`,
-    backticks, spaces, single/double quotes, newlines, and semicolons.
-    Verify mount succeeds, no command injection occurs, env file is
-    properly cleaned up, and `drive9 mount` receives the exact credential
+13. **Binary-safe credential passthrough**: mount with a credential
+    containing `$`, backticks, spaces, single/double quotes, newlines,
+    and semicolons. Verify mount succeeds, `drive9 mount` receives the
+    exact credential bytes (no mangling), env file is cleaned up.
+    This proves the launcher's execve path preserves arbitrary values
 14. **Long volume ID**: mount with a volume ID >200 characters. Verify
     the SHA-256 hash produces a bounded unit name, service starts
     correctly, and the full volume ID is recoverable from mount state JSON
