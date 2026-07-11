@@ -76,14 +76,14 @@ the volume prefix, for example `/k8s/pvc`, and the metadata index path
 
 The checked-in Kubernetes manifests are a fail-closed base. Their CSI image is
 `registry.invalid/drive9-csi:unpublished`, so applying the base cannot silently
-run an older, incompatible driver. The manually triggered publish workflow
-resolves the latest complete Drive9 CLI release, builds and pushes the image,
-then reports its trace tag, manifest-list digest, and immutable reference in the
-workflow summary. It does not generate deployment manifests.
-Deployment and validation must inject that immutable reference through a local,
+run an older, incompatible driver. The manually triggered validation-image
+workflow resolves the latest complete Drive9 CLI release, builds and pushes the
+image, then reports its trace tag, manifest-list digest, and immutable reference
+in the workflow summary. It does not generate deployment manifests.
+Non-production validation must inject that immutable reference through a local,
 environment-specific overlay.
 
-Release images also have a traceable tag:
+Validation images have a traceable tag:
 
 ```text
 ghcr.io/drive9-ai/drive9-csi:drive9-<drive9-short-sha>-csi-<csi-short-sha>
@@ -91,6 +91,10 @@ ghcr.io/drive9-ai/drive9-csi:drive9-<drive9-short-sha>-csi-<csi-short-sha>
 
 The publish workflow does not publish `:latest` or `0.1.0`. Use a traceable tag
 or a digest.
+
+A manually published image is validation-only and is not release-admitted. Do
+not promote it to production until the N/N-1 bidirectional cache/writeback
+compatibility gate in the mount-survival design has landed and passed.
 
 To build a validation image with the latest published Drive9 CLI:
 
@@ -113,8 +117,9 @@ Install that preloaded local image with the local overlay:
 kubectl apply -k deploy/overlays/local
 ```
 
-For a published image, read the immutable reference from the workflow summary
-and use it in the local validation or deployment overlay. Do not apply the
+For a published validation image, read the immutable reference from the workflow
+summary and use it only in a non-production validation overlay. The tag or digest
+is traceability evidence, not release-admission evidence. Do not apply the
 fail-closed base directly.
 
 Create a Drive9 Secret in the workload namespace before creating each PVC:
