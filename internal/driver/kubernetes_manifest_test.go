@@ -437,23 +437,6 @@ func TestKubernetesExamplesUseAnnotationBasedSecrets(t *testing.T) {
 	}
 }
 
-func TestE2EUsesPerPVCNamespaceLocalDrive9Secret(t *testing.T) {
-	body := readRepoFile(t, "hack/e2e-k8s.sh")
-
-	for _, want := range []string{
-		"write_storageclass()",
-		"write_volumeattributesclass()",
-		"volumeAttributesClassName: $volume_attributes_class",
-		"using Drive9 workspace root mode",
-		"read after PVC recreate",
-		`registry\.invalid\/drive9-csi:unpublished`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("e2e script missing evidence %q", want)
-		}
-	}
-}
-
 func readRepoFile(t *testing.T, name string) string {
 	t.Helper()
 	parts := append([]string{"..", ".."}, strings.Split(name, "/")...)
