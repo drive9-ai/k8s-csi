@@ -5,6 +5,7 @@ GOOS ?= linux
 GOARCH ?= amd64
 PLATFORM ?= $(GOOS)/$(GOARCH)
 PLATFORMS ?= linux/amd64,linux/arm64
+DRIVE9_CLI_RELEASE_COMMIT ?=
 
 .PHONY: fmt-check
 fmt-check:
@@ -50,11 +51,11 @@ build:
 
 .PHONY: image
 image:
-	docker build --platform $(PLATFORM) --build-arg GOPROXY=$(GOPROXY) --build-arg GOSUMDB=$(GOSUMDB) -t $(IMAGE) .
+	docker build --platform $(PLATFORM) --build-arg GOPROXY=$(GOPROXY) --build-arg GOSUMDB=$(GOSUMDB) --build-arg DRIVE9_CLI_RELEASE_COMMIT=$(DRIVE9_CLI_RELEASE_COMMIT) -t $(IMAGE) .
 
 .PHONY: image-multi
 image-multi:
-	docker buildx build --platform $(PLATFORMS) --build-arg GOPROXY=$(GOPROXY) --build-arg GOSUMDB=$(GOSUMDB) -t $(IMAGE) --push .
+	docker buildx build --platform $(PLATFORMS) --build-arg GOPROXY=$(GOPROXY) --build-arg GOSUMDB=$(GOSUMDB) --build-arg DRIVE9_CLI_RELEASE_COMMIT=$(DRIVE9_CLI_RELEASE_COMMIT) -t $(IMAGE) --push .
 
 .PHONY: manifests
 manifests:

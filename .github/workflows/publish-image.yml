@@ -1,32 +1,7 @@
 name: Publish CSI image
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/publish-image.yml"
-      - "build/**"
-      - "Dockerfile"
-      - "Makefile"
-      - "cmd/**"
-      - "go.mod"
-      - "go.sum"
-      - "internal/**"
   workflow_dispatch:
-    inputs:
-      drive9_ref:
-        description: Full Drive9 source commit; when set, it must equal the locked current commit.
-        required: false
-        type: string
-      compatibility_result_commit:
-        description: Full mem9-ai/drive9 commit containing the externally produced compatibility result.
-        required: false
-        type: string
-      compatibility_result_sha256:
-        description: SHA-256 of the external compatibility result.
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -39,118 +14,95 @@ jobs:
   metadata:
     runs-on: ubuntu-24.04
     outputs:
-      drive9_version: ${{ steps.lock.outputs.version }}
-      drive9_source_commit: ${{ steps.lock.outputs.source_commit }}
+      drive9_version: ${{ steps.release.outputs.version }}
+      drive9_source_commit: ${{ steps.release.outputs.source_commit }}
+      drive9_release_commit: ${{ steps.release.outputs.release_commit }}
       tags: ${{ steps.image-tags.outputs.tags }}
       trace_tag: ${{ steps.image-tags.outputs.trace_tag }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Read locked Drive9 release
-        id: lock
+      - name: Resolve latest Drive9 CLI release
+        id: release
         shell: bash
         env:
-          INPUT_DRIVE9_REF: ${{ inputs.drive9_ref }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          LOCK=build/drive9-cli.lock.json
-          DRIVE9_VERSION="$(jq -er '.current.version | select(test("^[0-9a-f]{7}$"))' "$LOCK")"
-          DRIVE9_SOURCE_COMMIT="$(jq -er '.current.sourceCommit | select(test("^[0-9a-f]{40}$"))' "$LOCK")"
-          if [ -n "${INPUT_DRIVE9_REF:-}" ] && [ "$INPUT_DRIVE9_REF" != "$DRIVE9_SOURCE_COMMIT" ]; then
-            echo "drive9_ref must exactly match locked commit $DRIVE9_SOURCE_COMMIT" >&2
+          if ! release_commit=$(gh api \
+            --method GET \
+            "repos/mem9-ai/drive9-fe/commits" \
+            -f path=site/releases/checksums.txt \
+            -f per_page=1 \
+            --jq '.[0].sha'); then
+            echo "Could not resolve the latest Drive9 CLI release commit" >&2
             exit 1
           fi
-          if [ "$DRIVE9_VERSION" != "${DRIVE9_SOURCE_COMMIT:0:7}" ]; then
-            echo "locked Drive9 version does not match its source commit" >&2
+          if [[ ! "$release_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Latest Drive9 CLI release did not resolve to a full commit SHA" >&2
             exit 1
           fi
-          echo "version=$DRIVE9_VERSION" >> "$GITHUB_OUTPUT"
-          echo "source_commit=$DRIVE9_SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
+
+          release_base="https://raw.githubusercontent.com/mem9-ai/drive9-fe/${release_commit}/site/releases"
+          version_file="${RUNNER_TEMP}/drive9-version"
+          checksums_file="${RUNNER_TEMP}/drive9-checksums.txt"
+          if ! curl --proto '=https' --tlsv1.2 -fsSL \
+            -o "$version_file" "${release_base}/version"; then
+            echo "Could not download the Drive9 CLI version" >&2
+            exit 1
+          fi
+          if ! curl --proto '=https' --tlsv1.2 -fsSL \
+            -o "$checksums_file" "${release_base}/checksums.txt"; then
+            echo "Could not download the Drive9 CLI checksums" >&2
+            exit 1
+          fi
+
+          version=$(<"$version_file")
+          if [[ ! "$version" =~ ^[0-9a-f]{7}$ ]]; then
+            echo "Drive9 CLI version must be a seven-character commit prefix" >&2
+            exit 1
+          fi
+          for artifact in drive9-linux-amd64 drive9-linux-arm64; do
+            checksum=$(awk -v artifact="$artifact" '
+              $2 == artifact { count += 1; value = $1 }
+              END { if (count == 1) print value }
+            ' "$checksums_file")
+            if [[ ! "$checksum" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "Release must contain exactly one checksum for $artifact" >&2
+              exit 1
+            fi
+          done
+
+          if ! source_commit=$(gh api \
+            "repos/mem9-ai/drive9/commits/${version}" \
+            --jq '.sha'); then
+            echo "Could not resolve Drive9 source commit $version" >&2
+            exit 1
+          fi
+          if [[ ! "$source_commit" =~ ^[0-9a-f]{40}$ ]] || \
+            [[ "${source_commit:0:7}" != "$version" ]]; then
+            echo "Drive9 source commit does not match release version $version" >&2
+            exit 1
+          fi
+
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'source_commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
+          printf 'release_commit=%s\n' "$release_commit" >> "$GITHUB_OUTPUT"
 
       - name: Resolve image tags
         id: image-tags
         shell: bash
         env:
-          DRIVE9_VERSION: ${{ steps.lock.outputs.version }}
+          DRIVE9_VERSION: ${{ steps.release.outputs.version }}
         run: |
-          set -euo pipefail
-          TRACE_TAG="drive9-${DRIVE9_VERSION}-csi-${GITHUB_SHA:0:7}"
-          echo "trace_tag=${TRACE_TAG}" >> "$GITHUB_OUTPUT"
+          trace_tag="drive9-${DRIVE9_VERSION}-csi-${GITHUB_SHA:0:7}"
+          printf 'trace_tag=%s\n' "$trace_tag" >> "$GITHUB_OUTPUT"
           {
             echo 'tags<<EOF'
-            printf '%s:%s\n' "$IMAGE" "$TRACE_TAG"
+            printf '%s:%s\n' "$IMAGE" "$trace_tag"
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
-
-  compatibility:
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Allow manual validation build
-        if: github.event_name == 'workflow_dispatch'
-        run: echo "Manual dispatch produces a validation build; release compatibility remains unverified."
-
-      - name: Checkout
-        if: github.event_name == 'push'
-        uses: actions/checkout@v5
-
-      - name: Verify external exact-pair compatibility result
-        if: github.event_name == 'push'
-        shell: bash
-        env:
-          COMPATIBILITY_RESULT_COMMIT: ${{ inputs.compatibility_result_commit || vars.DRIVE9_CSI_COMPATIBILITY_RESULT_COMMIT }}
-          COMPATIBILITY_RESULT_SHA256: ${{ inputs.compatibility_result_sha256 || vars.DRIVE9_CSI_COMPATIBILITY_RESULT_SHA256 }}
-        run: |
-          set -euo pipefail
-          LOCK=build/drive9-cli.lock.json
-          RESULT="${RUNNER_TEMP}/drive9-csi-compatibility.json"
-          if ! printf '%s' "${COMPATIBILITY_RESULT_COMMIT:-}" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "a full mem9-ai/drive9 compatibility producer commit is required" >&2
-            exit 1
-          fi
-          if ! printf '%s' "${COMPATIBILITY_RESULT_SHA256:-}" | grep -Eq '^[0-9a-f]{64}$'; then
-            echo "external compatibility result SHA-256 is required" >&2
-            exit 1
-          fi
-          RESULT_URL="https://raw.githubusercontent.com/mem9-ai/drive9/${COMPATIBILITY_RESULT_COMMIT}/release/drive9-csi-compatibility.json"
-          curl --proto '=https' --tlsv1.2 -fsSL -o "$RESULT" "$RESULT_URL"
-          printf '%s  %s\n' "$COMPATIBILITY_RESULT_SHA256" "$RESULT" | sha256sum -c -
-          if ! jq -e --arg producerCommit "$COMPATIBILITY_RESULT_COMMIT" '
-            .schemaVersion == 2 and
-            .status == "passed" and
-            .producer.repository == "mem9-ai/drive9" and
-            .producer.commit == $producerCommit
-          ' "$RESULT" >/dev/null; then
-            echo "external compatibility result is not a passed schema-v2 result" >&2
-            exit 1
-          fi
-          LOCKED_PAIR="$(jq -cS '
-            .compatibilityPlatform as $platform |
-            {
-              current: {
-                sourceCommit: .current.sourceCommit,
-                artifact: {
-                  kind: "raw-binary",
-                  platform: $platform,
-                  sha256: .current.artifacts[$platform].sha256
-                }
-              },
-              previous: {
-                sourceCommit: .previous.sourceCommit,
-                artifact: .previous.artifact
-              }
-            }
-          ' "$LOCK")"
-          RESULT_PAIR="$(jq -ecS '.pair' "$RESULT")"
-          if [ "$RESULT_PAIR" != "$LOCKED_PAIR" ]; then
-            echo "external compatibility result does not match the exact locked N/N-1 pair" >&2
-            exit 1
-          fi
 
   build:
     needs:
       - metadata
-      - compatibility
     strategy:
       fail-fast: false
       matrix:
@@ -182,6 +134,8 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
+          build-args: |
+            DRIVE9_CLI_RELEASE_COMMIT=${{ needs.metadata.outputs.drive9_release_commit }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.source=https://github.com/drive9-ai/k8s-csi
@@ -190,19 +144,19 @@ jobs:
             org.opencontainers.image.version=${{ needs.metadata.outputs.trace_tag }}
             ai.drive9.cli.version=${{ needs.metadata.outputs.drive9_version }}
             ai.drive9.cli.source-commit=${{ needs.metadata.outputs.drive9_source_commit }}
+            ai.drive9.cli.release-commit=${{ needs.metadata.outputs.drive9_release_commit }}
 
       - name: Export digest
         shell: bash
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          set -euo pipefail
-          mkdir -p /tmp/digests
           digest="${DIGEST#sha256:}"
-          if [ -z "$digest" ]; then
+          if [[ -z "$digest" ]]; then
             echo "Build did not produce an image digest" >&2
             exit 1
           fi
+          mkdir -p /tmp/digests
           touch "/tmp/digests/${digest}"
 
       - name: Upload digest
@@ -216,7 +170,6 @@ jobs:
   merge:
     needs:
       - metadata
-      - compatibility
       - build
     runs-on: ubuntu-24.04
     outputs:
@@ -285,6 +238,9 @@ jobs:
         shell: bash
         env:
           TRACE_TAG: ${{ needs.metadata.outputs.trace_tag }}
+          DRIVE9_VERSION: ${{ needs.metadata.outputs.drive9_version }}
+          DRIVE9_SOURCE_COMMIT: ${{ needs.metadata.outputs.drive9_source_commit }}
+          DRIVE9_RELEASE_COMMIT: ${{ needs.metadata.outputs.drive9_release_commit }}
         run: |
           image_ref="${IMAGE}:${TRACE_TAG}"
           manifest_file="${RUNNER_TEMP}/drive9-csi-manifest.json"
@@ -293,9 +249,9 @@ jobs:
             echo "Could not inspect the published image manifest" >&2
             exit 1
           fi
-          if ! image_digest="$(jq -er \
+          if ! image_digest=$(jq -er \
             '.manifest.digest | select(test("^sha256:[0-9a-f]{64}$"))' \
-            "$manifest_file")"; then
+            "$manifest_file"); then
             echo "Published image did not resolve to an immutable digest" >&2
             exit 1
           fi
@@ -305,6 +261,10 @@ jobs:
           printf 'reference=%s@%s\n' "$IMAGE" "$image_digest" >> "$GITHUB_OUTPUT"
           {
             printf '### Published image\n\n'
+            printf -- '- Drive9 CLI version: `%s`\n' "$DRIVE9_VERSION"
+            printf -- '- Drive9 source commit: `%s`\n' "$DRIVE9_SOURCE_COMMIT"
+            printf -- '- Drive9 release commit: `%s`\n' "$DRIVE9_RELEASE_COMMIT"
+            printf -- '- CSI source commit: `%s`\n' "$GITHUB_SHA"
             printf -- '- Tag: `%s`\n' "$image_ref"
             printf -- '- Digest: `%s`\n' "$image_digest"
             printf -- '- Immutable reference: `%s@%s`\n' "$IMAGE" "$image_digest"

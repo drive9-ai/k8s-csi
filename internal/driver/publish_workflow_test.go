@@ -29,73 +29,80 @@ type publishWorkflowStep struct {
 	Env  map[string]string `json:"env"`
 }
 
-func TestPublishWorkflowRequiresLockedExternalCompatibilityResult(t *testing.T) {
+func TestPublishWorkflowIsManualOnlyAndResolvesLatestImmutableRelease(t *testing.T) {
 	body := readRepoFile(t, ".github/workflows/publish-image.yml")
-	workflow := decodePublishWorkflow(t, body)
+	if !strings.Contains(body, "on:\n  workflow_dispatch:") {
+		t.Fatal("publish workflow must expose workflow_dispatch")
+	}
+	for _, forbidden := range []string{
+		"\n  push:",
+		"inputs:",
+		"compatibility",
+		"drive9-cli.lock.json",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("publish workflow contains forbidden trigger or gate %q", forbidden)
+		}
+	}
 
+	workflow := decodePublishWorkflow(t, body)
 	metadata := requiredWorkflowJob(t, workflow, "metadata")
-	compatibility := requiredWorkflowJob(t, workflow, "compatibility")
 	build := requiredWorkflowJob(t, workflow, "build")
 	merge := requiredWorkflowJob(t, workflow, "merge")
+	if len(workflow.Jobs) != 3 {
+		t.Fatalf("publish workflow job count = %d, want metadata, build, merge", len(workflow.Jobs))
+	}
 
-	assertWorkflowNeeds(t, build, "metadata", "compatibility")
-	assertWorkflowNeeds(t, merge, "metadata", "compatibility", "build")
+	assertWorkflowNeeds(t, build, "metadata")
+	assertWorkflowNeeds(t, merge, "metadata", "build")
 
 	metadataRun := workflowRun(metadata)
 	for _, want := range []string{
-		"build/drive9-cli.lock.json",
-		".current.version",
-		".current.sourceCommit",
-		"INPUT_DRIVE9_REF",
+		"repos/mem9-ai/drive9-fe/commits",
+		"path=site/releases/checksums.txt",
+		"https://raw.githubusercontent.com/mem9-ai/drive9-fe/${release_commit}/site/releases",
+		"checksums.txt",
+		"drive9-linux-amd64",
+		"drive9-linux-arm64",
+		"repos/mem9-ai/drive9/commits/${version}",
+		"release_commit=%s",
+		"source_commit=%s",
+		"version=%s",
 	} {
 		if !strings.Contains(metadataRun, want) {
-			t.Fatalf("metadata job missing locked input evidence %q", want)
+			t.Fatalf("metadata job missing immutable release evidence %q", want)
 		}
-	}
-
-	compatibilityRun := workflowRun(compatibility)
-	for _, want := range []string{
-		"COMPATIBILITY_RESULT_COMMIT",
-		"COMPATIBILITY_RESULT_SHA256",
-		"build/drive9-cli.lock.json",
-		"https://raw.githubusercontent.com/mem9-ai/drive9/${COMPATIBILITY_RESULT_COMMIT}/release/drive9-csi-compatibility.json",
-		"sha256sum -c -",
-		`.schemaVersion == 2`,
-		`.status == "passed"`,
-		`.producer.repository == "mem9-ai/drive9"`,
-		`.producer.commit == $producerCommit`,
-		".compatibilityPlatform",
-		".current.sourceCommit",
-		".current.artifacts[$platform].sha256",
-		".previous.sourceCommit",
-		".previous.artifact",
-		`RESULT_PAIR" != "$LOCKED_PAIR`,
-	} {
-		if !strings.Contains(compatibilityRun, want) {
-			t.Fatalf("compatibility job missing fail-closed evidence %q", want)
-		}
-	}
-	if !workflowUses(compatibility, "actions/checkout@") {
-		t.Fatal("compatibility job must check out the locked metadata")
 	}
 }
 
-func TestPublishWorkflowAllowsManualValidationBuildButGatesMainPush(t *testing.T) {
+func TestPublishWorkflowPassesPinnedReleaseToEveryImageBuild(t *testing.T) {
 	body := readRepoFile(t, ".github/workflows/publish-image.yml")
 	workflow := decodePublishWorkflow(t, body)
-	compatibility := requiredWorkflowJob(t, workflow, "compatibility")
+	build := requiredWorkflowJob(t, workflow, "build")
 
-	validation := requiredWorkflowStep(t, compatibility, "Allow manual validation build")
-	if validation.If != "github.event_name == 'workflow_dispatch'" {
-		t.Fatalf("manual validation condition = %q", validation.If)
+	step := requiredWorkflowStep(t, build, "Build and push digest")
+	buildArgs, ok := step.With["build-args"].(string)
+	if !ok {
+		t.Fatalf("build-args type = %T, want string", step.With["build-args"])
 	}
-	if !strings.Contains(validation.Run, "validation build") {
-		t.Fatal("manual dispatch step does not identify the image as a validation build")
+	if !strings.Contains(
+		buildArgs,
+		"DRIVE9_CLI_RELEASE_COMMIT=${{ needs.metadata.outputs.drive9_release_commit }}",
+	) {
+		t.Fatal("image build does not receive the pinned Drive9 release commit")
 	}
-
-	verify := requiredWorkflowStep(t, compatibility, "Verify external exact-pair compatibility result")
-	if verify.If != "github.event_name == 'push'" {
-		t.Fatalf("release compatibility condition = %q", verify.If)
+	labels, ok := step.With["labels"].(string)
+	if !ok {
+		t.Fatalf("labels type = %T, want string", step.With["labels"])
+	}
+	for _, want := range []string{
+		"ai.drive9.cli.version=${{ needs.metadata.outputs.drive9_version }}",
+		"ai.drive9.cli.source-commit=${{ needs.metadata.outputs.drive9_source_commit }}",
+		"ai.drive9.cli.release-commit=${{ needs.metadata.outputs.drive9_release_commit }}",
+	} {
+		if !strings.Contains(labels, want) {
+			t.Fatalf("image labels missing release provenance %q", want)
+		}
 	}
 }
 
@@ -152,33 +159,22 @@ func TestPublishWorkflowOutputsImageMetadataWithoutDeploymentArtifacts(t *testin
 	}
 }
 
-func TestPublishWorkflowHasNoMutableDrive9Resolution(t *testing.T) {
+func TestPublishWorkflowHasNoLockMutableBinaryOrDeploymentResponsibilities(t *testing.T) {
 	body := readRepoFile(t, ".github/workflows/publish-image.yml")
 	for _, forbidden := range []string{
 		"https://drive9.ai/releases/drive9-",
-		"Show latest drive9 CLI version",
+		"/main/site/releases/drive9-",
 		":latest",
+		"drive9-cli.lock.json",
+		"compatibility_result",
+		"DRIVE9_CSI_COMPATIBILITY",
+		"Create digest-pinned Kubernetes manifests",
+		"Upload digest-pinned Kubernetes manifests",
+		"deploy/kubernetes",
 	} {
 		if strings.Contains(body, forbidden) {
-			t.Fatalf("publish workflow contains mutable Drive9 resolution %q", forbidden)
+			t.Fatalf("publish workflow contains forbidden responsibility %q", forbidden)
 		}
-	}
-	for _, want := range []string{
-		"compatibility_result_commit:",
-		"compatibility_result_sha256:",
-		`DRIVE9_CSI_COMPATIBILITY_RESULT_COMMIT`,
-		`DRIVE9_CSI_COMPATIBILITY_RESULT_SHA256`,
-		`"build/**"`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("publish workflow missing immutable input evidence %q", want)
-		}
-	}
-	if strings.Contains(body, "compatibility_result_url:") {
-		t.Fatal("publish workflow must not accept an arbitrary compatibility result URL")
-	}
-	if strings.Contains(body, `"deploy/kubernetes/**"`) {
-		t.Fatal("deployment-only changes must not trigger image publication")
 	}
 }
 
