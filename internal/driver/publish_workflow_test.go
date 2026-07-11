@@ -20,6 +20,7 @@ type publishWorkflowJob struct {
 
 type publishWorkflowStep struct {
 	Name string            `json:"name"`
+	If   string            `json:"if"`
 	Uses string            `json:"uses"`
 	Run  string            `json:"run"`
 	With map[string]any    `json:"with"`
@@ -74,6 +75,25 @@ func TestPublishWorkflowRequiresLockedExternalCompatibilityResult(t *testing.T) 
 	}
 	if !workflowUses(compatibility, "actions/checkout@") {
 		t.Fatal("compatibility job must check out the locked metadata")
+	}
+}
+
+func TestPublishWorkflowAllowsManualValidationBuildButGatesMainPush(t *testing.T) {
+	body := readRepoFile(t, ".github/workflows/publish-image.yml")
+	workflow := decodePublishWorkflow(t, body)
+	compatibility := requiredWorkflowJob(t, workflow, "compatibility")
+
+	validation := requiredWorkflowStep(t, compatibility, "Allow manual validation build")
+	if validation.If != "github.event_name == 'workflow_dispatch'" {
+		t.Fatalf("manual validation condition = %q", validation.If)
+	}
+	if !strings.Contains(validation.Run, "validation build") {
+		t.Fatal("manual dispatch step does not identify the image as a validation build")
+	}
+
+	verify := requiredWorkflowStep(t, compatibility, "Verify external exact-pair compatibility result")
+	if verify.If != "github.event_name == 'push'" {
+		t.Fatalf("release compatibility condition = %q", verify.If)
 	}
 }
 
@@ -151,6 +171,17 @@ func requiredWorkflowJob(t *testing.T, workflow publishWorkflow, name string) pu
 		t.Fatalf("publish workflow missing %q job", name)
 	}
 	return job
+}
+
+func requiredWorkflowStep(t *testing.T, job publishWorkflowJob, name string) publishWorkflowStep {
+	t.Helper()
+	for _, step := range job.Steps {
+		if step.Name == name {
+			return step
+		}
+	}
+	t.Fatalf("publish workflow missing step %q", name)
+	return publishWorkflowStep{}
 }
 
 func assertWorkflowNeeds(t *testing.T, job publishWorkflowJob, names ...string) {

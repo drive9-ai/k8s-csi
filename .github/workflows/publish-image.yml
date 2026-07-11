@@ -87,10 +87,16 @@ jobs:
   compatibility:
     runs-on: ubuntu-24.04
     steps:
+      - name: Allow manual validation build
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "Manual dispatch produces a validation build; release compatibility remains unverified."
+
       - name: Checkout
+        if: github.event_name == 'push'
         uses: actions/checkout@v5
 
       - name: Verify external exact-pair compatibility result
+        if: github.event_name == 'push'
         shell: bash
         env:
           COMPATIBILITY_RESULT_COMMIT: ${{ inputs.compatibility_result_commit || vars.DRIVE9_CSI_COMPATIBILITY_RESULT_COMMIT }}
