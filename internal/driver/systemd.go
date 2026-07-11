@@ -49,7 +49,7 @@ func hostNamespaceCommand(command string, args ...string) hostCommand {
 	return hostCommand{Path: "nsenter", Args: hostArgs}
 }
 
-func hostSystemctlCommand(args ...string) hostCommand {
+func hostSystemdManagerCommand(executable string, args ...string) hostCommand {
 	systemdArgs := []string{
 		"--service-type=exec",
 		"--wait",
@@ -57,10 +57,14 @@ func hostSystemctlCommand(args ...string) hostCommand {
 		"--quiet",
 		"--collect",
 		"--",
-		"/usr/bin/systemctl",
+		executable,
 	}
 	systemdArgs = append(systemdArgs, args...)
 	return hostNamespaceCommand("systemd-run", systemdArgs...)
+}
+
+func hostSystemctlCommand(args ...string) hostCommand {
+	return hostSystemdManagerCommand("/usr/bin/systemctl", args...)
 }
 
 func querySystemdUnit(ctx context.Context, runtime hostRuntime, unit string) (systemdUnitObservation, error) {

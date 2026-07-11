@@ -616,6 +616,13 @@ func assertMountSystemdCommand(t *testing.T, command hostCommand, state mountSta
 	want := hostNamespaceCommand(
 		"systemd-run",
 		"--service-type=exec",
+		"--wait",
+		"--pipe",
+		"--quiet",
+		"--collect",
+		"--",
+		"/usr/bin/systemd-run",
+		"--service-type=exec",
 		"--collect",
 		"--unit="+state.SystemdUnit,
 		"--description=drive9-csi:"+state.VolumeID+":"+state.AttemptID,
@@ -629,8 +636,9 @@ func assertMountSystemdCommand(t *testing.T, command hostCommand, state mountSta
 	if !reflect.DeepEqual(command, want) {
 		t.Fatalf("systemd command = %#v, want %#v", command, want)
 	}
-	if containsArgument(command.Args, "--wait") {
-		t.Fatal("production mount command contains --wait")
+	inner := hostInnerCommand(command)
+	if containsArgument(inner, "--wait") {
+		t.Fatal("inner production mount command contains --wait")
 	}
 }
 

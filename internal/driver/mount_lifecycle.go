@@ -315,8 +315,8 @@ func mountSystemdRunHostCommand(state mountState) (hostCommand, error) {
 	if err != nil {
 		return hostCommand{}, err
 	}
-	return hostNamespaceCommand(
-		"systemd-run",
+	return hostSystemdManagerCommand(
+		"/usr/bin/systemd-run",
 		"--service-type=exec",
 		"--collect",
 		"--unit="+state.SystemdUnit,
