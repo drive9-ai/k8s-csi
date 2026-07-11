@@ -1,4 +1,4 @@
-name: Publish CSI image
+name: Publish CSI validation image
 
 on:
   workflow_dispatch:
@@ -239,7 +239,7 @@ jobs:
             exit 1
           fi
 
-      - name: Output published image
+      - name: Output published validation image
         id: image
         shell: bash
         env:
@@ -265,7 +265,8 @@ jobs:
           printf 'digest=%s\n' "$image_digest" >> "$GITHUB_OUTPUT"
           printf 'reference=%s@%s\n' "$IMAGE" "$image_digest" >> "$GITHUB_OUTPUT"
           {
-            printf '### Published image\n\n'
+            printf '### Published validation image\n\n'
+            printf '> Validation only; this artifact is not release-admitted.\n\n'
             printf -- '- Drive9 CLI version: `%s`\n' "$DRIVE9_VERSION"
             printf -- '- Drive9 source commit: `%s`\n' "$DRIVE9_SOURCE_COMMIT"
             printf -- '- CSI source commit: `%s`\n' "$GITHUB_SHA"

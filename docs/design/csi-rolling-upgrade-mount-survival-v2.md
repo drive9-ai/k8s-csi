@@ -67,6 +67,34 @@ attempt becomes the new active `binaryPath`. This piggybacks a CLI upgrade on an
 unavoidable process replacement without introducing a separate interruption for
 a healthy mount.
 
+#### First-rollout and release-admission boundary
+
+V1 assumes the node has no prior Drive9 CSI deployment, live pre-V1 mount, or
+pre-V2 mount-state file. Before the first V1 rollout, operators must drain and
+unstage mounts with the old driver and begin with a clean CSI mount-state
+directory. Only mounts created by this implementation are guaranteed to survive
+subsequent CSI Node rollouts; V1 does not adopt an old Pod-cgroup mount into a
+host systemd service.
+
+If V1 nevertheless finds a pre-V2 state record, it treats the record as invalid,
+preserves it for inspection, and refuses recovery, overwrite, or automatic
+cleanup. A live mount, process, or systemd unit without matching valid V2 durable
+state is likewise not adopted or stopped automatically. The affected node RPC
+fails closed and the operator must halt the rollout, reinstall a compatible old
+CSI Node if needed, drain the workload, and perform explicit cleanup before
+retrying V1.
+
+Fallback recovery has two delivery phases:
+
+1. Implementation and manually dispatched immutable validation images may
+   exercise fallback only in non-production validation. Such an image is not
+   release-admitted.
+2. The N/N-1 bidirectional cache/writeback compatibility gate described below
+   must land and pass before any fallback-capable image is release-admitted. If
+   release admission must proceed without that gate, fallback must be disabled
+   first and a desired-binary launch failure ends in Degraded. Shipping active
+   fallback and relying on a future compatibility gate is not allowed.
+
 Drive9 FD handoff is not a V1 dependency. A future rebuild can use FD handoff
 when supported, or a disruptive stop-and-remount fallback. The latter can
 restore host staging state immediately, but transparent path recovery inside an
