@@ -431,36 +431,34 @@ production-safe, run a real Kubernetes cluster against a real Drive9 server and
 API key:
 
 ```sh
-export DRIVE9_SERVER=https://api.drive9.ai
-export DRIVE9_API_KEY=drive9_api_key_redacted
+export DRIVE9_CSI_E2E_CONTEXT=dev-dat9-eks-ap-southeast-1
+export DRIVE9_CSI_E2E_DRIVER_NAMESPACE=drive9-csi
 export DRIVE9_CSI_IMAGE='ghcr.io/drive9-ai/drive9-csi@sha256:<released-manifest-digest>'
 export DRIVE9_CSI_E2E_CONFIRM=1
-hack/e2e-k8s.sh
+e2e/prepare.sh
+
+export DRIVE9_SERVER=https://api.drive9.ai
+export DRIVE9_API_KEY=drive9_api_key_redacted
+e2e/basic-lifecycle.sh
+e2e/mount-survival.sh
 ```
 
-The script intentionally requires `DRIVE9_CSI_E2E_CONFIRM=1` because it mutates
-the current Kubernetes context. It deploys the CSI driver into an isolated
-`drive9-csi-e2e-driver` namespace, creates a Secret in `drive9-csi-e2e`, creates
-PVC `drive9-workspace-e2e` with the `drive9.ai/secret-name` annotation, mounts
-it into one pod, writes and reads a file, deletes
-that pod, remounts the same PVC into a second pod, reads the same token again,
-then runs a multi-pod same-node concurrent test: keeps the second pod running,
-launches a third pod pinned to the same node, verifies cross-pod read, deletes
-the second pod, and confirms the third pod still works. After the multi-pod
-test, it runs a one-pod multi-PVC test: creates a second PVC with its own
-Secret, launches a single pod mounting both PVCs, and validates mode-specific
-behavior — in workspace-root mode (default) it writes through one mount and
-reads through the other to verify cross-PVC visibility; in managed-directory
-mode it asserts isolation (each PVC's files are not visible through the other
-mount). It then cleans up the second PVC. Finally it deletes the first PVC
-and PV, recreates the PVC, reads
-the same token from the Drive9 workspace root, removes the temporary token
-file, then deletes the pod and PVC.
-It fails closed if either e2e namespace or cluster-scoped CSI resources already
-exist, because the e2e should run on a clean validation cluster. Set
-`DRIVE9_REMOTE_ROOT_PREFIX=/k8s/pvc-e2e` only when explicitly testing managed
-directory mode. Do not use `:latest` for `DRIVE9_CSI_IMAGE`; use an immutable tag
-or digest for customer evidence.
+`prepare.sh` idempotently creates or updates the persistent Driver environment
+with the immutable image digest. Cases can then run repeatedly against that
+environment. They create and clean only their own workload namespace,
+StorageClass, VolumeAttributesClass, Secret, PVC, and Pod resources; they never
+delete the prepared Driver.
+
+All three scripts require explicit context and Driver namespace values. The
+current kubectl context is never used implicitly, and production-like context
+names are rejected.
+
+`basic-lifecycle.sh` covers provisioning, mount/write/read, workload Pod
+remount, same-node multi-Pod access, one-Pod multi-PVC behavior, unpublish,
+unstage, and deletion. `mount-survival.sh` keeps workload I/O active while
+replacing the matching CSI node Pod and verifies the host mount identity does
+not change. See `e2e/README.md` and `e2e/AGENTS.md` for the complete safety and
+execution contract.
 
 ## Multiple Workspaces per Namespace
 

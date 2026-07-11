@@ -75,14 +75,23 @@ Test quirks:
 ## E2E Test (Real K8s)
 
 ```sh
+export DRIVE9_CSI_E2E_CONTEXT=dev-dat9-eks-ap-southeast-1
+export DRIVE9_CSI_E2E_DRIVER_NAMESPACE=drive9-csi
+export DRIVE9_CSI_IMAGE='ghcr.io/drive9-ai/drive9-csi@sha256:<manifest-digest>'
+export DRIVE9_CSI_E2E_CONFIRM=1
+e2e/prepare.sh
+
 export DRIVE9_SERVER=https://api.drive9.ai
 export DRIVE9_API_KEY=drive9_api_key_redacted
-export DRIVE9_CSI_IMAGE=ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2
-export DRIVE9_CSI_E2E_CONFIRM=1
-hack/e2e-k8s.sh
+e2e/basic-lifecycle.sh
+e2e/mount-survival.sh
 ```
 
-`DRIVE9_CSI_E2E_CONFIRM=1` is mandatory — the script mutates the current K8s context. Requires a clean cluster (fails if `drive9-csi` resources already exist). Do not use `:latest` for the image.
+Run `prepare.sh` to create or update the persistent Driver environment, then
+run either case repeatedly against it. Preparation requires an immutable image
+digest. Cases create and clean only their own namespace, StorageClass, VAC,
+Secret, PVC, and Pod resources. Every command requires explicit context and
+Driver namespace values. Read `e2e/AGENTS.md` before modifying or running E2E.
 
 ## Architecture
 
@@ -174,7 +183,10 @@ Stored under `$DRIVE9_CSI_STATE_DIR` (default `/var/lib/drive9-csi`):
 
 ## CI
 
-`.github/workflows/publish-image.yml` triggers on push to `main` (paths: `Dockerfile`, `Makefile`, `cmd/`, `go.mod`, `go.sum`, `internal/`). Multi-arch build (amd64 + arm64) → GHCR. Requires manual step to make package public after first publish.
+`.github/workflows/publish-image.yml` is manually triggered. It resolves the
+latest complete Drive9 CLI release, builds amd64 and arm64 images, publishes a
+multi-architecture manifest to GHCR, and outputs the tag and digest. It does not
+run E2E or deploy to a cluster.
 
 ## Notes & Planning Files
 

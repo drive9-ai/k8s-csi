@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	printf 'error: e2e/lib/common.sh must be sourced\n' >&2
+	exit 2
+fi
+
+e2e_fail() {
+	printf 'error: %s\n' "$*" >&2
+	exit 1
+}
+
+e2e_info() {
+	printf 'e2e: %s\n' "$*" >&2
+}
+
+e2e_need_cmd() {
+	local name="$1"
+
+	command -v "$name" >/dev/null 2>&1 ||
+		e2e_fail "missing command: $name"
+}
+
+e2e_need_env() {
+	local name="$1"
+	local value="${!name:-}"
+
+	[[ -n "$value" ]] || e2e_fail "$name is required"
+}
+
+kube() {
+	local arg
+
+	for arg in "$@"; do
+		[[ "$arg" == "--" ]] && break
+		case "$arg" in
+		--context | --context=* | --server | --server=* | --cluster | --cluster=*)
+			e2e_fail "kube does not allow Kubernetes target overrides"
+			;;
+		esac
+	done
+	kubectl --context "$DRIVE9_CSI_E2E_CONTEXT" "$@"
+}
+
+e2e_require_immutable_image() {
+	local label="$1"
+	local image="$2"
+
+	if [[ ! "$image" =~ ^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$ ]]; then
+		e2e_fail "$label must be an immutable @sha256 reference"
+	fi
+}
+
+e2e_require_single_line() {
+	local label="$1"
+	local value="$2"
+
+	if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+		e2e_fail "$label must be a single line"
+	fi
+}
+
+e2e_require_dns_label() {
+	local label="$1"
+	local value="$2"
+
+	if ((${#value} > 63)) ||
+		[[ ! "$value" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
+		e2e_fail "$label must be a valid DNS label"
+	fi
+}
+
+e2e_require_dns_subdomain() {
+	local label="$1"
+	local value="$2"
+	local pattern
+
+	pattern='^[a-z0-9]([-a-z0-9]*[a-z0-9])?'
+	pattern+='(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+	if ((${#value} > 253)) || [[ ! "$value" =~ $pattern ]]; then
+		e2e_fail "$label must be a valid DNS subdomain"
+	fi
+}
+
+e2e_init() {
+	local context_lower
+	local server
+
+	e2e_need_cmd kubectl
+	e2e_need_env DRIVE9_CSI_E2E_CONTEXT
+	e2e_need_env DRIVE9_CSI_E2E_DRIVER_NAMESPACE
+	e2e_require_single_line \
+		"DRIVE9_CSI_E2E_CONTEXT" "$DRIVE9_CSI_E2E_CONTEXT"
+	e2e_require_single_line \
+		"DRIVE9_CSI_E2E_DRIVER_NAMESPACE" \
+		"$DRIVE9_CSI_E2E_DRIVER_NAMESPACE"
+	e2e_require_dns_label \
+		"Driver namespace" "$DRIVE9_CSI_E2E_DRIVER_NAMESPACE"
+	case "$DRIVE9_CSI_E2E_DRIVER_NAMESPACE" in
+	default | kube-system | kube-public | kube-node-lease)
+		e2e_fail "protected Kubernetes namespaces cannot host the E2E Driver"
+		;;
+	esac
+
+	if [[ "${DRIVE9_CSI_E2E_CONFIRM:-}" != "1" ]]; then
+		e2e_fail "set DRIVE9_CSI_E2E_CONFIRM=1 to mutate the selected cluster"
+	fi
+
+	context_lower=$(printf '%s' "$DRIVE9_CSI_E2E_CONTEXT" |
+		tr '[:upper:]' '[:lower:]') ||
+		e2e_fail "normalize Kubernetes context"
+	if [[ "$context_lower" =~ prod|production ]]; then
+		e2e_fail "production-like Kubernetes contexts are forbidden"
+	fi
+
+	if ! server=$(kube config view --minify \
+		-o jsonpath='{.clusters[0].cluster.server}'); then
+		e2e_fail "resolve Kubernetes context $DRIVE9_CSI_E2E_CONTEXT"
+	fi
+	[[ -n "$server" ]] || e2e_fail "selected Kubernetes context has no server"
+
+	umask 077
+	e2e_info "using Kubernetes context: $DRIVE9_CSI_E2E_CONTEXT"
+	e2e_info "using Kubernetes API server: $server"
+	e2e_info "using Driver namespace: $DRIVE9_CSI_E2E_DRIVER_NAMESPACE"
+}
+
+e2e_ensure_absent() {
+	local kind="$1"
+	local name="$2"
+	local existing
+
+	if ! existing=$(kube get "$kind" "$name" \
+		--ignore-not-found -o name); then
+		e2e_fail "verify that $kind/$name does not exist"
+	fi
+	if [[ -n "$existing" ]]; then
+		e2e_fail "$kind/$name already exists; clean the prior case first"
+	fi
+}
+
+e2e_ensure_present() {
+	local kind="$1"
+	local name="$2"
+	local existing
+
+	if ! existing=$(kube get "$kind" "$name" \
+		--ignore-not-found -o name); then
+		e2e_fail "verify that $kind/$name exists"
+	fi
+	if [[ -z "$existing" ]]; then
+		e2e_fail "$kind/$name is missing; run e2e/prepare.sh first"
+	fi
+}
+
+e2e_ensure_namespaced_present() {
+	local kind="$1"
+	local name="$2"
+	local existing
+
+	if ! existing=$(kube -n "$driver_namespace" get "$kind" "$name" \
+		--ignore-not-found -o name); then
+		e2e_fail "verify that $kind/$name exists in $driver_namespace"
+	fi
+	if [[ -z "$existing" ]]; then
+		e2e_fail "$kind/$name is missing; run e2e/prepare.sh first"
+	fi
+}
+
+e2e_require_driver_binding() {
+	local account="$1"
+	local binding_data
+	local jsonpath
+	local want
+
+	jsonpath='jsonpath={.roleRef.kind}{"|"}{.roleRef.name}{"|"}'
+	jsonpath+='{.subjects[0].kind}{"|"}{.subjects[0].name}{"|"}'
+	jsonpath+='{.subjects[0].namespace}'
+	if ! binding_data=$(kube get clusterrolebinding "$account" \
+		-o "$jsonpath"); then
+		e2e_fail "read prepared ClusterRoleBinding $account"
+	fi
+	want="ClusterRole|$account|ServiceAccount|$account|$driver_namespace"
+	if [[ "$binding_data" != "$want" ]]; then
+		e2e_fail "ClusterRoleBinding $account does not target Driver namespace"
+	fi
+}
+
+e2e_require_prepared_driver() {
+	local expected_image="${1:-}"
+	local controller_jsonpath
+	local controller_image
+	local installer_jsonpath
+	local installer_image
+	local node_jsonpath
+	local node_image
+
+	controller_jsonpath='jsonpath={.spec.template.spec.containers'
+	controller_jsonpath+='[?(@.name=="drive9-csi")].image}'
+	node_jsonpath="$controller_jsonpath"
+	installer_jsonpath='jsonpath={.spec.template.spec.initContainers'
+	installer_jsonpath+='[?(@.name=="install-host-binaries")].image}'
+
+	e2e_ensure_present namespace "$driver_namespace"
+	e2e_ensure_present csidriver csi.drive9.ai
+	e2e_ensure_present clusterrole drive9-csi-controller
+	e2e_ensure_present clusterrole drive9-csi-node
+	e2e_ensure_present clusterrolebinding drive9-csi-controller
+	e2e_ensure_present clusterrolebinding drive9-csi-node
+	e2e_ensure_namespaced_present serviceaccount drive9-csi-controller
+	e2e_ensure_namespaced_present serviceaccount drive9-csi-node
+	e2e_require_driver_binding drive9-csi-controller
+	e2e_require_driver_binding drive9-csi-node
+	kube -n "$driver_namespace" rollout status \
+		deployment/drive9-csi-controller --timeout=300s ||
+		e2e_fail "prepared controller is not ready"
+	kube -n "$driver_namespace" rollout status \
+		daemonset/drive9-csi-node --timeout=300s ||
+		e2e_fail "prepared node DaemonSet is not ready"
+
+	controller_image=$(kube -n "$driver_namespace" get \
+		deployment drive9-csi-controller -o \
+		"$controller_jsonpath") ||
+		e2e_fail "read prepared controller image"
+	node_image=$(kube -n "$driver_namespace" get daemonset drive9-csi-node -o \
+		"$node_jsonpath") ||
+		e2e_fail "read prepared node image"
+	installer_image=$(kube -n "$driver_namespace" get \
+		daemonset drive9-csi-node -o \
+		"$installer_jsonpath") ||
+		e2e_fail "read prepared installer image"
+
+	e2e_require_immutable_image "prepared controller image" "$controller_image"
+	e2e_require_immutable_image "prepared node image" "$node_image"
+	e2e_require_immutable_image "prepared installer image" "$installer_image"
+	if [[ "$controller_image" != "$node_image" ||
+		"$controller_image" != "$installer_image" ]]; then
+		e2e_fail "prepared Drive9 CSI containers use different images"
+	fi
+	if [[ -n "$expected_image" && "$controller_image" != "$expected_image" ]]; then
+		e2e_fail "prepared Driver image does not match DRIVE9_CSI_IMAGE"
+	fi
+
+	e2e_info "prepared Driver is ready with image: $controller_image"
+}
+
+e2e_cleanup_delete() {
+	local description="$1"
+	shift
+
+	if ! kube delete "$@" --ignore-not-found --wait=true \
+		--timeout=300s >/dev/null; then
+		e2e_info "cleanup failed: $description"
+		return 1
+	fi
+}
+
+e2e_cleanup_owned_resource() {
+	local description="$1"
+	local kind="$2"
+	local name="$3"
+	local run_id="$4"
+	local identity
+	local jsonpath
+
+	jsonpath='jsonpath={.metadata.name}{"|"}'
+	jsonpath+='{.metadata.labels.drive9\.ai/e2e-run}'
+	if ! identity=$(kube get "$kind" "$name" --ignore-not-found \
+		-o "$jsonpath"); then
+		e2e_info "cleanup ownership check failed: $description"
+		return 1
+	fi
+	if [[ -z "$identity" ]]; then
+		return 0
+	fi
+	if [[ "$identity" != "$name|$run_id" ]]; then
+		e2e_info "cleanup ownership mismatch: $description"
+		return 1
+	fi
+	e2e_cleanup_delete "$description" "$kind" "$name"
+}
+
+e2e_wait_for_pv_deleted() {
+	local pv_name="$1"
+	local attempt
+	local existing
+	local last_observation="PV still exists"
+
+	for attempt in {1..60}; do
+		if ! existing=$(kube get pv "$pv_name" \
+			--ignore-not-found -o name 2>/dev/null); then
+			last_observation="Kubernetes API query failed"
+			sleep 5
+			continue
+		fi
+		if [[ -z "$existing" ]]; then
+			return 0
+		fi
+		last_observation="PV still exists"
+		sleep 5
+	done
+
+	e2e_fail "PV $pv_name deletion was not confirmed: $last_observation"
+}
