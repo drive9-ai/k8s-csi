@@ -290,13 +290,15 @@ jobs:
           fi
 
           release_root="${RUNNER_TEMP}/drive9-csi-kubernetes"
+          release_base="${release_root}/base"
           release_overlay="${release_root}/overlays/release"
-          cp -R deploy/kubernetes "$release_root" || exit 1
+          mkdir -p "$release_root" || exit 1
+          cp -R deploy/kubernetes "$release_base" || exit 1
           mkdir -p "$release_overlay" || exit 1
           {
             printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1beta1'
             printf '%s\n' 'kind: Kustomization'
-            printf '%s\n' 'resources:' '  - ../..'
+            printf '%s\n' 'resources:' '  - ../../base'
             printf '%s\n' 'images:'
             printf '%s\n' '  - name: registry.invalid/drive9-csi'
             printf '%s\n' '    newName: ghcr.io/drive9-ai/drive9-csi'
