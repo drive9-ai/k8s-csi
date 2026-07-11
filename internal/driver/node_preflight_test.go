@@ -55,7 +55,7 @@ func TestNodePreflightClassifiesEveryFailure(t *testing.T) {
 			name:       "host PID signal",
 			failure:    "pid-signal",
 			capability: nodeCapabilityHostPIDSignal,
-			reason:     "host PID namespace or kill executable unavailable",
+			reason:     "host systemd PID signal execution unavailable",
 		},
 		{
 			name:       "systemd client",
@@ -158,13 +158,6 @@ func TestNodePreflightUsesOnlyCanonicalHostCommands(t *testing.T) {
 		"--wd=/host-proc/1/root",
 		"--",
 	}
-	pidPrefix := []string{
-		"--mount=/host-proc/1/ns/mnt",
-		"--pid=/host-proc/1/ns/pid",
-		"--root=/host-proc/1/root",
-		"--wd=/host-proc/1/root",
-		"--",
-	}
 	execCalls := 0
 	for _, call := range fixture.runtime.Calls() {
 		if call.Operation != "exec" {
@@ -173,10 +166,11 @@ func TestNodePreflightUsesOnlyCanonicalHostCommands(t *testing.T) {
 		execCalls++
 		canonicalMount := len(call.Command.Args) >= len(prefix) &&
 			reflect.DeepEqual(call.Command.Args[:len(prefix)], prefix)
-		canonicalPID := len(call.Command.Args) >= len(pidPrefix) &&
-			reflect.DeepEqual(call.Command.Args[:len(pidPrefix)], pidPrefix)
-		if call.Command.Path != "nsenter" || (!canonicalMount && !canonicalPID) {
+		if call.Command.Path != "nsenter" || !canonicalMount {
 			t.Fatalf("non-canonical host command: %#v", call.Command)
+		}
+		if containsArgument(call.Command.Args, "--pid=/host-proc/1/ns/pid") {
+			t.Fatalf("host command tried to enter an ancestor PID namespace: %#v", call.Command)
 		}
 		if call.Command.Path == fixture.drive9Path || call.Command.Path == "systemd-run" {
 			t.Fatalf("in-container launch attempted: %#v", call.Command)
@@ -330,15 +324,15 @@ func (f *nodePreflightFixture) installCallbacks() {
 		if len(inner) == 0 {
 			return hostCommandResult{ExitCode: 1}, errors.New("missing host command")
 		}
-		if containsArgument(command.Args, "--pid=/host-proc/1/ns/pid") && f.failure == "pid-signal" {
-			return hostCommandResult{ExitCode: 1, Stderr: []byte("PID namespace denied")}, errors.New("exit status 1")
-		}
 		switch inner[0] {
 		case "/bin/true":
 			if f.failure == "namespace" {
 				return hostCommandResult{ExitCode: 1, Stderr: []byte("namespace denied\n")}, errors.New("exit status 1")
 			}
 		case "systemd-run":
+			if containsArgument(inner, "/bin/kill") && f.failure == "pid-signal" {
+				return hostCommandResult{ExitCode: 1, Stderr: []byte("host signal denied")}, errors.New("exit status 1")
+			}
 			if containsArgument(inner, "/bin/true") {
 				switch f.failure {
 				case "systemd-client":

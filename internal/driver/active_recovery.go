@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -567,12 +566,11 @@ func (e *driverActiveRecoveryExecutor) CleanupCandidate(_ context.Context, state
 
 func (e *driverActiveRecoveryExecutor) terminateOrphan(state mountState) error {
 	runtime := e.driver.hostRuntime()
-	result, err := runtime.Exec(e.ctx, hostPIDNamespaceCommand(
-		"/bin/kill",
-		"-TERM",
-		"--",
-		strconv.Itoa(state.PID),
-	))
+	command, err := hostPIDSignalCommand(runtime, "TERM", state.PID)
+	if err != nil {
+		return fmt.Errorf("build orphan Drive9 termination command: %w", err)
+	}
+	result, err := runtime.Exec(e.ctx, command)
 	if err != nil || result.ExitCode != 0 {
 		return fmt.Errorf("terminate orphan Drive9 process")
 	}

@@ -54,6 +54,36 @@ func TestMountStopUsesFixedCleanupOrderAndRecordedBinary(t *testing.T) {
 	}
 }
 
+func TestHostPIDSignalCommandUsesTransientHostService(t *testing.T) {
+	runtime := &fakeHostRuntime{
+		attemptIDFn: func() (string, error) {
+			return strings.Repeat("a", 32), nil
+		},
+	}
+	command, err := hostPIDSignalCommand(runtime, "KILL", 4242)
+	if err != nil {
+		t.Fatalf("hostPIDSignalCommand(): %v", err)
+	}
+	want := []string{
+		"systemd-run",
+		"--service-type=exec",
+		"--wait",
+		"--collect",
+		"--unit=drive9-signal-" + strings.Repeat("a", 32),
+		"--",
+		"/bin/kill",
+		"-KILL",
+		"--",
+		"4242",
+	}
+	if got := hostInnerCommand(command); !reflect.DeepEqual(got, want) {
+		t.Fatalf("host signal command = %#v, want %#v", got, want)
+	}
+	if containsArgument(command.Args, "--pid=/host-proc/1/ns/pid") {
+		t.Fatalf("host signal command enters ancestor PID namespace: %#v", command)
+	}
+}
+
 func TestMountStopRejectsConsumersAndAmbiguityBeforeIntent(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -564,7 +594,7 @@ func (f *mountStopFixture) installCallbacks() {
 				return hostCommandResult{ExitCode: 1}, errors.New("lazy unmount failed")
 			}
 			f.mounted = false
-		case inner[0] == "/bin/kill":
+		case inner[0] == "systemd-run" && containsArgument(inner, "/bin/kill"):
 			f.events.add("pid-kill")
 			if f.failure == "pid-kill" {
 				return hostCommandResult{ExitCode: 1}, errors.New("kill failed")

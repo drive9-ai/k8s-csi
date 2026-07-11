@@ -408,17 +408,25 @@ func hostMountRuntimeEnvironment() []string {
 	}
 }
 
-func hostPIDNamespaceCommand(command string, args ...string) hostCommand {
-	hostArgs := []string{
-		"--mount=/host-proc/1/ns/mnt",
-		"--pid=/host-proc/1/ns/pid",
-		"--root=/host-proc/1/root",
-		"--wd=/host-proc/1/root",
-		"--",
-		command,
+func hostPIDSignalCommand(runtime hostRuntime, signal string, pid int) (hostCommand, error) {
+	if signal != "0" && signal != "TERM" && signal != "KILL" {
+		return hostCommand{}, fmt.Errorf("unsupported host PID signal")
 	}
-	hostArgs = append(hostArgs, args...)
-	return hostCommand{Path: "nsenter", Args: hostArgs}
+	if pid <= 0 {
+		return hostCommand{}, fmt.Errorf("invalid host PID")
+	}
+	attemptID, err := runtime.NewAttemptID()
+	if err != nil || !attemptIDPattern.MatchString(attemptID) {
+		return hostCommand{}, fmt.Errorf("generate host PID signal attempt ID")
+	}
+	return systemdRunHostCommand(
+		"drive9-signal-"+attemptID,
+		true,
+		"/bin/kill",
+		"-"+signal,
+		"--",
+		strconv.Itoa(pid),
+	)
 }
 
 func (s mountStopper) stoppingPIDAlive(state mountState) (bool, error) {
@@ -439,12 +447,10 @@ func (s mountStopper) stoppingPIDAlive(state mountState) (bool, error) {
 }
 
 func (s mountStopper) killStoppingPID(ctx context.Context, state mountState) error {
-	command := hostPIDNamespaceCommand(
-		"/bin/kill",
-		"-KILL",
-		"--",
-		strconv.Itoa(state.PID),
-	)
+	command, err := hostPIDSignalCommand(s.runtime, "KILL", state.PID)
+	if err != nil {
+		return fmt.Errorf("build SIGKILL verified stopping PID command: %w", err)
+	}
 	result, err := s.runtime.Exec(ctx, command)
 	if err != nil || result.ExitCode != 0 {
 		return fmt.Errorf("SIGKILL verified stopping PID failed")
