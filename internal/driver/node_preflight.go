@@ -54,7 +54,7 @@ var orderedNodeCapabilityNames = [...]nodeCapabilityName{
 
 const (
 	hostProcUnavailableReason  = "host /proc not mounted at /host-proc or PID 1 namespace/root inaccessible"
-	hostPIDSignalUnavailable   = "host PID namespace or kill executable unavailable"
+	hostPIDSignalUnavailable   = "host systemd PID signal execution unavailable"
 	fuseUnavailableReason      = "host /dev/fuse is not a readable/writable character device"
 	fuseHelperUnavailable      = "host fusermount or umount helper unavailable"
 	systemctlUnavailable       = "host systemctl executable unavailable"
@@ -172,11 +172,13 @@ func runNodePreflight(ctx context.Context, runtime hostRuntime) nodeCapabilities
 		)
 		capabilities = capabilities.withUnavailable(nodeCapabilityHostNamespace, reason)
 	}
-	pidSignalResult, pidSignalErr := runtime.Exec(
-		ctx,
-		hostPIDNamespaceCommand("/bin/test", "-x", "/bin/kill"),
-	)
-	if pidSignalErr != nil || pidSignalResult.ExitCode != 0 {
+	pidSignalCommand, pidSignalCommandErr := hostPIDSignalCommand(runtime, "0", 1)
+	var pidSignalResult hostCommandResult
+	var pidSignalErr error
+	if pidSignalCommandErr == nil {
+		pidSignalResult, pidSignalErr = runtime.Exec(ctx, pidSignalCommand)
+	}
+	if pidSignalCommandErr != nil || pidSignalErr != nil || pidSignalResult.ExitCode != 0 {
 		capabilities = capabilities.withUnavailable(nodeCapabilityHostPIDSignal, hostPIDSignalUnavailable)
 	}
 
@@ -400,7 +402,7 @@ func checkHostDrive9Execution(ctx context.Context, runtime hostRuntime, drive9Pa
 }
 
 var systemdRunUnitPattern = regexp.MustCompile(
-	"^(?:drive9-preflight-[0-9a-f]{32}|drive9-mount-[0-9a-f]{16}\\.service)$",
+	"^(?:drive9-preflight-[0-9a-f]{32}|drive9-signal-[0-9a-f]{32}|drive9-mount-[0-9a-f]{16}\\.service)$",
 )
 
 func systemdRunHostCommand(unit string, wait bool, executable string, args ...string) (hostCommand, error) {
