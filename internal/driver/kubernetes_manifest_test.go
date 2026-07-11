@@ -320,6 +320,7 @@ func TestKubernetesManifestNodeProvidesHostRuntimeAndInstaller(t *testing.T) {
 		"--host-state-dir=/var/lib/drive9-csi",
 		"--drive9-source=/usr/local/bin/drive9",
 		"--launcher-source=/usr/local/bin/drive9-csi-launcher",
+		"--fusermount-source=/usr/bin/fusermount3",
 	}
 	if !slices.Equal(installer.Args, wantInstallerArgs) {
 		t.Fatalf("installer args = %v, want %v", installer.Args, wantInstallerArgs)

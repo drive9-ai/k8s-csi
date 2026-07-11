@@ -64,7 +64,7 @@ func TestMountLaunchCommitsStartsVerifiesAndPromotesInOrder(t *testing.T) {
 		"DRIVE9_API_KEY=" + request.APIKey,
 		"TMPDIR=" + hostRuntimeDir,
 		"XDG_RUNTIME_DIR=" + hostRuntimeDir,
-		"PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+		"PATH=" + hostBinaryDir + ":/usr/sbin:/usr/bin:/sbin:/bin",
 		"",
 	}, "\x00")
 	if string(envBody) != wantEnv {

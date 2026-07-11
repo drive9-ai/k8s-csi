@@ -118,14 +118,17 @@ is feature-based, not inferred from a distribution name:
   transient `TimeoutStopSec`, and `systemd-run --collect`
 - `systemd-run`, `systemctl`, and `journalctl`
 - `/dev/fuse` readable and writable by the host service
-- `fusermount3`, `fusermount`, or `umount` in the configured host `PATH`
+- CSI-installed `/var/lib/drive9-csi/bin/fusermount3`, executable in the host
+  root and mount namespace
 - writable `/var/lib/drive9-csi`
 - writable host runtime directory `/run/drive9-csi`
 
-Both copied executables must be static Linux binaries for the target
+Drive9 and the launcher must be static Linux binaries for the target
 architecture. The current Drive9 CLI build uses `CGO_ENABLED=0`; the CSI image
-build must verify both Drive9 and the launcher have the expected ELF machine
-and no ELF interpreter (`PT_INTERP`) before publishing them for host execution.
+build must verify both have the expected ELF machine and no ELF interpreter
+(`PT_INTERP`). The image-provided `fusermount3` may be dynamically linked, but
+the installer must validate its ELF machine and preflight must execute the
+installed helper in the host root before advertising mount capability.
 
 V1 does not set `User=` on the transient unit, so the host system manager runs
 the mount service as root. `user_allow_other` in `/etc/fuse.conf` is required
@@ -193,21 +196,22 @@ must not require host `/proc`, systemd, `/dev/fuse`, or installed host binaries.
 4. In the same host mount-namespace/root context, verify host FUSE/runtime
    prerequisites:
    - /dev/fuse is a readable/writable character device
-   - at least one of fusermount3, fusermount, or umount is executable
+   - `/var/lib/drive9-csi/bin/fusermount3 --version` succeeds
    - systemctl and journalctl are executable
    - ensure `/run/drive9-csi` is the expected hostPath-backed directory, reject
      a symlink or other file type, normalize root ownership/mode 0700, and
      verify it is writable
 
-5. In that host context, verify drive9 and drive9-csi-launcher exist and are
-   executable:
+5. In that host context, verify drive9, drive9-csi-launcher, and fusermount3
+   exist and are executable:
    stat /var/lib/drive9-csi/bin/drive9
    stat /var/lib/drive9-csi/bin/drive9-csi-launcher
+   stat /var/lib/drive9-csi/bin/fusermount3
    Resolve the drive9 symlink and require basename drive9-[0-9a-f]{64}; verify
    the target's SHA-256 equals the filename digest. Then run `drive9 version`
    in a short-lived host transient service with a unique preflight unit name.
-   Check: both files exist and are executable, the content-addressed target is
-   valid, and host systemd can execute Drive9 successfully
+   Check: all three files exist and are executable, the content-addressed target
+   is valid, and host systemd can execute Drive9 successfully
    Failure classification:
      - missing file: "host Drive9 binaries missing — init container may have failed"
      - bad link/hash: "host Drive9 content-addressed binary validation failed"
@@ -397,7 +401,7 @@ in the secret/arg parsing path.
      DRIVE9_SERVER=<server>\0DRIVE9_API_KEY=<key>\0
      TMPDIR=/run/drive9-csi\0
      XDG_RUNTIME_DIR=/run/drive9-csi\0
-     PATH=/usr/sbin:/usr/bin:/sbin:/bin\0
+     PATH=/var/lib/drive9-csi/bin:/usr/sbin:/usr/bin:/sbin:/bin\0
    The launcher preserves bytes exactly and applies no shell parsing, quoting,
    or escaping. Drive9's credential resolver subsequently trims leading and
    trailing ASCII whitespace from `DRIVE9_SERVER` and `DRIVE9_API_KEY`; the
@@ -844,6 +848,7 @@ initContainers:
       - --host-state-dir=/host-state
       - --drive9-source=/usr/local/bin/drive9
       - --launcher-source=/usr/local/bin/drive9-csi-launcher
+      - --fusermount-source=/usr/bin/fusermount3
     volumeMounts:
       - name: state-dir
         mountPath: /host-state
@@ -857,14 +862,17 @@ credentials or a CSI endpoint.
 The subcommand owns the complete installation contract:
 
 1. Create `<host-state-dir>/bin` with mode `0755`.
-2. Validate both source files are regular executable static Linux ELF binaries
-   for the current target architecture and have no `PT_INTERP` segment.
+2. Validate Drive9 and the launcher as regular executable static Linux ELF
+   binaries for the current target architecture with no `PT_INTERP` segment.
+   Validate fusermount3 as a regular executable Linux ELF for that architecture;
+   dynamic linkage is allowed because preflight executes it against the host ABI.
 3. Compute SHA-256 from the Drive9 source content and install it as
    `drive9-<sha256>` using a same-directory temporary file, file fsync, atomic
    rename, and directory fsync. An existing destination must be a regular file
    with the same digest; symlinks and unexpected file types are rejected.
-4. Install `drive9-csi-launcher` through the same atomic replacement procedure.
-5. Only after both files validate, atomically replace the `drive9` symlink with
+4. Install `drive9-csi-launcher` and `fusermount3` through the same atomic
+   replacement procedure.
+5. Only after all three files validate, atomically replace the `drive9` symlink with
    a relative link to `drive9-<sha256>`. Any failure leaves the previous desired
    symlink intact.
 6. Print only the installed digest/path; never print file contents or
@@ -883,7 +891,9 @@ Binary layout on host (`/var/lib/drive9-csi/bin/`):
   atomically (temp + rename) on every init container run, independent of
   drive9 version. Not versioned because its interface is stable; if the
   interface ever changes, it will be versioned alongside drive9.
-- Binary, symlink, and launcher replacement use temp paths plus rename to
+- `fusermount3` — image-provided FUSE mount helper used through the host mount
+  service `PATH`; installed atomically on every init container run
+- Binary, symlink, launcher, and helper replacement use temp paths plus rename to
   prevent partial installation
 - Versioned filename is derived from the binary content SHA-256; it does not
   depend on parsing the multi-line output of `drive9 version`
@@ -904,8 +914,8 @@ artifact. If any candidate unit or process-state artifact cannot be safely
 correlated, skip binary GC for that startup rather than assuming the inventory
 is complete. GC considers only regular files whose basename exactly matches
 `drive9-[0-9a-f]{64}`; it never matches the `drive9` symlink or
-`drive9-csi-launcher`. Remove a matching file only when it is outside the keep
-set. This preserves binaries used by live, stopping, or partially recovered
+`drive9-csi-launcher` or `fusermount3`. Remove a matching file only when it is
+outside the keep set. This preserves binaries used by live, stopping, or partially recovered
 mounts and preserves the current binary when no volume is mounted.
 
 #### 6. Remove shutdown unmount on SIGTERM
@@ -948,7 +958,8 @@ host-mount-namespace plus host-root `nsenter` prefix used during launch.
    it does not send a second SIGTERM. This runs regardless of step 1.
 3. Verify: isMountPoint(stagingTarget) == false
    If still mounted: <active-binaryPath> umount --timeout 10s --no-auto-pack
-   <staging-target>. `drive9 umount` invokes fusermount3/fusermount/umount; it
+   <staging-target>. `drive9 umount` resolves the CSI-installed fusermount3 from
+   the host binary directory first; its internal legacy fallbacks remain. This
    is not a control-socket command. Execute this fallback in the host mount
    namespace with the same runtime-directory environment.
 4. Verify again: isMountPoint(stagingTarget) == false
@@ -1157,7 +1168,7 @@ following contract:
 | `drive9 umount` | Exists, using `fusermount3`, `fusermount`, or `umount` | OS-helper fallback only; it is not a control-socket RPC |
 | `drive9 version` | Exists and prints multi-line build information; no `--short-sha` flag | Installer uses binary SHA-256 instead of parsing CLI output |
 | Version query through control socket | **Not implemented** | Not required for V1; audit through CSI `binaryPath` and `/host-proc/<pid>/exe` |
-| Persistent cache/writeback rollback compatibility | Required release contract and publishing gate | Every pair of Drive9 CLI versions carried by adjacent CSI images must pass N/N-1 bidirectional on-disk cache/writeback compatibility tests before the newer CSI image can be published; supported recovery may then fall back after a desired process has executed |
+| Persistent cache/writeback rollback compatibility | Required release contract and release-admission gate | Every pair of Drive9 CLI versions carried by adjacent release-admitted CSI images must pass N/N-1 bidirectional on-disk cache/writeback compatibility tests; manual workflow dispatch may publish a traceable validation image without claiming release admission |
 | FD/state handoff | Not implemented; current reexec work is a clean-state prototype and does not cover active CSI workloads | Not required for V1; future `mount rebuild` may use it to preserve open descriptors, otherwise use the explicit stop-and-remount fallback |
 
 The current control protocol is drain-only and has no operation discriminator
@@ -1171,8 +1182,9 @@ so a newer CSI does not pass newly introduced flags to an older Drive9 binary.
 Rollback compatibility is a hard build/release invariant, not a runtime
 negotiation performed by CSI. Release validation must cover N-1 state opened by
 N and then reopened by N-1 after an injected desired-start failure. The newer
-CSI image must not be published if that gate fails. For artifacts admitted by
-this gate, CSI may attempt the previous active binary after fully cleaning a
+CSI image must not be release-admitted if that gate fails. A manual dispatch may
+publish an immutable validation tag while the gate is unverified. For artifacts
+admitted by this gate, CSI may attempt the previous active binary after fully cleaning a
 post-`execve` desired failure. If both candidates fail, it preserves recovery
 state and reports Degraded.
 
@@ -1182,7 +1194,7 @@ state and reports Degraded.
 |---|---|
 | `internal/driver/mount_linux.go` | `startDrive9Mount`: persist `phase=starting` and immutable `startupDeadline` before side effects; create attempt-scoped startup files under `/run/drive9-csi`; nsenter + systemd-run transient service with `--collect`, `Restart=no`, and explicit `TimeoutStopSec`; classify collected `not-found` units in the recorded-attempt context; SHA-256 unit naming; PID discovery from Drive9 process-state JSON; complete mount argv via NUL-separated files + drive9-csi-launcher; promote verified state to `active`; desired-first recovery with a recorded previous-active fallback |
 | `cmd/drive9-csi-launcher/main.go` | New ~50-line binary: reads NUL-separated .env and .args files, immediately unlinks both files, then calls syscall.Exec |
-| `cmd/drive9-csi/main.go`, installer helper | Dispatch `install-host-binaries` before CSI server flag parsing and Kubernetes client creation; implement/test ELF validation, content hashing, atomic copy, and desired-symlink replacement in Go |
+| `cmd/drive9-csi/main.go`, installer helper | Dispatch `install-host-binaries` before CSI server flag parsing and Kubernetes client creation; implement/test ELF validation, content hashing, atomic Drive9/launcher/fusermount3 installation, and desired-symlink replacement in Go |
 | `Dockerfile`, `Makefile` | Build the launcher with `CGO_ENABLED=0` for the target architecture; validate the launcher and Drive9 ELF machine and absence of `PT_INTERP`; copy the launcher into the CSI image at `/usr/local/bin/drive9-csi-launcher`; include it in local builds |
 | `.github/workflows/publish-image.yml` | Resolve one pinned Drive9 release plus per-architecture SHA-256 values/artifacts and pass that same immutable input to tagging and every image build job |
 | `mem9-ai/drive9` release workflow and FUSE tests | Add a mandatory N/N-1 bidirectional cache/writeback compatibility gate: create pending state with N-1, open it with N, inject desired-start failure, reopen with N-1, and verify data, metadata, queue state, and final upload results before allowing the adjacent CSI image to publish |
@@ -1190,7 +1202,7 @@ state and reports Degraded.
 | `internal/driver/mount_linux.go` | `pidStartTime`, `pidMatchesState`, `pidAlive`: read from `/host-proc/<pid>/...` instead of `/proc/<pid>/...`; make canonical `/host-proc/<pid>/exe == binaryPath` part of the ownership gate |
 | `internal/driver/driver.go` | Node-only startup preflight with named capability failures and operation-specific degraded behavior; evaluate healthy local idempotency before Secret/API resolution; remove `shutdownNodeMounts()` from the CSI Node SIGTERM handler while leaving the controller path free of host-systemd prerequisites |
 | `internal/driver/node_recovery.go` | Reconcile `stopping` without remount; reconcile `starting` desired/fallback attempts; active split-state matrix handling; systemd service liveness check; run binary GC only after complete inventory |
-| `deploy/kubernetes/node.yaml` | Init container (content-addressed binary), host-proc volume, `/run/drive9-csi` hostPath, node-pressure priorityClassName |
+| `deploy/kubernetes/node.yaml` | Init container (content-addressed binary, launcher, and fusermount3), host-proc volume, `/run/drive9-csi` hostPath, node-pressure priorityClassName |
 | Mount state JSON | Durable atomic writes; add `schemaVersion`, `phase`, start/stop attempt IDs, immutable per-attempt `createdAt`/`startupDeadline`, startup artifact paths, resolved `binaryPath`, non-secret active/fallback argv, `fallbackBinaryPath`, `systemdUnit`, `controlSocketPath`, and stopping timestamp; never store API key/token |
 
 ### Verification plan (e2e)

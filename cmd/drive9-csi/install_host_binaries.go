@@ -20,34 +20,41 @@ import (
 )
 
 type installHostBinariesOptions struct {
-	HostStateDir   string
-	Drive9Source   string
-	LauncherSource string
-	TargetArch     string
+	HostStateDir     string
+	Drive9Source     string
+	LauncherSource   string
+	FusermountSource string
+	TargetArch       string
 }
 
 type installHostBinariesResult struct {
-	Digest       string
-	Drive9Path   string
-	LauncherPath string
+	Digest         string
+	Drive9Path     string
+	LauncherPath   string
+	FusermountPath string
 }
 
 type installerStep string
 
 const (
-	installerStepDrive9Temp       installerStep = "drive9-temp"
-	installerStepDrive9Write      installerStep = "drive9-write"
-	installerStepDrive9FileSync   installerStep = "drive9-file-sync"
-	installerStepDrive9Rename     installerStep = "drive9-rename"
-	installerStepDrive9DirSync    installerStep = "drive9-dir-sync"
-	installerStepLauncherTemp     installerStep = "launcher-temp"
-	installerStepLauncherWrite    installerStep = "launcher-write"
-	installerStepLauncherFileSync installerStep = "launcher-file-sync"
-	installerStepLauncherRename   installerStep = "launcher-rename"
-	installerStepLauncherDirSync  installerStep = "launcher-dir-sync"
-	installerStepDesiredTemp      installerStep = "desired-temp"
-	installerStepDesiredRename    installerStep = "desired-rename"
-	installerStepDesiredDirSync   installerStep = "desired-dir-sync"
+	installerStepDrive9Temp         installerStep = "drive9-temp"
+	installerStepDrive9Write        installerStep = "drive9-write"
+	installerStepDrive9FileSync     installerStep = "drive9-file-sync"
+	installerStepDrive9Rename       installerStep = "drive9-rename"
+	installerStepDrive9DirSync      installerStep = "drive9-dir-sync"
+	installerStepLauncherTemp       installerStep = "launcher-temp"
+	installerStepLauncherWrite      installerStep = "launcher-write"
+	installerStepLauncherFileSync   installerStep = "launcher-file-sync"
+	installerStepLauncherRename     installerStep = "launcher-rename"
+	installerStepLauncherDirSync    installerStep = "launcher-dir-sync"
+	installerStepFusermountTemp     installerStep = "fusermount-temp"
+	installerStepFusermountWrite    installerStep = "fusermount-write"
+	installerStepFusermountFileSync installerStep = "fusermount-file-sync"
+	installerStepFusermountRename   installerStep = "fusermount-rename"
+	installerStepFusermountDirSync  installerStep = "fusermount-dir-sync"
+	installerStepDesiredTemp        installerStep = "desired-temp"
+	installerStepDesiredRename      installerStep = "desired-rename"
+	installerStepDesiredDirSync     installerStep = "desired-dir-sync"
 )
 
 type installerFault func(installerStep) error
@@ -61,6 +68,7 @@ func runInstallHostBinariesCommand(args []string, stdout io.Writer) error {
 	flags.StringVar(&options.HostStateDir, "host-state-dir", "", "host Drive9 CSI state directory")
 	flags.StringVar(&options.Drive9Source, "drive9-source", "", "Drive9 source binary")
 	flags.StringVar(&options.LauncherSource, "launcher-source", "", "Drive9 CSI launcher source binary")
+	flags.StringVar(&options.FusermountSource, "fusermount-source", "", "fusermount3 source binary")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -76,10 +84,11 @@ func runInstallHostBinariesCommand(args []string, stdout io.Writer) error {
 		stdout = io.Discard
 	}
 	_, err = fmt.Fprintf(stdout,
-		"drive9_digest=%s\ndrive9_path=%s\nlauncher_path=%s\n",
+		"drive9_digest=%s\ndrive9_path=%s\nlauncher_path=%s\nfusermount_path=%s\n",
 		result.Digest,
 		result.Drive9Path,
 		result.LauncherPath,
+		result.FusermountPath,
 	)
 	return err
 }
@@ -118,6 +127,10 @@ func installHostBinariesWithFault(options installHostBinariesOptions, fault inst
 	if err != nil {
 		return installHostBinariesResult{}, fmt.Errorf("validate launcher source: %w", err)
 	}
+	fusermountBody, _, err := readValidatedLinuxELF(options.FusermountSource, options.TargetArch, false)
+	if err != nil {
+		return installHostBinariesResult{}, fmt.Errorf("validate fusermount source: %w", err)
+	}
 
 	drive9Name := "drive9-" + drive9Digest
 	drive9Path := filepath.Join(binDir, drive9Name)
@@ -129,6 +142,10 @@ func installHostBinariesWithFault(options installHostBinariesOptions, fault inst
 	if err := replaceLauncher(dir, launcherPath, launcherBody, fault); err != nil {
 		return installHostBinariesResult{}, err
 	}
+	fusermountPath := filepath.Join(binDir, "fusermount3")
+	if err := replaceFusermount(dir, fusermountPath, fusermountBody, fault); err != nil {
+		return installHostBinariesResult{}, err
+	}
 
 	desiredPath := filepath.Join(binDir, "drive9")
 	if err := replaceDesiredSymlink(dir, desiredPath, drive9Name, fault); err != nil {
@@ -136,9 +153,10 @@ func installHostBinariesWithFault(options installHostBinariesOptions, fault inst
 	}
 
 	return installHostBinariesResult{
-		Digest:       drive9Digest,
-		Drive9Path:   drive9Path,
-		LauncherPath: launcherPath,
+		Digest:         drive9Digest,
+		Drive9Path:     drive9Path,
+		LauncherPath:   launcherPath,
+		FusermountPath: fusermountPath,
 	}, nil
 }
 
@@ -150,6 +168,7 @@ func validateInstallHostBinariesOptions(options installHostBinariesOptions) erro
 		{name: "host-state-dir", path: options.HostStateDir},
 		{name: "drive9-source", path: options.Drive9Source},
 		{name: "launcher-source", path: options.LauncherSource},
+		{name: "fusermount-source", path: options.FusermountSource},
 	}
 	for _, value := range paths {
 		if strings.TrimSpace(value.path) == "" {
@@ -197,6 +216,10 @@ func ensureInstallerBinDir(path string) error {
 }
 
 func readValidatedELF(path string, targetArch string) ([]byte, string, error) {
+	return readValidatedLinuxELF(path, targetArch, true)
+}
+
+func readValidatedLinuxELF(path string, targetArch string, requireStatic bool) ([]byte, string, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, "", err
@@ -214,14 +237,14 @@ func readValidatedELF(path string, targetArch string) ([]byte, string, error) {
 	if int64(len(body)) != info.Size() {
 		return nil, "", errors.New("source changed while being read")
 	}
-	if err := validateStaticLinuxELF(body, targetArch); err != nil {
+	if err := validateLinuxELF(body, targetArch, requireStatic); err != nil {
 		return nil, "", err
 	}
 	sum := sha256.Sum256(body)
 	return body, hex.EncodeToString(sum[:]), nil
 }
 
-func validateStaticLinuxELF(body []byte, targetArch string) error {
+func validateLinuxELF(body []byte, targetArch string, requireStatic bool) error {
 	file, err := elf.NewFile(bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("parse ELF: %w", err)
@@ -247,7 +270,7 @@ func validateStaticLinuxELF(body []byte, targetArch string) error {
 		return fmt.Errorf("ELF machine %s does not match %s", file.Machine, targetArch)
 	}
 	for _, program := range file.Progs {
-		if program.Type == elf.PT_INTERP {
+		if requireStatic && program.Type == elf.PT_INTERP {
 			return errors.New("ELF contains PT_INTERP and is dynamically linked")
 		}
 	}
@@ -331,31 +354,66 @@ type regularFileSnapshot struct {
 }
 
 func replaceLauncher(dir *os.File, path string, body []byte, fault installerFault) error {
+	return replaceRegularBinary(dir, path, body, "launcher", regularBinaryInstallerSteps{
+		temp:     installerStepLauncherTemp,
+		write:    installerStepLauncherWrite,
+		fileSync: installerStepLauncherFileSync,
+		rename:   installerStepLauncherRename,
+		dirSync:  installerStepLauncherDirSync,
+	}, fault)
+}
+
+func replaceFusermount(dir *os.File, path string, body []byte, fault installerFault) error {
+	return replaceRegularBinary(dir, path, body, "fusermount", regularBinaryInstallerSteps{
+		temp:     installerStepFusermountTemp,
+		write:    installerStepFusermountWrite,
+		fileSync: installerStepFusermountFileSync,
+		rename:   installerStepFusermountRename,
+		dirSync:  installerStepFusermountDirSync,
+	}, fault)
+}
+
+type regularBinaryInstallerSteps struct {
+	temp     installerStep
+	write    installerStep
+	fileSync installerStep
+	rename   installerStep
+	dirSync  installerStep
+}
+
+func replaceRegularBinary(
+	dir *os.File,
+	path string,
+	body []byte,
+	description string,
+	steps regularBinaryInstallerSteps,
+	fault installerFault,
+) error {
 	previous, err := snapshotRegularDestination(path)
 	if err != nil {
-		return fmt.Errorf("inspect launcher destination: %w", err)
+		return fmt.Errorf("inspect %s destination: %w", description, err)
 	}
 	tempPath, err := writeInstallerTemp(
 		filepath.Dir(path),
 		filepath.Base(path),
 		body,
-		installerStepLauncherTemp,
-		installerStepLauncherWrite,
-		installerStepLauncherFileSync,
+		steps.temp,
+		steps.write,
+		steps.fileSync,
 		fault,
 	)
 	if err != nil {
-		return fmt.Errorf("prepare launcher: %w", err)
+		return fmt.Errorf("prepare %s: %w", description, err)
 	}
 	defer func() { _ = os.Remove(tempPath) }()
-	if err := runInstallerStep(fault, installerStepLauncherRename, func() error {
+	if err := runInstallerStep(fault, steps.rename, func() error {
 		return os.Rename(tempPath, path)
 	}); err != nil {
-		return fmt.Errorf("publish launcher: %w", err)
+		return fmt.Errorf("publish %s: %w", description, err)
 	}
-	if err := runInstallerStep(fault, installerStepLauncherDirSync, dir.Sync); err != nil {
-		rollbackErr := restoreRegularDestination(path, previous, dir)
-		return errors.Join(fmt.Errorf("sync launcher publication: %w", err), rollbackErr)
+	if err := runInstallerStep(fault, steps.dirSync, dir.Sync); err != nil {
+		rollbackErr := restoreRegularDestination(path, previous, description, dir)
+		return errors.Join(fmt.Errorf("sync %s publication: %w", description, err), rollbackErr)
 	}
 	return nil
 }
@@ -381,7 +439,7 @@ func snapshotRegularDestination(path string) (regularFileSnapshot, error) {
 	return regularFileSnapshot{exists: true, body: body, mode: info.Mode().Perm()}, nil
 }
 
-func restoreRegularDestination(path string, previous regularFileSnapshot, dir *os.File) error {
+func restoreRegularDestination(path string, previous regularFileSnapshot, description string, dir *os.File) error {
 	if !previous.exists {
 		return removeAndSync(path, dir)
 	}
@@ -395,17 +453,17 @@ func restoreRegularDestination(path string, previous regularFileSnapshot, dir *o
 		nil,
 	)
 	if err != nil {
-		return fmt.Errorf("prepare launcher rollback: %w", err)
+		return fmt.Errorf("prepare %s rollback: %w", description, err)
 	}
 	defer func() { _ = os.Remove(temp) }()
 	if err := os.Chmod(temp, previous.mode); err != nil {
-		return fmt.Errorf("restore launcher mode: %w", err)
+		return fmt.Errorf("restore %s mode: %w", description, err)
 	}
 	if err := os.Rename(temp, path); err != nil {
-		return fmt.Errorf("restore launcher: %w", err)
+		return fmt.Errorf("restore %s: %w", description, err)
 	}
 	if err := dir.Sync(); err != nil {
-		return fmt.Errorf("sync launcher rollback: %w", err)
+		return fmt.Errorf("sync %s rollback: %w", description, err)
 	}
 	return nil
 }

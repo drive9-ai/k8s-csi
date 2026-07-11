@@ -391,13 +391,12 @@ func (r startingReconciler) resumeStarting(
 	if err := validateStartingCredentials(state, credentials); err != nil {
 		return startingReconcilePreserved, err
 	}
-	envBody := encodeNULTerminated([]string{
+	environment := []string{
 		"DRIVE9_SERVER=" + credentials.Server,
 		"DRIVE9_API_KEY=" + credentials.APIKey,
-		"TMPDIR=" + hostRuntimeDir,
-		"XDG_RUNTIME_DIR=" + hostRuntimeDir,
-		"PATH=/usr/sbin:/usr/bin:/sbin:/bin",
-	})
+	}
+	environment = append(environment, hostMountRuntimeEnvironment()...)
+	envBody := encodeNULTerminated(environment)
 	argsBody := encodeNULTerminated(append([]string{state.BinaryPath}, state.MountArgs...))
 	if err := publishStartupFile(r.runtime, state.EnvPath, envBody); err != nil {
 		return startingReconcilePreserved, fmt.Errorf("resume environment file: %w", err)

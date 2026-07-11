@@ -24,6 +24,7 @@ spec:
             - --host-state-dir=/var/lib/drive9-csi
             - --drive9-source=/usr/local/bin/drive9
             - --launcher-source=/usr/local/bin/drive9-csi-launcher
+            - --fusermount-source=/usr/bin/fusermount3
           volumeMounts:
             - name: state-dir
               mountPath: /var/lib/drive9-csi
