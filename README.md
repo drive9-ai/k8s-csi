@@ -74,40 +74,39 @@ the volume prefix, for example `/k8s/pvc`, and the metadata index path
 
 ## Install
 
-The default manifests use the public customer image:
+The checked-in Kubernetes manifests are a fail-closed base. Their CSI image is
+`registry.invalid/drive9-csi:unpublished`, so applying the base cannot silently
+run an older, incompatible driver. The publish workflow emits a
+`kubernetes-manifests-<trace-tag>` artifact only after the external N/N-1 gate
+and multi-architecture image build pass. Its `overlays/release` directory pins
+the published image by digest.
 
-```text
-ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2
-```
-
-Release images are also published with a traceable tag:
+Release images also have a traceable tag:
 
 ```text
 ghcr.io/drive9-ai/drive9-csi:drive9-<drive9-short-sha>-csi-<csi-short-sha>
 ```
 
-For example, the current default image was built from Drive9 CLI commit
-`aff1023...` and CSI commit `ef5fab2...`:
-
-```text
-ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2
-```
-
 The publish workflow does not publish `:latest` or `0.1.0`. Use a traceable tag
 or a digest.
 
-To build and publish your own image instead:
+To build a local image:
 
 ```sh
-make image IMAGE=ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2
-docker push ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2
+make image IMAGE=ghcr.io/drive9-ai/drive9-csi:local
 ```
 
-Install the CSI driver:
+Install that preloaded local image with the local overlay:
 
 ```sh
-kubectl apply -f deploy/kubernetes/namespace.yaml
-kubectl apply -k deploy/kubernetes
+kubectl apply -k deploy/kubernetes/overlays/local
+```
+
+For a published release, extract its workflow artifact and apply the release
+overlay instead:
+
+```sh
+kubectl apply -k drive9-csi-kubernetes/overlays/release
 ```
 
 Create a Drive9 Secret in the workload namespace before creating each PVC:
@@ -425,7 +424,7 @@ API key:
 ```sh
 export DRIVE9_SERVER=https://api.drive9.ai
 export DRIVE9_API_KEY=drive9_api_key_redacted
-export DRIVE9_CSI_IMAGE=ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2
+export DRIVE9_CSI_IMAGE='ghcr.io/drive9-ai/drive9-csi@sha256:<released-manifest-digest>'
 export DRIVE9_CSI_E2E_CONFIRM=1
 hack/e2e-k8s.sh
 ```
@@ -565,7 +564,6 @@ token. After the first successful publish, open:
 https://github.com/orgs/drive9-ai/packages/container/package/drive9-csi
 ```
 
-Then use package settings to change the package visibility to public. The image
-is anonymously pullable only after `docker manifest inspect
-ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2` works without
-`docker login`.
+Then use package settings to change the package visibility to public. Verify
+anonymous access against the published trace tag or digest before distributing
+the release manifests.

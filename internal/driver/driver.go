@@ -42,6 +42,7 @@ type Config struct {
 	StateDir          string
 	Drive9Binary      string
 	RecoverNodeMounts string
+	ServiceMode       string
 }
 
 type Driver struct {
@@ -52,6 +53,11 @@ type Driver struct {
 	cfg      Config
 	k8s      kubernetes.Interface
 	volumeMu sync.Map // map[volumeID]*sync.Mutex — per-volume serialization
+
+	nodeRuntime      hostRuntime
+	nodeMountOps     nodeMountOperations
+	nodeCapabilities nodeCapabilities
+	nodePreflightSet bool
 }
 
 // lockVolume serializes Node RPCs for the same volumeID.  The returned
@@ -65,10 +71,14 @@ func (d *Driver) lockVolume(volumeID string) func() {
 
 func Run(cfg Config, k8sClient kubernetes.Interface) error {
 	cfg.RecoverNodeMounts = normalizeNodeRecoveryMode(cfg.RecoverNodeMounts)
+	serviceMode, err := resolveDriverServiceMode(cfg.ServiceMode, cfg.RecoverNodeMounts)
+	if err != nil {
+		return err
+	}
 	if strings.TrimSpace(cfg.DriverName) == "" {
 		return errors.New("driver name is required")
 	}
-	if strings.TrimSpace(cfg.NodeID) == "" {
+	if serviceMode == driverServiceNode && strings.TrimSpace(cfg.NodeID) == "" {
 		return errors.New("node id is required")
 	}
 	if strings.TrimSpace(cfg.StateDir) == "" {
@@ -87,38 +97,77 @@ func Run(cfg Config, k8sClient kubernetes.Interface) error {
 		return fmt.Errorf("create state dir: %w", err)
 	}
 
+	runtime := newHostRuntime()
+	preparation, err := prepareDriverService(context.Background(), serviceMode, runtime)
+	if err != nil {
+		return err
+	}
+
 	listener, cleanup, err := listenCSIEndpoint(cfg.Endpoint)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
 
-	d := &Driver{cfg: cfg, k8s: k8sClient}
+	d := &Driver{
+		cfg:              cfg,
+		k8s:              k8sClient,
+		nodeRuntime:      runtime,
+		nodeCapabilities: preparation.Capabilities,
+		nodePreflightSet: preparation.Node,
+	}
 	server := grpc.NewServer()
 	csi.RegisterIdentityServer(server, d)
-	csi.RegisterControllerServer(server, d)
-	csi.RegisterNodeServer(server, d)
-
-	recoverNodeMounts, err := d.shouldRecoverNodeMounts()
-	if err != nil {
-		return err
+	if serviceMode == driverServiceController {
+		csi.RegisterControllerServer(server, d)
+	} else {
+		csi.RegisterNodeServer(server, d)
 	}
+
+	recoverNodeMounts := false
 	recoveryCtx, cancelRecovery := context.WithCancel(context.Background())
 	defer cancelRecovery()
-	if recoverNodeMounts {
-		go d.recoverNodeMounts(recoveryCtx)
+	if serviceMode == driverServiceNode {
+		for _, name := range allNodeCapabilityNames() {
+			capability := preparation.Capabilities.Status(name)
+			if !capability.Available {
+				log.Printf("drive9-csi: Node capability %s unavailable: %s", name, capability.Reason)
+			}
+		}
+		recoverNodeMounts, err = d.shouldRecoverNodeMounts()
+		if err != nil {
+			return err
+		}
+		if recoverNodeMounts {
+			go d.recoverNodeMounts(recoveryCtx)
+		}
 	}
 
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(signals)
 
+	log.Printf("drive9-csi: serving %s on %s mode=%s node=%s", cfg.DriverName, cfg.Endpoint, serviceMode, cfg.NodeID)
+	return runServerUntilSignal(server, listener, signals, cancelRecovery, 10*time.Second)
+}
+
+type grpcLifecycleServer interface {
+	Serve(net.Listener) error
+	GracefulStop()
+	Stop()
+}
+
+func runServerUntilSignal(
+	server grpcLifecycleServer,
+	listener net.Listener,
+	signals <-chan os.Signal,
+	cancelRecovery func(),
+	shutdownTimeout time.Duration,
+) error {
 	serveErr := make(chan error, 1)
 	go func() {
 		serveErr <- server.Serve(listener)
 	}()
-
-	log.Printf("drive9-csi: serving %s on %s node=%s", cfg.DriverName, cfg.Endpoint, cfg.NodeID)
 	select {
 	case err := <-serveErr:
 		if errors.Is(err, grpc.ErrServerStopped) {
@@ -128,12 +177,7 @@ func Run(cfg Config, k8sClient kubernetes.Interface) error {
 	case sig := <-signals:
 		log.Printf("drive9-csi: received %s, shutting down", sig)
 		cancelRecovery()
-		stopGRPCServer(server, 10*time.Second)
-		if recoverNodeMounts {
-			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-			d.shutdownNodeMounts(ctx)
-			cancel()
-		}
+		stopGRPCServer(server, shutdownTimeout)
 		if err := <-serveErr; err != nil && !errors.Is(err, grpc.ErrServerStopped) {
 			return err
 		}
@@ -141,7 +185,7 @@ func Run(cfg Config, k8sClient kubernetes.Interface) error {
 	}
 }
 
-func stopGRPCServer(server *grpc.Server, timeout time.Duration) {
+func stopGRPCServer(server grpcLifecycleServer, timeout time.Duration) {
 	done := make(chan struct{})
 	go func() {
 		server.GracefulStop()
@@ -606,54 +650,202 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	if err != nil {
 		return nil, err
 	}
-	// Resolve credentials from volumeAttributes Secret reference.
+
+	repository := d.stateRepository()
+	state, stateErr := repository.Read(volumeID)
+	stateExists := stateErr == nil
+	if stateErr != nil && !errors.Is(stateErr, os.ErrNotExist) {
+		return nil, status.Errorf(codes.FailedPrecondition, "read durable mount state: %v", stateErr)
+	}
+	if stateExists && !mountStateMatches(state, volumeID, remoteRoot, stagingTarget) {
+		return nil, status.Error(codes.FailedPrecondition, "durable mount state belongs to a different volume or staging target")
+	}
+
+	activeNeedsRecovery := false
+	var activeObservation activeRecoveryObservation
+	startingNeedsCredentials := false
+	var noStateObservation noStateMountObservation
+	noStateObserved := false
+	if stateExists {
+		switch state.Phase {
+		case mountStatePhaseActive:
+			if err := d.requireNodeCapabilities(nodeOperationHealthyStage); err != nil {
+				return nil, err
+			}
+			if err := d.verifyActiveMountLocally(ctx, state, volumeID, remoteRoot, stagingTarget); err == nil {
+				return &csi.NodeStageVolumeResponse{}, nil
+			}
+			activeObservation, err = d.observeActiveRecovery(ctx, state)
+			if err != nil {
+				return nil, status.Errorf(codes.FailedPrecondition, "classify active mount recovery: %v", err)
+			}
+			actions, decisionErr := decideActiveRecovery(activeObservation)
+			if decisionErr != nil {
+				return nil, status.Errorf(codes.FailedPrecondition, "classify active mount recovery: %v", decisionErr)
+			}
+			if len(actions) == 1 && actions[0] == activeRecoverySkip {
+				return &csi.NodeStageVolumeResponse{}, nil
+			}
+			activeNeedsRecovery = true
+		case mountStatePhaseStarting:
+			if err := d.requireNodeCapabilities(nodeOperationHealthyStage); err != nil {
+				return nil, err
+			}
+			reconciler := newStartingReconciler(d.hostRuntime(), repository)
+			result, reconcileErr := reconciler.Reconcile(ctx, state, nil, false)
+			if errors.Is(reconcileErr, errStartingCleanupRequired) {
+				if err := d.requireNodeCapabilities(nodeOperationUnstage); err != nil {
+					return nil, err
+				}
+				result, reconcileErr = reconciler.Reconcile(ctx, state, nil, true)
+			}
+			switch result {
+			case startingReconcilePromoted:
+				return &csi.NodeStageVolumeResponse{}, nil
+			case startingReconcileDeleted:
+				stateExists = false
+			default:
+				if errors.Is(reconcileErr, errStartingCredentialsRequired) {
+					startingNeedsCredentials = true
+				} else if reconcileErr != nil {
+					return nil, status.Errorf(codes.FailedPrecondition, "reconcile starting mount: %v", reconcileErr)
+				}
+			}
+		case mountStatePhaseStopping:
+			if err := d.requireNodeCapabilities(nodeOperationUnstage); err != nil {
+				return nil, err
+			}
+			result, reconcileErr := newMountStopper(d.hostRuntime(), repository).Reconcile(ctx, state)
+			if reconcileErr != nil || result != mountStopCleaned {
+				return nil, status.Errorf(codes.FailedPrecondition, "finish stopping mount: %v", reconcileErr)
+			}
+			stateExists = false
+		default:
+			return nil, status.Errorf(codes.FailedPrecondition, "unsupported durable mount phase %q", state.Phase)
+		}
+	}
+	if !stateExists {
+		if err := d.requireNodeCapabilities(nodeOperationCreate); err != nil {
+			return nil, err
+		}
+		noStateObservation, err = observeNoStateMount(ctx, d.hostRuntime(), volumeID, stagingTarget)
+		if err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "inspect runtime without durable mount state: %v", err)
+		}
+		noStateObserved = true
+	}
+
+	if err := d.requireNodeCapabilities(nodeOperationCreate); err != nil {
+		return nil, err
+	}
 	creds, err := d.resolveNodeStageCredentials(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-
-	if mounted, err := isMountPoint(stagingTarget); err != nil {
-		return nil, status.Errorf(codes.Internal, "check staging mount: %v", err)
-	} else if mounted {
-		state, err := d.validatedStagedMountState(volumeID, remoteRoot, stagingTarget)
+	remoteValidated := false
+	if activeNeedsRecovery {
+		pvAttributes, err := resolveVolumeContextFromPV(ctx, d.k8s, d.cfg.DriverName, volumeID)
 		if err != nil {
-			return nil, err
+			return nil, status.Errorf(codes.FailedPrecondition, "resolve PV for active recovery: %v", err)
 		}
-		if pidMatchesState(state) {
-			return &csi.NodeStageVolumeResponse{}, nil
+		pvRemoteRoot, err := normalizeRemotePath(pvAttributes["remoteRoot"])
+		if err != nil || pvRemoteRoot != remoteRoot {
+			return nil, status.Error(codes.FailedPrecondition, "PV identity changed before active recovery")
 		}
-		if !pathUnderRoot(stagingTarget, defaultKubeletRoot) {
-			return nil, status.Errorf(codes.FailedPrecondition,
-				"staging target has stale Drive9 state but is outside recovery root %s", defaultKubeletRoot)
-		}
-		if err := d.recoverStagedMount(ctx, state, req.GetVolumeContext(), creds); err != nil {
-			if _, ok := status.FromError(err); ok {
+		client := newDrive9Client(creds)
+		if workspaceRootVolume {
+			if err := ensureRemotePathExists(ctx, client, remoteRoot); err != nil {
 				return nil, err
 			}
-			return nil, status.Errorf(codes.Internal, "recover stale staging mount: %v", err)
-		}
-		return &csi.NodeStageVolumeResponse{}, nil
-	}
-	client := newDrive9Client(creds)
-	if workspaceRootVolume {
-		if err := ensureRemotePathExists(ctx, client, remoteRoot); err != nil {
+		} else if err := d.validateRemoteVolumeMarker(ctx, client, volumeID, remoteRoot); err != nil {
 			return nil, err
 		}
-	} else {
-		if err := d.validateRemoteVolumeMarker(ctx, client, volumeID, remoteRoot); err != nil {
+		recoveryRequest := drive9MountRequest{
+			VolumeID:      volumeID,
+			Server:        creds.Server,
+			APIKey:        creds.APIKey,
+			RemoteRoot:    remoteRoot,
+			StagingTarget: stagingTarget,
+			Profile:       strings.TrimSpace(req.GetVolumeContext()["profile"]),
+			AttrTTL:       ttls.AttrTTL,
+			EntryTTL:      ttls.EntryTTL,
+			DirTTL:        ttls.DirTTL,
+			PerfDir:       d.mountPerfDir(volumeID, perf),
+			Tuning:        tuning,
+		}
+		desiredBinary, err := validateDesiredDrive9Content(d.hostRuntime())
+		if err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "snapshot desired Drive9 binary: %v", err)
+		}
+		executor := &driverActiveRecoveryExecutor{
+			driver:      d,
+			ctx:         ctx,
+			repository:  repository,
+			credentials: mountLaunchCredentials{Server: creds.Server, APIKey: creds.APIKey},
+			desiredArgs: d.drive9MountArgs(recoveryRequest, d.mountCacheDir(volumeID)),
+		}
+		result, recoveryErr := coordinateActiveRecovery(state, desiredBinary, activeObservation, executor)
+		if recoveryErr != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "active mount recovery degraded: %v", recoveryErr)
+		}
+		if result == activeRecoveryHealthy || result == activeRecoveryRecovered {
+			d.repairPublishTargets(volumeID, stagingTarget)
+			return &csi.NodeStageVolumeResponse{}, nil
+		}
+		return nil, status.Error(codes.FailedPrecondition, "active mount recovery is degraded")
+	}
+	if startingNeedsCredentials && stateExists {
+		if err := d.validateNodeStageRemote(ctx, creds, workspaceRootVolume, volumeID, remoteRoot); err != nil {
 			return nil, err
 		}
+		remoteValidated = true
+		result, reconcileErr := newStartingReconciler(d.hostRuntime(), repository).Reconcile(
+			ctx,
+			state,
+			&mountLaunchCredentials{Server: creds.Server, APIKey: creds.APIKey},
+			true,
+		)
+		switch result {
+		case startingReconcilePromoted:
+			return &csi.NodeStageVolumeResponse{}, nil
+		case startingReconcileDeleted:
+			stateExists = false
+		default:
+			if reconcileErr != nil {
+				return nil, status.Errorf(codes.FailedPrecondition, "resume starting mount: %v", reconcileErr)
+			}
+		}
 	}
-	if err := d.prepareStageStateForMount(volumeID, stagingTarget); err != nil {
-		return nil, err
+	if stateExists {
+		return nil, status.Error(codes.FailedPrecondition, "durable mount transaction remains incomplete")
 	}
-	_ = os.Remove(d.mountStatePath(volumeID))
+	if !noStateObserved {
+		noStateObservation, err = observeNoStateMount(ctx, d.hostRuntime(), volumeID, stagingTarget)
+		if err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "inspect runtime after mount-state cleanup: %v", err)
+		}
+		noStateObserved = true
+	}
 
+	if !remoteValidated {
+		if err := d.validateNodeStageRemote(ctx, creds, workspaceRootVolume, volumeID, remoteRoot); err != nil {
+			return nil, err
+		}
+	}
+	if err := reconcileNoStateMount(
+		ctx,
+		d.hostRuntime(),
+		volumeID,
+		stagingTarget,
+		noStateObservation,
+	); err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "reconcile runtime without durable mount state: %v", err)
+	}
 	if err := os.MkdirAll(stagingTarget, 0o755); err != nil {
 		return nil, status.Errorf(codes.Internal, "create staging target: %v", err)
 	}
 	profile := strings.TrimSpace(req.GetVolumeContext()["profile"])
-	if err := d.startDrive9Mount(ctx, drive9MountRequest{
+	mountRequest := drive9MountRequest{
 		VolumeID:      volumeID,
 		Server:        creds.Server,
 		APIKey:        creds.APIKey,
@@ -665,10 +857,37 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		DirTTL:        ttls.DirTTL,
 		PerfDir:       d.mountPerfDir(volumeID, perf),
 		Tuning:        tuning,
-	}); err != nil {
-		return nil, err
+	}
+	for _, directory := range []string{
+		d.mountCacheDir(volumeID),
+		d.drive9LocalRoot(volumeID),
+		mountRequest.PerfDir,
+	} {
+		if directory == "" || (directory == d.drive9LocalRoot(volumeID) && profile != "coding-agent") {
+			continue
+		}
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			return nil, status.Errorf(codes.Internal, "create mount runtime directory: %v", err)
+		}
+	}
+	if _, err := d.launchMountV2(ctx, mountRequest); err != nil {
+		return nil, status.Errorf(codes.Internal, "launch Drive9 mount transaction: %v", err)
 	}
 	return &csi.NodeStageVolumeResponse{}, nil
+}
+
+func (d *Driver) validateNodeStageRemote(
+	ctx context.Context,
+	creds drive9Credentials,
+	workspaceRootVolume bool,
+	volumeID string,
+	remoteRoot string,
+) error {
+	client := newDrive9Client(creds)
+	if workspaceRootVolume {
+		return ensureRemotePathExists(ctx, client, remoteRoot)
+	}
+	return d.validateRemoteVolumeMarker(ctx, client, volumeID, remoteRoot)
 }
 
 func (d *Driver) mountPerfDir(volumeID string, perf mountPerf) string {
@@ -700,30 +919,46 @@ func (d *Driver) NodeUnstageVolume(ctx context.Context, req *csi.NodeUnstageVolu
 	if len(active) > 0 {
 		return nil, status.Errorf(codes.FailedPrecondition, "volume has %d active publish target(s)", len(active))
 	}
-
-	stageStatus, err := d.stageStateStatus(volumeID, stagingTarget)
-	if err != nil {
-		return nil, err
-	}
-	mounted, err := isMountPoint(stagingTarget)
+	mounted, err := d.hostRuntime().IsMountPoint(stagingTarget)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "check staging mount: %v", err)
 	}
-	if mounted && stageStatus == stateMismatched {
+	repository := d.stateRepository()
+	state, err := repository.Read(volumeID)
+	if errors.Is(err, os.ErrNotExist) {
+		if mounted {
+			return nil, status.Error(codes.FailedPrecondition, "staging target is mounted without durable Drive9 state")
+		}
+		return &csi.NodeUnstageVolumeResponse{}, nil
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "read durable mount state: %v", err)
+	}
+	if !mountStateMatches(state, volumeID, "", stagingTarget) {
 		return nil, status.Error(codes.FailedPrecondition, "stage target state belongs to a different Drive9 volume or path")
 	}
-	if mounted {
-		if err := unmountPath(stagingTarget); err != nil {
-			return nil, status.Errorf(codes.Internal, "unstage unmount: %v", err)
-		}
+	if err := d.requireNodeCapabilities(nodeOperationUnstage); err != nil {
+		return nil, err
 	}
-	if stageStatus == stateMatching {
-		if err := d.stopRecordedMount(ctx, volumeID, stagingTarget); err != nil {
-			return nil, status.Errorf(codes.Internal, "wait for drive9 mount exit: %v", err)
+	stopper := newMountStopper(d.hostRuntime(), repository)
+	var result mountStopResult
+	switch state.Phase {
+	case mountStatePhaseActive, mountStatePhaseStarting:
+		intent := mountStopIntentUnstage
+		if state.Phase == mountStatePhaseStarting {
+			intent = mountStopIntentCancelStart
 		}
-		if err := os.Remove(d.mountStatePath(volumeID)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, status.Errorf(codes.Internal, "remove stage state: %v", err)
-		}
+		result, err = stopper.Stop(ctx, mountStopRequest{
+			State:  state,
+			Intent: intent,
+		})
+	case mountStatePhaseStopping:
+		result, err = stopper.Reconcile(ctx, state)
+	default:
+		err = fmt.Errorf("unsupported mount phase %q", state.Phase)
+	}
+	if err != nil || result != mountStopCleaned {
+		return nil, status.Errorf(codes.FailedPrecondition, "complete unstage transaction: %v", err)
 	}
 	return &csi.NodeUnstageVolumeResponse{}, nil
 }
@@ -745,19 +980,21 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 	if !filepath.IsAbs(stagingTarget) || !filepath.IsAbs(target) {
 		return nil, status.Error(codes.InvalidArgument, "staging target path and target path must be absolute")
 	}
-	if mounted, err := isMountPoint(stagingTarget); err != nil {
-		return nil, status.Errorf(codes.Internal, "check staging mount: %v", err)
-	} else if !mounted {
-		return nil, status.Error(codes.FailedPrecondition, "staging target is not mounted")
-	}
-	if err := d.validateStagedMount(volumeID, "", stagingTarget); err != nil {
+	if err := d.requireNodeCapabilities(nodeOperationPublish); err != nil {
 		return nil, err
+	}
+	state, err := d.readMountState(volumeID)
+	if err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "read active stage state: %v", err)
+	}
+	if err := d.verifyActiveMountLocally(ctx, state, volumeID, "", stagingTarget); err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "staging target is not locally healthy: %v", err)
 	}
 
 	requestedMode := req.GetVolumeCapability().GetAccessMode().GetMode()
 
 	// Idempotent: if target is already mounted, validate and return.
-	if mounted, err := isMountPoint(target); err != nil {
+	if mounted, err := d.hostRuntime().IsMountPoint(target); err != nil {
 		return nil, status.Errorf(codes.Internal, "check target mount: %v", err)
 	} else if mounted {
 		if err := d.validatePublishedMount(volumeID, stagingTarget, target, req.GetReadonly(), requestedMode.String()); err != nil {
@@ -790,7 +1027,7 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 		return nil, status.Errorf(codes.Internal, "write pending publish state: %v", err)
 	}
 
-	if err := bindMount(stagingTarget, target, req.GetReadonly()); err != nil {
+	if err := d.mountOperations().Bind(stagingTarget, target, req.GetReadonly()); err != nil {
 		// Bind failed — clean up pending state.
 		_ = os.Remove(d.publishStatePath(target))
 		return nil, status.Errorf(codes.Internal, "bind mount publish target: %v", err)
@@ -799,7 +1036,7 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 	// Promote to published.
 	pendingState.Status = publishStatusPublished
 	if err := d.writePublishState(pendingState); err != nil {
-		_ = unmountPath(target)
+		_ = d.mountOperations().Unmount(target)
 		_ = os.Remove(d.publishStatePath(target))
 		return nil, status.Errorf(codes.Internal, "write publish state: %v", err)
 	}
@@ -823,7 +1060,7 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 	if err != nil {
 		return nil, err
 	}
-	mounted, err := isMountPoint(target)
+	mounted, err := d.hostRuntime().IsMountPoint(target)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "check target mount: %v", err)
 	}
@@ -831,7 +1068,10 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 		return nil, status.Error(codes.FailedPrecondition, "publish target state belongs to a different Drive9 volume")
 	}
 	if mounted {
-		if err := unmountPath(target); err != nil {
+		if err := d.requireNodeCapabilities(nodeOperationUnpublish); err != nil {
+			return nil, err
+		}
+		if err := d.mountOperations().Unmount(target); err != nil {
 			return nil, status.Errorf(codes.Internal, "unpublish unmount: %v", err)
 		}
 	}
@@ -1138,30 +1378,6 @@ func isWorkspaceRootVolumeID(volumeID string) bool {
 	return err == nil
 }
 
-func (d *Driver) mountStatePath(volumeID string) string {
-	return filepath.Join(d.cfg.StateDir, safeFileName(volumeID)+".json")
-}
-
-func (d *Driver) writeMountState(state mountState) error {
-	body, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(d.mountStatePath(state.VolumeID), body, 0o600)
-}
-
-func (d *Driver) readMountState(volumeID string) (mountState, error) {
-	body, err := os.ReadFile(d.mountStatePath(volumeID))
-	if err != nil {
-		return mountState{}, err
-	}
-	var state mountState
-	if err := json.Unmarshal(body, &state); err != nil {
-		return mountState{}, err
-	}
-	return state, nil
-}
-
 func (d *Driver) publishStatePath(target string) string {
 	sum := sha256.Sum256([]byte(filepath.Clean(target)))
 	return filepath.Join(d.cfg.StateDir, "published-"+hex.EncodeToString(sum[:])[:32]+".json")
@@ -1304,15 +1520,6 @@ func (s *publishState) applyLegacyDefaults() {
 	if s.AccessMode == "" {
 		s.AccessMode = csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER.String()
 	}
-}
-
-type mountState struct {
-	PID           int    `json:"pid"`
-	PIDStartTime  string `json:"pidStartTime"`
-	VolumeID      string `json:"volumeID"`
-	RemoteRoot    string `json:"remoteRoot"`
-	StagingTarget string `json:"stagingTarget"`
-	StartedAt     string `json:"startedAt"`
 }
 
 type volumeMarker struct {

@@ -6,13 +6,28 @@ on:
       - main
     paths:
       - ".github/workflows/publish-image.yml"
+      - "build/**"
       - "Dockerfile"
       - "Makefile"
       - "cmd/**"
+      - "deploy/kubernetes/**"
       - "go.mod"
       - "go.sum"
       - "internal/**"
   workflow_dispatch:
+    inputs:
+      drive9_ref:
+        description: Full Drive9 source commit; when set, it must equal the locked current commit.
+        required: false
+        type: string
+      compatibility_result_commit:
+        description: Full mem9-ai/drive9 commit containing the externally produced compatibility result.
+        required: false
+        type: string
+      compatibility_result_sha256:
+        description: SHA-256 of the external compatibility result.
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -25,52 +40,112 @@ jobs:
   metadata:
     runs-on: ubuntu-24.04
     outputs:
-      drive9_version: ${{ steps.drive9_version.outputs.version }}
+      drive9_version: ${{ steps.lock.outputs.version }}
+      drive9_source_commit: ${{ steps.lock.outputs.source_commit }}
       tags: ${{ steps.image-tags.outputs.tags }}
       trace_tag: ${{ steps.image-tags.outputs.trace_tag }}
     steps:
-      - name: Show latest drive9 CLI version
-        id: drive9_version
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Read locked Drive9 release
+        id: lock
         shell: bash
+        env:
+          INPUT_DRIVE9_REF: ${{ inputs.drive9_ref }}
         run: |
           set -euo pipefail
-          TMP_DIR="$(mktemp -d)"
-          trap 'rm -rf "$TMP_DIR"' EXIT
-          curl -fsSL -o "$TMP_DIR/drive9" https://drive9.ai/releases/drive9-linux-amd64
-          chmod +x "$TMP_DIR/drive9"
-          "$TMP_DIR/drive9" --version | tee "$TMP_DIR/drive9-version.txt"
-          DRIVE9_VERSION="$(awk -F': *' '$1 == "version" {print $2; exit}' "$TMP_DIR/drive9-version.txt" | tr -d '[:space:]')"
-          if [ -z "$DRIVE9_VERSION" ]; then
-            echo "Failed to resolve drive9 CLI version" >&2
+          LOCK=build/drive9-cli.lock.json
+          DRIVE9_VERSION="$(jq -er '.current.version | select(test("^[0-9a-f]{7}$"))' "$LOCK")"
+          DRIVE9_SOURCE_COMMIT="$(jq -er '.current.sourceCommit | select(test("^[0-9a-f]{40}$"))' "$LOCK")"
+          if [ -n "${INPUT_DRIVE9_REF:-}" ] && [ "$INPUT_DRIVE9_REF" != "$DRIVE9_SOURCE_COMMIT" ]; then
+            echo "drive9_ref must exactly match locked commit $DRIVE9_SOURCE_COMMIT" >&2
             exit 1
           fi
-          echo "Resolved drive9 CLI version: ${DRIVE9_VERSION}"
-          echo "version=${DRIVE9_VERSION}" >> "$GITHUB_OUTPUT"
+          if [ "$DRIVE9_VERSION" != "${DRIVE9_SOURCE_COMMIT:0:7}" ]; then
+            echo "locked Drive9 version does not match its source commit" >&2
+            exit 1
+          fi
+          echo "version=$DRIVE9_VERSION" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$DRIVE9_SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
 
       - name: Resolve image tags
         id: image-tags
         shell: bash
         env:
-          DRIVE9_VERSION: ${{ steps.drive9_version.outputs.version }}
+          DRIVE9_VERSION: ${{ steps.lock.outputs.version }}
         run: |
           set -euo pipefail
-          SAFE_DRIVE9_VERSION="$(printf '%s' "$DRIVE9_VERSION" | tr -c 'A-Za-z0-9_.-' '-')"
-          # Trace tag: drive9-<drive9-cli-version>-csi-<csisha7>.
-          TRACE_TAG="drive9-${SAFE_DRIVE9_VERSION}-csi-${GITHUB_SHA:0:7}"
+          TRACE_TAG="drive9-${DRIVE9_VERSION}-csi-${GITHUB_SHA:0:7}"
           echo "trace_tag=${TRACE_TAG}" >> "$GITHUB_OUTPUT"
-
-          # Build the full tag list.
-          FULL_IMAGE="${IMAGE:-ghcr.io/drive9-ai/drive9-csi}"
-          TAGS="${FULL_IMAGE}:${TRACE_TAG}"
-          # Multiline output for build-push-action's `tags:` input.
           {
             echo 'tags<<EOF'
-            printf '%s\n' "$TAGS"
+            printf '%s:%s\n' "$IMAGE" "$TRACE_TAG"
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
+  compatibility:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Verify external exact-pair compatibility result
+        shell: bash
+        env:
+          COMPATIBILITY_RESULT_COMMIT: ${{ inputs.compatibility_result_commit || vars.DRIVE9_CSI_COMPATIBILITY_RESULT_COMMIT }}
+          COMPATIBILITY_RESULT_SHA256: ${{ inputs.compatibility_result_sha256 || vars.DRIVE9_CSI_COMPATIBILITY_RESULT_SHA256 }}
+        run: |
+          set -euo pipefail
+          LOCK=build/drive9-cli.lock.json
+          RESULT="${RUNNER_TEMP}/drive9-csi-compatibility.json"
+          if ! printf '%s' "${COMPATIBILITY_RESULT_COMMIT:-}" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "a full mem9-ai/drive9 compatibility producer commit is required" >&2
+            exit 1
+          fi
+          if ! printf '%s' "${COMPATIBILITY_RESULT_SHA256:-}" | grep -Eq '^[0-9a-f]{64}$'; then
+            echo "external compatibility result SHA-256 is required" >&2
+            exit 1
+          fi
+          RESULT_URL="https://raw.githubusercontent.com/mem9-ai/drive9/${COMPATIBILITY_RESULT_COMMIT}/release/drive9-csi-compatibility.json"
+          curl --proto '=https' --tlsv1.2 -fsSL -o "$RESULT" "$RESULT_URL"
+          printf '%s  %s\n' "$COMPATIBILITY_RESULT_SHA256" "$RESULT" | sha256sum -c -
+          if ! jq -e --arg producerCommit "$COMPATIBILITY_RESULT_COMMIT" '
+            .schemaVersion == 2 and
+            .status == "passed" and
+            .producer.repository == "mem9-ai/drive9" and
+            .producer.commit == $producerCommit
+          ' "$RESULT" >/dev/null; then
+            echo "external compatibility result is not a passed schema-v2 result" >&2
+            exit 1
+          fi
+          LOCKED_PAIR="$(jq -cS '
+            .compatibilityPlatform as $platform |
+            {
+              current: {
+                sourceCommit: .current.sourceCommit,
+                artifact: {
+                  kind: "raw-binary",
+                  platform: $platform,
+                  sha256: .current.artifacts[$platform].sha256
+                }
+              },
+              previous: {
+                sourceCommit: .previous.sourceCommit,
+                artifact: .previous.artifact
+              }
+            }
+          ' "$LOCK")"
+          RESULT_PAIR="$(jq -ecS '.pair' "$RESULT")"
+          if [ "$RESULT_PAIR" != "$LOCKED_PAIR" ]; then
+            echo "external compatibility result does not match the exact locked N/N-1 pair" >&2
+            exit 1
+          fi
+
   build:
-    needs: metadata
+    needs:
+      - metadata
+      - compatibility
     strategy:
       fail-fast: false
       matrix:
@@ -109,6 +184,7 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ needs.metadata.outputs.trace_tag }}
             ai.drive9.cli.version=${{ needs.metadata.outputs.drive9_version }}
+            ai.drive9.cli.source-commit=${{ needs.metadata.outputs.drive9_source_commit }}
 
       - name: Export digest
         shell: bash
@@ -135,9 +211,13 @@ jobs:
   merge:
     needs:
       - metadata
+      - compatibility
       - build
     runs-on: ubuntu-24.04
     steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -184,3 +264,42 @@ jobs:
 
           docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
           docker buildx imagetools inspect "${IMAGE}:${{ needs.metadata.outputs.trace_tag }}"
+
+      - name: Create digest-pinned Kubernetes manifests
+        shell: bash
+        env:
+          TRACE_TAG: ${{ needs.metadata.outputs.trace_tag }}
+        run: |
+          manifest_file="${RUNNER_TEMP}/drive9-csi-manifest.json"
+          if ! docker buildx imagetools inspect "${IMAGE}:${TRACE_TAG}" \
+            --format '{{json .}}' > "$manifest_file"; then
+            echo "Could not inspect the published image manifest" >&2
+            exit 1
+          fi
+          if ! image_digest="$(jq -er \
+            '.manifest.digest | select(test("^sha256:[0-9a-f]{64}$"))' \
+            "$manifest_file")"; then
+            echo "Published image did not resolve to an immutable digest" >&2
+            exit 1
+          fi
+
+          release_root="${RUNNER_TEMP}/drive9-csi-kubernetes"
+          release_overlay="${release_root}/overlays/release"
+          cp -R deploy/kubernetes "$release_root" || exit 1
+          mkdir -p "$release_overlay" || exit 1
+          {
+            printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1beta1'
+            printf '%s\n' 'kind: Kustomization'
+            printf '%s\n' 'resources:' '  - ../..'
+            printf '%s\n' 'images:'
+            printf '%s\n' '  - name: registry.invalid/drive9-csi'
+            printf '%s\n' '    newName: ghcr.io/drive9-ai/drive9-csi'
+            printf '    digest: %s\n' "$image_digest"
+          } > "${release_overlay}/kustomization.yaml" || exit 1
+
+      - name: Upload digest-pinned Kubernetes manifests
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubernetes-manifests-${{ needs.metadata.outputs.trace_tag }}
+          path: ${{ runner.temp }}/drive9-csi-kubernetes
+          if-no-files-found: error

@@ -26,24 +26,15 @@ spec:
             - name: socket-dir
               mountPath: /csi
         - name: drive9-csi
-          image: ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2
+          image: registry.invalid/drive9-csi:unpublished
           imagePullPolicy: IfNotPresent
           args:
             - --endpoint=unix:///csi/csi.sock
-            - --node-id=$(NODE_NAME)
+            - --service-mode=controller
             - --recover-node-mounts=disabled
-          env:
-            - name: NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
-            - name: state-dir
-              mountPath: /var/lib/drive9-csi
       volumes:
         - name: socket-dir
-          emptyDir: {}
-        - name: state-dir
           emptyDir: {}

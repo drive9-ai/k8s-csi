@@ -68,7 +68,7 @@ copy_manifest() {
 	local target="$2"
 
 	awk -v image="$DRIVE9_CSI_IMAGE" -v namespace="$driver_namespace" '
-		$0 ~ /^[[:space:]]*image: ghcr.io\/drive9-ai\/drive9-csi:/ {
+		$0 ~ /^[[:space:]]*image: registry\.invalid\/drive9-csi:unpublished[[:space:]]*$/ {
 			sub(/image: .*/, "image: " image)
 		}
 		$0 == "  namespace: drive9-csi" {
