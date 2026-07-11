@@ -380,6 +380,8 @@ func hostInnerCommand(command hostCommand) []string {
 					payload := append([]string(nil), inner[j+1:]...)
 					if len(payload) > 0 && payload[0] == "/usr/bin/systemctl" {
 						payload[0] = "systemctl"
+					} else if len(payload) > 0 && payload[0] == "/usr/bin/systemd-run" {
+						payload[0] = "systemd-run"
 					}
 					return payload
 				}
