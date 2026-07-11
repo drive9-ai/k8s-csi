@@ -76,10 +76,11 @@ the volume prefix, for example `/k8s/pvc`, and the metadata index path
 
 The checked-in Kubernetes manifests are a fail-closed base. Their CSI image is
 `registry.invalid/drive9-csi:unpublished`, so applying the base cannot silently
-run an older, incompatible driver. The publish workflow emits a
-`kubernetes-manifests-<trace-tag>` artifact only after the external N/N-1 gate
-and multi-architecture image build pass. Its `overlays/release` directory pins
-the published image by digest.
+run an older, incompatible driver. The publish workflow only builds and pushes
+the image, then reports its trace tag, manifest-list digest, and immutable
+reference in the workflow summary. It does not generate deployment manifests.
+Deployment and validation must inject that immutable reference through a local,
+environment-specific overlay.
 
 Release images also have a traceable tag:
 
@@ -102,12 +103,9 @@ Install that preloaded local image with the local overlay:
 kubectl apply -k deploy/overlays/local
 ```
 
-For a published release, extract its workflow artifact and apply the release
-overlay instead:
-
-```sh
-kubectl apply -k drive9-csi-kubernetes/overlays/release
-```
+For a published image, read the immutable reference from the workflow summary
+and use it in the local validation or deployment overlay. Do not apply the
+fail-closed base directly.
 
 Create a Drive9 Secret in the workload namespace before creating each PVC:
 

@@ -10,7 +10,6 @@ on:
       - "Dockerfile"
       - "Makefile"
       - "cmd/**"
-      - "deploy/kubernetes/**"
       - "go.mod"
       - "go.sum"
       - "internal/**"
@@ -220,10 +219,11 @@ jobs:
       - compatibility
       - build
     runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.image.outputs.tag }}
+      digest: ${{ steps.image.outputs.digest }}
+      reference: ${{ steps.image.outputs.reference }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -246,38 +246,49 @@ jobs:
         env:
           TAGS: ${{ needs.metadata.outputs.tags }}
         run: |
-          set -euo pipefail
           tag_args=()
           while IFS= read -r tag; do
-            if [ -n "$tag" ]; then
+            if [[ -n "$tag" ]]; then
               tag_args+=("-t" "$tag")
             fi
           done <<< "$TAGS"
-          if [ "${#tag_args[@]}" -eq 0 ]; then
+          if ((${#tag_args[@]} == 0)); then
             echo "No image tags resolved" >&2
             exit 1
           fi
 
-          sources=()
-          while IFS= read -r -d '' digest_file; do
-            digest="$(basename "$digest_file")"
-            sources+=("${IMAGE}@sha256:${digest}")
-          done < <(find /tmp/digests -type f -print0 | sort -z)
-          if [ "${#sources[@]}" -eq 0 ]; then
+          shopt -s nullglob
+          digest_files=(/tmp/digests/*)
+          if ((${#digest_files[@]} == 0)); then
             echo "No image digests downloaded" >&2
             exit 1
           fi
+          sources=()
+          for digest_file in "${digest_files[@]}"; do
+            digest="${digest_file##*/}"
+            sources+=("${IMAGE}@sha256:${digest}")
+          done
 
-          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
-          docker buildx imagetools inspect "${IMAGE}:${{ needs.metadata.outputs.trace_tag }}"
+          if ! docker buildx imagetools create \
+            "${tag_args[@]}" "${sources[@]}"; then
+            echo "Could not create the multi-architecture image manifest" >&2
+            exit 1
+          fi
+          if ! docker buildx imagetools inspect \
+            "${IMAGE}:${{ needs.metadata.outputs.trace_tag }}"; then
+            echo "Could not inspect the published image manifest" >&2
+            exit 1
+          fi
 
-      - name: Create digest-pinned Kubernetes manifests
+      - name: Output published image
+        id: image
         shell: bash
         env:
           TRACE_TAG: ${{ needs.metadata.outputs.trace_tag }}
         run: |
+          image_ref="${IMAGE}:${TRACE_TAG}"
           manifest_file="${RUNNER_TEMP}/drive9-csi-manifest.json"
-          if ! docker buildx imagetools inspect "${IMAGE}:${TRACE_TAG}" \
+          if ! docker buildx imagetools inspect "$image_ref" \
             --format '{{json .}}' > "$manifest_file"; then
             echo "Could not inspect the published image manifest" >&2
             exit 1
@@ -289,25 +300,12 @@ jobs:
             exit 1
           fi
 
-          release_root="${RUNNER_TEMP}/drive9-csi-kubernetes"
-          release_base="${release_root}/base"
-          release_overlay="${release_root}/overlays/release"
-          mkdir -p "$release_root" || exit 1
-          cp -R deploy/kubernetes "$release_base" || exit 1
-          mkdir -p "$release_overlay" || exit 1
+          printf 'tag=%s\n' "$TRACE_TAG" >> "$GITHUB_OUTPUT"
+          printf 'digest=%s\n' "$image_digest" >> "$GITHUB_OUTPUT"
+          printf 'reference=%s@%s\n' "$IMAGE" "$image_digest" >> "$GITHUB_OUTPUT"
           {
-            printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1beta1'
-            printf '%s\n' 'kind: Kustomization'
-            printf '%s\n' 'resources:' '  - ../../base'
-            printf '%s\n' 'images:'
-            printf '%s\n' '  - name: registry.invalid/drive9-csi'
-            printf '%s\n' '    newName: ghcr.io/drive9-ai/drive9-csi'
-            printf '    digest: %s\n' "$image_digest"
-          } > "${release_overlay}/kustomization.yaml" || exit 1
-
-      - name: Upload digest-pinned Kubernetes manifests
-        uses: actions/upload-artifact@v4
-        with:
-          name: kubernetes-manifests-${{ needs.metadata.outputs.trace_tag }}
-          path: ${{ runner.temp }}/drive9-csi-kubernetes
-          if-no-files-found: error
+            printf '### Published image\n\n'
+            printf -- '- Tag: `%s`\n' "$image_ref"
+            printf -- '- Digest: `%s`\n' "$image_digest"
+            printf -- '- Immutable reference: `%s@%s`\n' "$IMAGE" "$image_digest"
+          } >> "$GITHUB_STEP_SUMMARY"
