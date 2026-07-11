@@ -100,12 +100,11 @@ gh workflow run publish-image.yml \
   --ref <csi-branch>
 ```
 
-To build a local image from the same immutable Drive9 CLI release:
+To build a local image using the Dockerfile's public-release downloader:
 
 ```sh
 make image \
-  IMAGE=ghcr.io/drive9-ai/drive9-csi:local \
-  DRIVE9_CLI_RELEASE_COMMIT=<full-drive9-fe-commit>
+  IMAGE=ghcr.io/drive9-ai/drive9-csi:local
 ```
 
 Install that preloaded local image with the local overlay:
@@ -421,7 +420,12 @@ kubectl -n drive9-csi exec <drive9-csi-node-pod> -c drive9-csi -- \
 ## Tests
 
 ```sh
-make test
+make test             # production Go unit tests
+make build-check      # binary/ELF acceptance
+make manifest-check   # deployment manifest contracts
+make script-check     # shell helper behavior
+make e2e-check        # non-mutating E2E safety checks
+make check            # complete local validation
 ```
 
 ## Real Kubernetes E2E Gate

@@ -28,7 +28,7 @@ Override platform: `GOOS`, `GOARCH` env vars. Default `GOPROXY=http://proxy.gola
 
 ## Dockerfile
 
-Multi-stage (`Dockerfile`, 56 lines):
+Multi-stage (`Dockerfile`, 67 lines):
 1. `golang:1.26-bookworm` — compiles `drive9-csi` (CGO_ENABLED=0)
 2. `debian:bookworm-slim` — downloads `drive9` CLI from `https://drive9.ai/releases/`
 3. `debian:bookworm-slim` — runtime: `fuse3`, `tini`, `ca-certificates`; entrypoint via `tini`
@@ -42,19 +42,28 @@ Both build stages validate target arch via ELF machine byte check. The runtime i
 ## Tests
 
 ```sh
-make test           # gofmt + go test ./...
-go test ./...       # run without formatting
-go test -run TestCreateVolume ./internal/driver/   # run a single test function
+make test             # formatting + production Go unit tests
+make build-check      # Linux artifact and ELF validation
+make manifest-check   # Kubernetes deployment contract validation
+make script-check     # drive9-csi-upload-perf shell behavior
+make e2e-check        # non-mutating E2E structure validation
+make check            # all local checks above, including race and vet
 ```
 
-Test file locations (4 files, all in `internal/driver/`):
+Go unit tests live beside production Go packages under `cmd/` and
+`internal/driver/`. They cover shipped launcher/installer behavior, CSI RPCs,
+mount lifecycle, recovery, state, host process ownership, systemd, and Secret
+resolution.
 
-| File | Covers |
+Repository configuration and non-Go components are deliberately outside the
+Go unit suite:
+
+| Target | Covers |
 |---|---|
-| `driver_test.go` | Create/Delete/Stage/Publish/Unstage/Unpublish, path validation, capability checks |
-| `k8s_secret_test.go` | Secret resolution from PVC annotations |
-| `kubernetes_manifest_test.go` | Deploy YAML vs driver parameter consistency (reads YAMLs from `../../deploy/`) |
-| `mount_linux_test.go` | `stopRecordedMount`, `waitForMount` (build tag: `linux`) |
+| `build-check` | Cross-compiled CSI/launcher binaries, ELF architecture, static linkage, build metadata |
+| `manifest-check` | Deploy YAML, RBAC, Kustomize, Dockerfile and example contracts |
+| `script-check` | Performance upload shell helper behavior and secret hygiene |
+| `e2e-check` | E2E script safety and prepare/case ownership boundaries |
 
 Tests use:
 - `testing` stdlib — no test framework/suite, no `TestMain`
@@ -65,12 +74,12 @@ Tests use:
 - Error code assertions use `status.Code(err) != codes.InvalidArgument` — never raw `err == nil` checks for gRPC calls
 - `t.Fatalf`/`t.Fatal` only (no `require`/`assert`)
 - No `testdata/` directories, no test fixtures, no `.env` files
+- Go tests must not read workflow, Dockerfile, Makefile, deploy YAML, or shell
+  source files, and must not invoke `go build` for artifact acceptance.
 
 CI does **not** run tests — `.github/workflows/publish-image.yml` only builds and publishes images.
 
-Test quirks:
-- `kubernetes_manifest_test.go` reads deploy YAMLs via relative paths (`../../deploy/...`) — test working directory matters
-- `mount_linux_test.go` has build tag `linux` — won't compile on macOS without explicit cross-compile
+`test-linux-compile` validates Linux-only Driver test compilation from macOS.
 
 ## E2E Test (Real K8s)
 

@@ -5,14 +5,13 @@ GOOS ?= linux
 GOARCH ?= amd64
 PLATFORM ?= $(GOOS)/$(GOARCH)
 PLATFORMS ?= linux/amd64,linux/arm64
-DRIVE9_CLI_RELEASE_COMMIT ?=
 E2E_PREPARE := e2e/prepare.sh
 E2E_CASES := e2e/basic-lifecycle.sh e2e/mount-survival.sh
 E2E_SCRIPTS := $(E2E_PREPARE) $(E2E_CASES)
 
 .PHONY: fmt-check
 fmt-check:
-	@unformatted="$$(gofmt -l cmd internal)"; \
+	@unformatted="$$(gofmt -l cmd internal hack/check-manifests.go)"; \
 	if [ -n "$$unformatted" ]; then \
 		echo "unformatted Go files:" >&2; \
 		printf '%s\n' "$$unformatted" >&2; \
@@ -42,6 +41,20 @@ vet:
 .PHONY: diff-check
 diff-check:
 	git diff --check
+
+.PHONY: build-check
+build-check:
+	bash -n hack/check-build-artifacts.sh
+	hack/check-build-artifacts.sh
+
+.PHONY: manifest-check
+manifest-check:
+	go run hack/check-manifests.go
+
+.PHONY: script-check
+script-check:
+	bash -n hack/check-upload-perf.sh
+	hack/check-upload-perf.sh
 
 .PHONY: e2e-check
 e2e-check:
@@ -108,7 +121,8 @@ e2e-check:
 	@test ! -e hack/e2e-k8s.sh
 
 .PHONY: check
-check: test test-race vet test-linux-compile e2e-check diff-check
+check: test test-race vet test-linux-compile build-check manifest-check \
+	script-check e2e-check diff-check
 
 .PHONY: build
 build:
@@ -118,11 +132,11 @@ build:
 
 .PHONY: image
 image:
-	docker build --platform $(PLATFORM) --build-arg GOPROXY=$(GOPROXY) --build-arg GOSUMDB=$(GOSUMDB) --build-arg DRIVE9_CLI_RELEASE_COMMIT=$(DRIVE9_CLI_RELEASE_COMMIT) -t $(IMAGE) .
+	docker build --platform $(PLATFORM) --build-arg GOPROXY=$(GOPROXY) --build-arg GOSUMDB=$(GOSUMDB) -t $(IMAGE) .
 
 .PHONY: image-multi
 image-multi:
-	docker buildx build --platform $(PLATFORMS) --build-arg GOPROXY=$(GOPROXY) --build-arg GOSUMDB=$(GOSUMDB) --build-arg DRIVE9_CLI_RELEASE_COMMIT=$(DRIVE9_CLI_RELEASE_COMMIT) -t $(IMAGE) --push .
+	docker buildx build --platform $(PLATFORMS) --build-arg GOPROXY=$(GOPROXY) --build-arg GOSUMDB=$(GOSUMDB) -t $(IMAGE) --push .
 
 .PHONY: manifests
 manifests:
