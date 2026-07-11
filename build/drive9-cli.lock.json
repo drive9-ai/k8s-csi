@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 2,
+  "sourceRepository": "mem9-ai/drive9",
+  "releaseRepository": "mem9-ai/drive9-fe",
+  "compatibilityPlatform": "linux/amd64",
+  "current": {
+    "version": "2034ed8",
+    "sourceCommit": "2034ed81f059df9cb87a0a0a4eb5431f1e4494af",
+    "releaseCommit": "b03138d5952b4dc68909fc003f739523f7bc530c",
+    "artifacts": {
+      "linux/amd64": {
+        "goos": "linux",
+        "goarch": "amd64",
+        "url": "https://raw.githubusercontent.com/mem9-ai/drive9-fe/b03138d5952b4dc68909fc003f739523f7bc530c/site/releases/drive9-linux-amd64",
+        "sha256": "f69776f0e8985753f7420d4b2c66f8a52cec058b3391db05f4a18dc534044083"
+      },
+      "linux/arm64": {
+        "goos": "linux",
+        "goarch": "arm64",
+        "url": "https://raw.githubusercontent.com/mem9-ai/drive9-fe/b03138d5952b4dc68909fc003f739523f7bc530c/site/releases/drive9-linux-arm64",
+        "sha256": "9a9b718432c0751726543f87ccd9f1b77569510ea956186aa2cf0d1188d9290c"
+      }
+    }
+  },
+  "previous": {
+    "version": "3aed9d0",
+    "sourceCommit": "3aed9d09d3288e5edbd83239e7588594c3c39417",
+    "artifact": {
+      "kind": "oci-image-file",
+      "platform": "linux/amd64",
+      "repository": "ghcr.io/drive9-ai/drive9-csi",
+      "indexDigest": "sha256:93e628e1196ea542595d8c20f98224456e77e5d4149fa1a4d96db1968839c78c",
+      "digest": "sha256:8c0f72260e22cfb22f9da2559748e4d6130500e1948641e1be2e0fff121d2ab3",
+      "configDigest": "sha256:7d76b0a721bc187a54d93b2999051c44dc2dc19faa4fa1074f1a477cd706f0bd",
+      "path": "/usr/local/bin/drive9",
+      "traceTag": "drive9-3aed9d0-csi-766bc13",
+      "csiSourceCommit": "766bc136761c6acbf727d2709656a2f0223a396d"
+    }
+  }
+}

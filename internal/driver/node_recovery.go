@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -47,44 +46,13 @@ func (d *Driver) shouldRecoverNodeMounts() (bool, error) {
 		log.Printf("drive9-csi: node mount recovery disabled")
 		return false, nil
 	case nodeRecoveryEnabled:
-		if err := checkNodeMountPrerequisites(d.cfg.StateDir); err != nil {
-			return false, err
-		}
 		return true, nil
 	case nodeRecoveryAuto:
-		if err := checkNodeMountPrerequisites(d.cfg.StateDir); err != nil {
-			log.Printf("drive9-csi: node mount recovery skipped: %v", err)
-			return false, nil
-		}
-		log.Printf("drive9-csi: node mount recovery enabled by runtime detection")
+		log.Printf("drive9-csi: node mount recovery enabled; per-operation capabilities remain fail-closed")
 		return true, nil
 	default:
 		return false, validateNodeRecoveryMode(d.cfg.RecoverNodeMounts)
 	}
-}
-
-func checkNodeMountPrerequisites(stateDir string) error {
-	if err := checkFuseDevice(); err != nil {
-		return err
-	}
-	if err := checkDirectory(defaultKubeletRoot); err != nil {
-		return err
-	}
-	if err := checkDirectory(stateDir); err != nil {
-		return err
-	}
-	return nil
-}
-
-func checkDirectory(path string) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		return fmt.Errorf("%s unavailable: %w", path, err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", path)
-	}
-	return nil
 }
 
 func (d *Driver) recoverNodeMounts(ctx context.Context) {
@@ -97,6 +65,19 @@ func (d *Driver) recoverNodeMounts(ctx context.Context) {
 		}
 		d.recoverOneNodeMount(ctx, state)
 	}
+	result, err := newBinaryGarbageCollector(
+		d.hostRuntime(),
+		d.cfg.StateDir,
+		hostBinaryDir,
+		hostRuntimeDir,
+	).Run(ctx)
+	if err != nil {
+		log.Printf("drive9-csi: warning: binary GC failed: %v", err)
+	} else if result.Skipped {
+		log.Printf("drive9-csi: warning: binary GC skipped: %s", result.Reason)
+	} else if len(result.Removed) > 0 {
+		log.Printf("drive9-csi: removed %d unreferenced Drive9 binaries", len(result.Removed))
+	}
 	log.Printf("drive9-csi: node mount recovery finished")
 }
 
@@ -107,6 +88,16 @@ func (d *Driver) recoverOneNodeMount(ctx context.Context, state mountState) {
 	}
 	unlock := d.lockVolume(state.VolumeID)
 	defer unlock()
+	repository := d.stateRepository()
+	current, err := repository.Read(state.VolumeID)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		log.Printf("drive9-csi: warning: cannot reread mount state for %s after locking: %v", state.VolumeID, err)
+		return
+	}
+	state = current
 
 	if !pathUnderRoot(state.StagingTarget, defaultKubeletRoot) {
 		log.Printf("drive9-csi: warning: skipping recovery for %s: staging target %q is outside %s",
@@ -114,48 +105,166 @@ func (d *Driver) recoverOneNodeMount(ctx context.Context, state mountState) {
 		return
 	}
 
-	attrs, err := resolveVolumeContextFromPV(ctx, d.k8s, d.cfg.DriverName, state.VolumeID)
-	if err != nil {
-		log.Printf("drive9-csi: warning: cannot resolve PV attributes for %s: %v", state.VolumeID, err)
+	switch state.Phase {
+	case mountStatePhaseStopping:
+		if err := d.requireNodeCapabilities(nodeOperationUnstage); err != nil {
+			log.Printf("drive9-csi: warning: cannot reconcile stopping mount %s: %v", state.VolumeID, err)
+			return
+		}
+		if result, err := newMountStopper(d.hostRuntime(), repository).Reconcile(ctx, state); err != nil {
+			log.Printf("drive9-csi: warning: stopping reconciliation for %s is incomplete (%s): %v",
+				state.VolumeID, result, err)
+		}
 		return
-	}
-	creds, err := credentialsFromVolumeAttributes(ctx, d.k8s, attrs)
-	if err != nil {
-		log.Printf("drive9-csi: warning: cannot resolve credentials for %s: %v", state.VolumeID, err)
+
+	case mountStatePhaseStarting:
+		if err := d.requireNodeCapabilities(nodeOperationHealthyStage); err != nil {
+			log.Printf("drive9-csi: warning: cannot inspect starting mount %s: %v", state.VolumeID, err)
+			return
+		}
+		reconciler := newStartingReconciler(d.hostRuntime(), repository)
+		result, err := reconciler.Reconcile(ctx, state, nil, false)
+		if errors.Is(err, errStartingCleanupRequired) {
+			if capabilityErr := d.requireNodeCapabilities(nodeOperationUnstage); capabilityErr != nil {
+				log.Printf("drive9-csi: warning: cannot clean starting mount %s: %v", state.VolumeID, capabilityErr)
+				return
+			}
+			result, err = reconciler.Reconcile(ctx, state, nil, true)
+		}
+		if result == startingReconcilePromoted {
+			d.repairPublishTargets(state.VolumeID, state.StagingTarget)
+			return
+		}
+		if result == startingReconcileDeleted {
+			return
+		}
+		if err != nil && !errors.Is(err, errStartingCredentialsRequired) {
+			log.Printf("drive9-csi: warning: starting reconciliation for %s: %v", state.VolumeID, err)
+			return
+		}
+		if err := d.requireNodeCapabilities(nodeOperationCreate); err != nil {
+			log.Printf("drive9-csi: warning: cannot resume starting mount %s: %v", state.VolumeID, err)
+			return
+		}
+		attrs, creds, resolveErr := d.resolveRecoveryCredentials(ctx, state)
+		if resolveErr != nil {
+			log.Printf("drive9-csi: warning: cannot resolve starting recovery credentials for %s: %v",
+				state.VolumeID, resolveErr)
+			return
+		}
+		if err := d.validateNodeStageRemote(
+			ctx,
+			creds,
+			isWorkspaceRootVolumeID(state.VolumeID),
+			state.VolumeID,
+			state.RemoteRoot,
+		); err != nil {
+			log.Printf("drive9-csi: warning: cannot validate starting recovery remote for %s: %v", state.VolumeID, err)
+			return
+		}
+		_ = attrs
+		result, err = reconciler.Reconcile(ctx, state, &mountLaunchCredentials{
+			Server: creds.Server,
+			APIKey: creds.APIKey,
+		}, true)
+		if err != nil {
+			log.Printf("drive9-csi: warning: resume starting mount for %s (%s): %v", state.VolumeID, result, err)
+			return
+		}
+		if result == startingReconcilePromoted {
+			d.repairPublishTargets(state.VolumeID, state.StagingTarget)
+		}
 		return
-	}
-	if err := d.recoverStagedMount(ctx, state, attrs, creds); err != nil {
-		log.Printf("drive9-csi: warning: recover staged mount for %s: %v", state.VolumeID, err)
+
+	case mountStatePhaseActive:
+		if err := d.requireNodeCapabilities(nodeOperationHealthyStage); err != nil {
+			log.Printf("drive9-csi: warning: cannot inspect active mount %s: %v", state.VolumeID, err)
+			return
+		}
+		if err := d.verifyActiveMountLocally(ctx, state, state.VolumeID, state.RemoteRoot, state.StagingTarget); err == nil {
+			return
+		}
+		observation, err := d.observeActiveRecovery(ctx, state)
+		if err != nil {
+			log.Printf("drive9-csi: warning: cannot classify active mount %s before credential access: %v", state.VolumeID, err)
+			return
+		}
+		actions, err := decideActiveRecovery(observation)
+		if err != nil {
+			log.Printf("drive9-csi: warning: cannot classify active mount %s: %v", state.VolumeID, err)
+			return
+		}
+		if len(actions) == 1 && actions[0] == activeRecoverySkip {
+			return
+		}
+		if err := d.requireNodeCapabilities(nodeOperationCreate); err != nil {
+			log.Printf("drive9-csi: warning: cannot recover active mount %s: %v", state.VolumeID, err)
+			return
+		}
+		attrs, creds, err := d.resolveRecoveryCredentials(ctx, state)
+		if err != nil {
+			log.Printf("drive9-csi: warning: cannot resolve active recovery inputs for %s: %v", state.VolumeID, err)
+			return
+		}
+		if err := d.validateNodeStageRemote(
+			ctx,
+			creds,
+			isWorkspaceRootVolumeID(state.VolumeID),
+			state.VolumeID,
+			state.RemoteRoot,
+		); err != nil {
+			log.Printf("drive9-csi: warning: cannot validate active recovery remote for %s: %v", state.VolumeID, err)
+			return
+		}
+		request, err := d.drive9MountRequestFromAttributes(state.VolumeID, state.StagingTarget, attrs, creds)
+		if err != nil {
+			log.Printf("drive9-csi: warning: build active recovery request for %s: %v", state.VolumeID, err)
+			return
+		}
+		desiredBinary, err := validateDesiredDrive9Content(d.hostRuntime())
+		if err != nil {
+			log.Printf("drive9-csi: warning: desired binary invalid for %s: %v", state.VolumeID, err)
+			return
+		}
+		executor := &driverActiveRecoveryExecutor{
+			driver:      d,
+			ctx:         ctx,
+			repository:  repository,
+			credentials: mountLaunchCredentials{Server: creds.Server, APIKey: creds.APIKey},
+			desiredArgs: d.drive9MountArgs(request, d.mountCacheDir(state.VolumeID)),
+		}
+		result, err := coordinateActiveRecovery(state, desiredBinary, observation, executor)
+		if err != nil {
+			log.Printf("drive9-csi: warning: active recovery for %s degraded (%s): %v", state.VolumeID, result, err)
+			return
+		}
+		if result == activeRecoveryRecovered || result == activeRecoveryHealthy {
+			d.repairPublishTargets(state.VolumeID, state.StagingTarget)
+		}
 		return
+
+	default:
+		log.Printf("drive9-csi: warning: unsupported mount phase %q for %s", state.Phase, state.VolumeID)
 	}
 }
 
-func (d *Driver) recoverStagedMount(ctx context.Context, state mountState, attrs map[string]string, creds drive9Credentials) error {
-	req, err := d.drive9MountRequestFromAttributes(state.VolumeID, state.StagingTarget, attrs, creds)
+func (d *Driver) resolveRecoveryCredentials(
+	ctx context.Context,
+	state mountState,
+) (map[string]string, drive9Credentials, error) {
+	attrs, err := resolveVolumeContextFromPV(ctx, d.k8s, d.cfg.DriverName, state.VolumeID)
 	if err != nil {
-		return err
+		return nil, drive9Credentials{}, err
 	}
-	if state.RemoteRoot != "" && state.RemoteRoot != req.RemoteRoot {
-		return fmt.Errorf("state remoteRoot %q does not match PV remoteRoot %q", state.RemoteRoot, req.RemoteRoot)
-	}
-
-	mounted, err := isMountPoint(state.StagingTarget)
+	creds, err := credentialsFromVolumeAttributes(ctx, d.k8s, attrs)
 	if err != nil {
-		return fmt.Errorf("check staging mount: %w", err)
+		return nil, drive9Credentials{}, err
 	}
-	if mounted && pidMatchesState(state) {
-		return nil
+	remoteRoot, err := normalizeRemotePath(attrs["remoteRoot"])
+	if err != nil || remoteRoot != state.RemoteRoot {
+		return nil, drive9Credentials{}, fmt.Errorf("PV remote root does not match durable state")
 	}
-	if mounted {
-		if err := unmountPath(state.StagingTarget); err != nil {
-			return fmt.Errorf("unmount stale staging target: %w", err)
-		}
-	}
-	if err := d.startDrive9Mount(ctx, req); err != nil {
-		return err
-	}
-	d.repairPublishTargets(state.VolumeID, filepath.Clean(state.StagingTarget))
-	return nil
+	return attrs, creds, nil
 }
 
 func (d *Driver) drive9MountRequestFromAttributes(volumeID string, stagingTarget string, attrs map[string]string, creds drive9Credentials) (drive9MountRequest, error) {
@@ -221,13 +330,7 @@ func validateRecoveredVolumeIdentity(volumeID string, remoteRoot string, attrs m
 }
 
 func (d *Driver) repairPublishTargets(volumeID string, stagingTarget string) {
-	for _, state := range d.listPublishStates() {
-		if state.Status != publishStatusPublished {
-			continue
-		}
-		if state.VolumeID != volumeID || filepath.Clean(state.StagingTarget) != filepath.Clean(stagingTarget) {
-			continue
-		}
+	for _, state := range publishStatesForActiveRecovery(d.listPublishStates(), volumeID, stagingTarget) {
 		if !pathUnderRoot(state.Target, defaultKubeletRoot) {
 			log.Printf("drive9-csi: warning: skipping publish repair for %s: target %q is outside %s",
 				volumeID, state.Target, defaultKubeletRoot)
@@ -260,47 +363,6 @@ func repairPublishTarget(stagingTarget string, state publishState) error {
 	return nil
 }
 
-func (d *Driver) shutdownNodeMounts(ctx context.Context) {
-	log.Printf("drive9-csi: starting graceful node mount shutdown")
-	for _, state := range d.listMountStates() {
-		if ctx.Err() != nil {
-			log.Printf("drive9-csi: graceful node mount shutdown stopped: %v", ctx.Err())
-			return
-		}
-		d.shutdownOneNodeMount(ctx, state)
-	}
-	log.Printf("drive9-csi: graceful node mount shutdown finished")
-}
-
-func (d *Driver) shutdownOneNodeMount(ctx context.Context, state mountState) {
-	if strings.TrimSpace(state.VolumeID) == "" {
-		log.Printf("drive9-csi: warning: skipping shutdown state with empty volumeID")
-		return
-	}
-	unlock := d.lockVolume(state.VolumeID)
-	defer unlock()
-
-	if !pathUnderRoot(state.StagingTarget, defaultKubeletRoot) {
-		log.Printf("drive9-csi: warning: skipping graceful shutdown for %s: staging target %q is outside %s",
-			state.VolumeID, state.StagingTarget, defaultKubeletRoot)
-		return
-	}
-	if err := d.drive9Umount(ctx, state.StagingTarget, 30*time.Second); err != nil {
-		log.Printf("drive9-csi: warning: drive9 umount %s for %s: %v", state.StagingTarget, state.VolumeID, err)
-	}
-	mounted, err := isMountPoint(state.StagingTarget)
-	if err != nil {
-		log.Printf("drive9-csi: warning: check staging mount %s for %s: %v", state.StagingTarget, state.VolumeID, err)
-	} else if mounted {
-		if err := unmountPath(state.StagingTarget); err != nil {
-			log.Printf("drive9-csi: warning: kernel unmount %s for %s: %v", state.StagingTarget, state.VolumeID, err)
-		}
-	}
-	if err := d.stopRecordedMount(ctx, state.VolumeID, state.StagingTarget); err != nil {
-		log.Printf("drive9-csi: warning: wait for drive9 mount exit for %s: %v", state.VolumeID, err)
-	}
-}
-
 func (d *Driver) listMountStates() []mountState {
 	entries, err := os.ReadDir(d.cfg.StateDir)
 	if err != nil {
@@ -321,8 +383,8 @@ func (d *Driver) listMountStates() []mountState {
 			}
 			continue
 		}
-		var state mountState
-		if err := json.Unmarshal(body, &state); err != nil {
+		state, err := decodeMountState(body)
+		if err != nil {
 			log.Printf("drive9-csi: warning: malformed mount state %s: %v", entry.Name(), err)
 			continue
 		}

@@ -1,10 +1,16 @@
 package driver
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
 func TestDefaultStorageClassNoSecretTemplate(t *testing.T) {
@@ -286,7 +292,126 @@ func TestRecoverNodeMountsManifestArgs(t *testing.T) {
 		t.Fatal("node.yaml must enable node mount recovery")
 	}
 	if !strings.Contains(node, "terminationGracePeriodSeconds: 120") {
-		t.Fatal("node.yaml must set terminationGracePeriodSeconds for graceful umount")
+		t.Fatal("node.yaml must bound CSI gRPC shutdown")
+	}
+}
+
+func TestKubernetesManifestNodeProvidesHostRuntimeAndInstaller(t *testing.T) {
+	var daemonSet appsv1.DaemonSet
+	decodeRepoYAML(t, "deploy/kubernetes/node.yaml", &daemonSet)
+	pod := daemonSet.Spec.Template.Spec
+	if pod.PriorityClassName != "system-node-critical" {
+		t.Fatalf("Node priorityClassName = %q, want system-node-critical", pod.PriorityClassName)
+	}
+	if len(pod.InitContainers) != 1 {
+		t.Fatalf("Node init container count = %d, want 1", len(pod.InitContainers))
+	}
+
+	installer := pod.InitContainers[0]
+	if installer.Name != "install-host-binaries" {
+		t.Fatalf("Node init container = %q, want install-host-binaries", installer.Name)
+	}
+	node := requiredContainer(t, pod.Containers, "drive9-csi")
+	if installer.Image != node.Image {
+		t.Fatalf("installer image = %q, node image = %q", installer.Image, node.Image)
+	}
+	wantInstallerArgs := []string{
+		"install-host-binaries",
+		"--host-state-dir=/var/lib/drive9-csi",
+		"--drive9-source=/usr/local/bin/drive9",
+		"--launcher-source=/usr/local/bin/drive9-csi-launcher",
+	}
+	if !slices.Equal(installer.Args, wantInstallerArgs) {
+		t.Fatalf("installer args = %v, want %v", installer.Args, wantInstallerArgs)
+	}
+	assertVolumeMount(t, installer.VolumeMounts, "state-dir", "/var/lib/drive9-csi", false, nil)
+
+	for _, arg := range []string{"--service-mode=node", "--recover-node-mounts=enabled"} {
+		if !slices.Contains(node.Args, arg) {
+			t.Fatalf("Node driver args missing %q", arg)
+		}
+	}
+	bidirectional := corev1.MountPropagationBidirectional
+	assertVolumeMount(t, node.VolumeMounts, "kubelet-dir", "/var/lib/kubelet", false, &bidirectional)
+	assertVolumeMount(t, node.VolumeMounts, "state-dir", "/var/lib/drive9-csi", false, nil)
+	assertVolumeMount(t, node.VolumeMounts, "host-proc", "/host-proc", true, nil)
+	assertVolumeMount(t, node.VolumeMounts, "host-runtime", "/run/drive9-csi", false, nil)
+	assertVolumeMount(t, node.VolumeMounts, "dev-fuse", "/dev/fuse", false, nil)
+
+	volumes := make(map[string]corev1.Volume, len(pod.Volumes))
+	for _, volume := range pod.Volumes {
+		volumes[volume.Name] = volume
+	}
+	assertHostPathVolume(t, volumes, "kubelet-dir", "/var/lib/kubelet", corev1.HostPathDirectory)
+	assertHostPathVolume(t, volumes, "state-dir", "/var/lib/drive9-csi", corev1.HostPathDirectoryOrCreate)
+	assertHostPathVolume(t, volumes, "host-proc", "/proc", corev1.HostPathDirectory)
+	assertHostPathVolume(t, volumes, "host-runtime", "/run/drive9-csi", corev1.HostPathDirectoryOrCreate)
+	assertHostPathVolume(t, volumes, "dev-fuse", "/dev/fuse", corev1.HostPathCharDev)
+}
+
+func TestKubernetesManifestControllerHasNoNodePrerequisites(t *testing.T) {
+	var deployment appsv1.Deployment
+	decodeRepoYAML(t, "deploy/kubernetes/controller.yaml", &deployment)
+	pod := deployment.Spec.Template.Spec
+	if len(pod.InitContainers) != 0 {
+		t.Fatalf("controller init container count = %d, want 0", len(pod.InitContainers))
+	}
+	controller := requiredContainer(t, pod.Containers, "drive9-csi")
+	for _, arg := range []string{"--service-mode=controller", "--recover-node-mounts=disabled"} {
+		if !slices.Contains(controller.Args, arg) {
+			t.Fatalf("controller args missing %q", arg)
+		}
+	}
+	for _, mount := range controller.VolumeMounts {
+		switch mount.Name {
+		case "host-proc", "host-runtime", "state-dir", "dev-fuse", "kubelet-dir":
+			t.Fatalf("controller contains Node-only mount %q", mount.Name)
+		}
+	}
+	for _, volume := range pod.Volumes {
+		if volume.HostPath != nil {
+			t.Fatalf("controller contains hostPath volume %q", volume.Name)
+		}
+	}
+}
+
+func TestKubernetesManifestUsesExplicitBaseAndLocalImageContracts(t *testing.T) {
+	var daemonSet appsv1.DaemonSet
+	decodeRepoYAML(t, "deploy/kubernetes/node.yaml", &daemonSet)
+	var deployment appsv1.Deployment
+	decodeRepoYAML(t, "deploy/kubernetes/controller.yaml", &deployment)
+
+	node := requiredContainer(t, daemonSet.Spec.Template.Spec.Containers, "drive9-csi")
+	installer := requiredContainer(t, daemonSet.Spec.Template.Spec.InitContainers, "install-host-binaries")
+	controller := requiredContainer(t, deployment.Spec.Template.Spec.Containers, "drive9-csi")
+	for role, image := range map[string]string{
+		"node":       node.Image,
+		"installer":  installer.Image,
+		"controller": controller.Image,
+	} {
+		if image != "registry.invalid/drive9-csi:unpublished" {
+			t.Fatalf("%s image = %q; manifest base must fail closed until an overlay selects an image", role, image)
+		}
+	}
+
+	local := readRepoFile(t, "deploy/kubernetes/overlays/local/kustomization.yaml")
+	for _, want := range []string{
+		"resources:\n  - ../..",
+		"name: registry.invalid/drive9-csi",
+		"newName: ghcr.io/drive9-ai/drive9-csi",
+		"newTag: local",
+	} {
+		if !strings.Contains(local, want) {
+			t.Fatalf("local image overlay missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{":latest", "drive9-aff1023-csi-ef5fab2"} {
+		if strings.Contains(node.Image+installer.Image+controller.Image+local, forbidden) {
+			t.Fatalf("Kubernetes image contract contains stale or mutable reference %q", forbidden)
+		}
+	}
+	if makefile := readRepoFile(t, "Makefile"); !strings.Contains(makefile, "kubectl apply -k deploy/kubernetes/overlays/local") {
+		t.Fatal("Makefile manifests target must select the explicit local overlay")
 	}
 }
 
@@ -317,6 +442,7 @@ func TestE2EUsesPerPVCNamespaceLocalDrive9Secret(t *testing.T) {
 		"volumeAttributesClassName: $volume_attributes_class",
 		"using Drive9 workspace root mode",
 		"read after PVC recreate",
+		`registry\.invalid\/drive9-csi:unpublished`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("e2e script missing evidence %q", want)
@@ -332,4 +458,74 @@ func readRepoFile(t *testing.T, name string) string {
 		t.Fatalf("read %s: %v", name, err)
 	}
 	return string(body)
+}
+
+func decodeRepoYAML(t *testing.T, name string, target any) {
+	t.Helper()
+	body := readRepoFile(t, name)
+	jsonBody, err := utilyaml.ToJSON([]byte(body))
+	if err != nil {
+		t.Fatalf("convert %s to JSON: %v", name, err)
+	}
+	if err := json.Unmarshal(jsonBody, target); err != nil {
+		t.Fatalf("parse %s: %v", name, err)
+	}
+}
+
+func requiredContainer(t *testing.T, containers []corev1.Container, name string) corev1.Container {
+	t.Helper()
+	for _, container := range containers {
+		if container.Name == name {
+			return container
+		}
+	}
+	t.Fatalf("missing container %q", name)
+	return corev1.Container{}
+}
+
+func assertVolumeMount(
+	t *testing.T,
+	mounts []corev1.VolumeMount,
+	name string,
+	path string,
+	readOnly bool,
+	propagation *corev1.MountPropagationMode,
+) {
+	t.Helper()
+	for _, mount := range mounts {
+		if mount.Name != name {
+			continue
+		}
+		if mount.MountPath != path || mount.ReadOnly != readOnly {
+			t.Fatalf("volume mount %q = path %q readOnly=%t", name, mount.MountPath, mount.ReadOnly)
+		}
+		if propagation == nil && mount.MountPropagation != nil {
+			t.Fatalf("volume mount %q has unexpected propagation %q", name, *mount.MountPropagation)
+		}
+		if propagation != nil && (mount.MountPropagation == nil || *mount.MountPropagation != *propagation) {
+			t.Fatalf("volume mount %q propagation = %v, want %q", name, mount.MountPropagation, *propagation)
+		}
+		return
+	}
+	t.Fatalf("missing volume mount %q", name)
+}
+
+func assertHostPathVolume(
+	t *testing.T,
+	volumes map[string]corev1.Volume,
+	name string,
+	path string,
+	typeValue corev1.HostPathType,
+) {
+	t.Helper()
+	volume, ok := volumes[name]
+	if !ok || volume.HostPath == nil {
+		t.Fatalf("missing hostPath volume %q", name)
+	}
+	if volume.HostPath.Path != path {
+		t.Fatalf("hostPath volume %q path = %q, want %q", name, volume.HostPath.Path, path)
+	}
+	if volume.HostPath.Type == nil || *volume.HostPath.Type != typeValue {
+		t.Fatalf("hostPath volume %q type = %v, want %q", name, volume.HostPath.Type, typeValue)
+	}
 }
