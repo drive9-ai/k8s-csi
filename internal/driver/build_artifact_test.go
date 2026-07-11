@@ -156,6 +156,7 @@ func TestBuildArtifactDockerfileConsumesLockAndBuildsBothBinaries(t *testing.T) 
 		"verify-host-binary --path=/out/drive9-csi-launcher",
 		"verify-host-binary --path=/out/drive9",
 		"COPY --from=csi-builder /out/drive9-csi-launcher /usr/local/bin/drive9-csi-launcher",
+		"fuse3",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("Dockerfile missing locked build evidence %q", want)

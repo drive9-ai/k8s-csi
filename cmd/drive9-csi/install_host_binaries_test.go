@@ -47,6 +47,17 @@ func TestInstallHostBinariesFirstInstall(t *testing.T) {
 	assertFileEquals(t, wantLauncherPath, launcherBody)
 	assertExecutableRegularFile(t, wantLauncherPath)
 
+	fusermountBody, err := os.ReadFile(options.FusermountSource)
+	if err != nil {
+		t.Fatalf("read fusermount source: %v", err)
+	}
+	wantFusermountPath := filepath.Join(options.HostStateDir, "bin", "fusermount3")
+	if result.FusermountPath != wantFusermountPath {
+		t.Fatalf("fusermount path = %q, want %q", result.FusermountPath, wantFusermountPath)
+	}
+	assertFileEquals(t, wantFusermountPath, fusermountBody)
+	assertExecutableRegularFile(t, wantFusermountPath)
+
 	target, err := os.Readlink(filepath.Join(options.HostStateDir, "bin", "drive9"))
 	if err != nil {
 		t.Fatalf("read desired symlink: %v", err)
@@ -114,6 +125,30 @@ func TestInstallHostBinariesRejectsInvalidSources(t *testing.T) {
 			name: "launcher symlink",
 			mutate: func(t *testing.T, options installHostBinariesOptions) {
 				replaceWithSymlink(t, options.LauncherSource)
+			},
+		},
+		{
+			name: "fusermount symlink",
+			mutate: func(t *testing.T, options installHostBinariesOptions) {
+				replaceWithSymlink(t, options.FusermountSource)
+			},
+		},
+		{
+			name: "fusermount not executable",
+			mutate: func(t *testing.T, options installHostBinariesOptions) {
+				if err := os.Chmod(options.FusermountSource, 0o644); err != nil {
+					t.Fatalf("chmod: %v", err)
+				}
+			},
+		},
+		{
+			name: "fusermount wrong machine",
+			mutate: func(t *testing.T, options installHostBinariesOptions) {
+				otherArch := "amd64"
+				if options.TargetArch == "amd64" {
+					otherArch = "arm64"
+				}
+				writeSyntheticExecutable(t, options.FusermountSource, otherArch, true, "wrong-fusermount-machine")
 			},
 		},
 		{
@@ -199,6 +234,18 @@ func TestInstallHostBinariesRejectsUnsafeDestinations(t *testing.T) {
 			},
 		},
 		{
+			name: "fusermount symlink",
+			setup: func(t *testing.T, options installHostBinariesOptions, _ installHostBinariesResult) {
+				path := filepath.Join(options.HostStateDir, "bin", "fusermount3")
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("remove fusermount: %v", err)
+				}
+				if err := os.Symlink(filepath.Base(options.FusermountSource), path); err != nil {
+					t.Fatalf("create fusermount symlink: %v", err)
+				}
+			},
+		},
+		{
 			name: "desired regular file",
 			setup: func(t *testing.T, options installHostBinariesOptions, _ installHostBinariesResult) {
 				path := filepath.Join(options.HostStateDir, "bin", "drive9")
@@ -269,6 +316,11 @@ func TestInstallHostBinariesPreservesDesiredAcrossFailurePoints(t *testing.T) {
 		installerStepLauncherFileSync,
 		installerStepLauncherRename,
 		installerStepLauncherDirSync,
+		installerStepFusermountTemp,
+		installerStepFusermountWrite,
+		installerStepFusermountFileSync,
+		installerStepFusermountRename,
+		installerStepFusermountDirSync,
 		installerStepDesiredTemp,
 		installerStepDesiredRename,
 		installerStepDesiredDirSync,
@@ -332,6 +384,31 @@ func TestInstallHostBinariesRestoresLauncherAfterDirectorySyncFailure(t *testing
 	assertFileEquals(t, result.LauncherPath, oldLauncher)
 }
 
+func TestInstallHostBinariesRestoresFusermountAfterDirectorySyncFailure(t *testing.T) {
+	options := newInstallerTestOptions(t, "old")
+	result, err := installHostBinaries(options)
+	if err != nil {
+		t.Fatalf("install old: %v", err)
+	}
+	oldFusermount, err := os.ReadFile(result.FusermountPath)
+	if err != nil {
+		t.Fatalf("read old fusermount: %v", err)
+	}
+	writeSyntheticExecutable(t, options.FusermountSource, options.TargetArch, true, "new-fusermount")
+
+	injected := errors.New("fusermount directory sync")
+	_, err = installHostBinariesWithFault(options, func(step installerStep) error {
+		if step == installerStepFusermountDirSync {
+			return injected
+		}
+		return nil
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("install error = %v, want %v", err, injected)
+	}
+	assertFileEquals(t, result.FusermountPath, oldFusermount)
+}
+
 func TestInstallHostBinariesConcurrentInstallers(t *testing.T) {
 	options := newInstallerTestOptions(t, "concurrent")
 	const installers = 12
@@ -368,6 +445,7 @@ func TestInstallHostBinariesConcurrentInstallers(t *testing.T) {
 	}
 	assertExecutableRegularFile(t, first.Drive9Path)
 	assertExecutableRegularFile(t, first.LauncherPath)
+	assertExecutableRegularFile(t, first.FusermountPath)
 	assertNoInstallerTemps(t, filepath.Join(options.HostStateDir, "bin"))
 }
 
@@ -385,6 +463,7 @@ func TestInstallHostBinariesDispatchesBeforeKubernetesConfiguration(t *testing.T
 		"--host-state-dir=" + options.HostStateDir,
 		"--drive9-source=" + options.Drive9Source,
 		"--launcher-source=" + options.LauncherSource,
+		"--fusermount-source=" + options.FusermountSource,
 	}, &stdout)
 	if err != nil {
 		t.Fatalf("run install-host-binaries: %v", err)
@@ -392,7 +471,8 @@ func TestInstallHostBinariesDispatchesBeforeKubernetesConfiguration(t *testing.T
 	output := stdout.String()
 	if !strings.Contains(output, "drive9_digest=") ||
 		!strings.Contains(output, "drive9_path=") ||
-		!strings.Contains(output, "launcher_path=") {
+		!strings.Contains(output, "launcher_path=") ||
+		!strings.Contains(output, "fusermount_path=") {
 		t.Fatalf("installer output = %q", output)
 	}
 	if strings.Contains(output, string(syntheticELF64(machineForArch(t, options.TargetArch), false, "dispatch"))) {
@@ -428,16 +508,18 @@ func newInstallerTestOptions(t *testing.T, payload string) installHostBinariesOp
 		t.Fatalf("mkdir source: %v", err)
 	}
 	options := installHostBinariesOptions{
-		HostStateDir:   filepath.Join(root, "host-state"),
-		Drive9Source:   filepath.Join(sourceDir, "drive9"),
-		LauncherSource: filepath.Join(sourceDir, "drive9-csi-launcher"),
-		TargetArch:     runtime.GOARCH,
+		HostStateDir:     filepath.Join(root, "host-state"),
+		Drive9Source:     filepath.Join(sourceDir, "drive9"),
+		LauncherSource:   filepath.Join(sourceDir, "drive9-csi-launcher"),
+		FusermountSource: filepath.Join(sourceDir, "fusermount3"),
+		TargetArch:       runtime.GOARCH,
 	}
 	if err := os.Mkdir(options.HostStateDir, 0o755); err != nil {
 		t.Fatalf("mkdir host state: %v", err)
 	}
 	writeSyntheticExecutable(t, options.Drive9Source, options.TargetArch, false, "drive9-"+payload)
 	writeSyntheticExecutable(t, options.LauncherSource, options.TargetArch, false, "launcher-"+payload)
+	writeSyntheticExecutable(t, options.FusermountSource, options.TargetArch, true, "fusermount-"+payload)
 	return options
 }
 

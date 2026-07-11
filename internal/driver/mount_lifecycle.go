@@ -88,13 +88,12 @@ func (l mountLifecycle) Launch(ctx context.Context, request mountLaunchRequest) 
 		return mountState{}, fmt.Errorf("commit starting mount state: %w", err)
 	}
 
-	envBody := encodeNULTerminated([]string{
+	environment := []string{
 		"DRIVE9_SERVER=" + request.Server,
 		"DRIVE9_API_KEY=" + request.APIKey,
-		"TMPDIR=" + hostRuntimeDir,
-		"XDG_RUNTIME_DIR=" + hostRuntimeDir,
-		"PATH=/usr/sbin:/usr/bin:/sbin:/bin",
-	})
+	}
+	environment = append(environment, hostMountRuntimeEnvironment()...)
+	envBody := encodeNULTerminated(environment)
 	argv := append([]string{binaryPath}, request.MountArgs...)
 	argsBody := encodeNULTerminated(argv)
 	if err := publishStartupFile(l.runtime, candidate.EnvPath, envBody); err != nil {

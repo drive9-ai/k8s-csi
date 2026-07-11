@@ -18,6 +18,7 @@ const (
 	hostProcRootPath           = "/host-proc/1/root"
 	hostDrive9DesiredPath      = "/var/lib/drive9-csi/bin/drive9"
 	hostLauncherPath           = "/var/lib/drive9-csi/bin/drive9-csi-launcher"
+	hostFusermountPath         = "/var/lib/drive9-csi/bin/fusermount3"
 )
 
 type nodeCapabilityName string
@@ -56,7 +57,7 @@ const (
 	hostProcUnavailableReason  = "host /proc not mounted at /host-proc or PID 1 namespace/root inaccessible"
 	hostPIDSignalUnavailable   = "host systemd PID signal execution unavailable"
 	fuseUnavailableReason      = "host /dev/fuse is not a readable/writable character device"
-	fuseHelperUnavailable      = "host fusermount or umount helper unavailable"
+	fuseHelperUnavailable      = "installed host fusermount3 helper unavailable"
 	systemctlUnavailable       = "host systemctl executable unavailable"
 	journalctlUnavailable      = "host journalctl executable unavailable"
 	runtimeDirUnavailable      = "host /run/drive9-csi runtime directory unavailable or unsafe"
@@ -283,31 +284,9 @@ func checkHostFUSEDevice(ctx context.Context, runtime hostRuntime) bool {
 	return true
 }
 
-var fuseHelperPaths = [...]string{
-	"/usr/bin/fusermount3",
-	"/bin/fusermount3",
-	"/usr/bin/fusermount",
-	"/bin/fusermount",
-	"/usr/bin/umount",
-	"/bin/umount",
-}
-
-func isFUSEHelperPath(path string) bool {
-	for _, candidate := range fuseHelperPaths {
-		if path == candidate {
-			return true
-		}
-	}
-	return false
-}
-
 func checkHostFUSEHelper(ctx context.Context, runtime hostRuntime) bool {
-	for _, path := range fuseHelperPaths {
-		if checkHostExecutable(ctx, runtime, path) {
-			return true
-		}
-	}
-	return false
+	result, err := runtime.Exec(ctx, hostNamespaceCommand(hostFusermountPath, "--version"))
+	return err == nil && result.ExitCode == 0
 }
 
 func checkHostExecutable(ctx context.Context, runtime hostRuntime, path string) bool {
@@ -364,6 +343,10 @@ func checkInstalledHostBinaries(runtime hostRuntime) bool {
 	}
 	launcher, err := runtime.Lstat(hostLauncherPath)
 	if err != nil || !launcher.Mode().IsRegular() || launcher.Mode().Perm()&0o111 == 0 {
+		return false
+	}
+	fusermount, err := runtime.Lstat(hostFusermountPath)
+	if err != nil || !fusermount.Mode().IsRegular() || fusermount.Mode().Perm()&0o111 == 0 {
 		return false
 	}
 	return true

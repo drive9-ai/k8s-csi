@@ -404,7 +404,7 @@ func hostMountRuntimeEnvironment() []string {
 	return []string{
 		"TMPDIR=" + hostRuntimeDir,
 		"XDG_RUNTIME_DIR=" + hostRuntimeDir,
-		"PATH=/usr/sbin:/usr/bin:/sbin:/bin",
+		"PATH=" + hostBinaryDir + ":/usr/sbin:/usr/bin:/sbin:/bin",
 	}
 }
 
