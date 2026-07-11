@@ -14,11 +14,13 @@ type publishWorkflow struct {
 }
 
 type publishWorkflowJob struct {
-	Needs []string              `json:"needs"`
-	Steps []publishWorkflowStep `json:"steps"`
+	Needs   []string              `json:"needs"`
+	Outputs map[string]string     `json:"outputs"`
+	Steps   []publishWorkflowStep `json:"steps"`
 }
 
 type publishWorkflowStep struct {
+	ID   string            `json:"id"`
 	Name string            `json:"name"`
 	If   string            `json:"if"`
 	Uses string            `json:"uses"`
@@ -97,35 +99,56 @@ func TestPublishWorkflowAllowsManualValidationBuildButGatesMainPush(t *testing.T
 	}
 }
 
-func TestPublishWorkflowProducesDigestPinnedReleaseManifests(t *testing.T) {
+func TestPublishWorkflowOutputsImageMetadataWithoutDeploymentArtifacts(t *testing.T) {
 	body := readRepoFile(t, ".github/workflows/publish-image.yml")
 	workflow := decodePublishWorkflow(t, body)
 	merge := requiredWorkflowJob(t, workflow, "merge")
 
-	if !workflowUses(merge, "actions/checkout@") {
-		t.Fatal("merge job must check out the source manifest base")
+	if workflowUses(merge, "actions/checkout@") {
+		t.Fatal("merge job must not check out deployment manifests")
 	}
-	if !workflowUses(merge, "actions/upload-artifact@") {
-		t.Fatal("merge job must upload digest-pinned Kubernetes manifests")
+	if workflowUses(merge, "actions/upload-artifact@") {
+		t.Fatal("merge job must not upload deployment artifacts")
 	}
-	mergeRun := workflowRun(merge)
+
+	output := requiredWorkflowStep(t, merge, "Output published image")
+	if output.ID != "image" {
+		t.Fatalf("image output step id = %q, want image", output.ID)
+	}
 	for _, want := range []string{
 		`docker buildx imagetools inspect`,
 		`--format '{{json .}}'`,
 		`.manifest.digest | select(test("^sha256:[0-9a-f]{64}$"))`,
-		`release_base="${release_root}/base"`,
-		`cp -R deploy/kubernetes "$release_base"`,
-		`'  - ../../base'`,
-		`registry.invalid/drive9-csi`,
-		`digest: %s`,
-		`drive9-csi-kubernetes`,
+		`tag=%s`,
+		`digest=%s`,
+		`reference=%s@%s`,
+		`GITHUB_OUTPUT`,
+		`GITHUB_STEP_SUMMARY`,
 	} {
-		if !strings.Contains(mergeRun, want) {
-			t.Fatalf("merge job missing release-manifest evidence %q", want)
+		if !strings.Contains(output.Run, want) {
+			t.Fatalf("image output step missing %q", want)
 		}
 	}
-	if strings.Contains(mergeRun, `'  - ../..'`) {
-		t.Fatal("release overlay must not reference a parent kustomization that contains the overlay")
+	for name, want := range map[string]string{
+		"tag":       "${{ steps.image.outputs.tag }}",
+		"digest":    "${{ steps.image.outputs.digest }}",
+		"reference": "${{ steps.image.outputs.reference }}",
+	} {
+		if merge.Outputs[name] != want {
+			t.Fatalf("merge output %q = %q, want %q", name, merge.Outputs[name], want)
+		}
+	}
+	for _, forbidden := range []string{
+		"Create digest-pinned Kubernetes manifests",
+		"Upload digest-pinned Kubernetes manifests",
+		"kubernetes-manifests-",
+		"drive9-csi-kubernetes",
+		"deploy/kubernetes",
+		"registry.invalid/drive9-csi",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("publish workflow contains deployment responsibility %q", forbidden)
+		}
 	}
 }
 
@@ -146,7 +169,6 @@ func TestPublishWorkflowHasNoMutableDrive9Resolution(t *testing.T) {
 		`DRIVE9_CSI_COMPATIBILITY_RESULT_COMMIT`,
 		`DRIVE9_CSI_COMPATIBILITY_RESULT_SHA256`,
 		`"build/**"`,
-		`"deploy/kubernetes/**"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("publish workflow missing immutable input evidence %q", want)
@@ -154,6 +176,9 @@ func TestPublishWorkflowHasNoMutableDrive9Resolution(t *testing.T) {
 	}
 	if strings.Contains(body, "compatibility_result_url:") {
 		t.Fatal("publish workflow must not accept an arbitrary compatibility result URL")
+	}
+	if strings.Contains(body, `"deploy/kubernetes/**"`) {
+		t.Fatal("deployment-only changes must not trigger image publication")
 	}
 }
 
