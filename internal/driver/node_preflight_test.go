@@ -163,7 +163,6 @@ func TestNodePreflightUsesOnlyCanonicalHostCommands(t *testing.T) {
 		"--pid=/host-proc/1/ns/pid",
 		"--root=/host-proc/1/root",
 		"--wd=/host-proc/1/root",
-		"--fork",
 		"--",
 	}
 	execCalls := 0

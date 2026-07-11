@@ -414,7 +414,6 @@ func hostPIDNamespaceCommand(command string, args ...string) hostCommand {
 		"--pid=/host-proc/1/ns/pid",
 		"--root=/host-proc/1/root",
 		"--wd=/host-proc/1/root",
-		"--fork",
 		"--",
 		command,
 	}
