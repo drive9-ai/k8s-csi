@@ -49,12 +49,25 @@ func hostNamespaceCommand(command string, args ...string) hostCommand {
 	return hostCommand{Path: "nsenter", Args: hostArgs}
 }
 
+func hostSystemctlCommand(args ...string) hostCommand {
+	systemdArgs := []string{
+		"--service-type=exec",
+		"--wait",
+		"--pipe",
+		"--quiet",
+		"--collect",
+		"--",
+		"/usr/bin/systemctl",
+	}
+	systemdArgs = append(systemdArgs, args...)
+	return hostNamespaceCommand("systemd-run", systemdArgs...)
+}
+
 func querySystemdUnit(ctx context.Context, runtime hostRuntime, unit string) (systemdUnitObservation, error) {
 	if !systemdUnitPattern.MatchString(unit) {
 		return systemdQueryFailure("invalid Drive9 systemd unit")
 	}
-	command := hostNamespaceCommand(
-		"systemctl",
+	command := hostSystemctlCommand(
 		"show",
 		"--property=LoadState",
 		"--property=ActiveState",
@@ -149,8 +162,7 @@ func querySystemdMainPID(ctx context.Context, runtime hostRuntime, unit string) 
 	if !systemdUnitPattern.MatchString(unit) {
 		return 0, fmt.Errorf("%w: invalid Drive9 systemd unit", errSystemdQuery)
 	}
-	result, err := runtime.Exec(ctx, hostNamespaceCommand(
-		"systemctl",
+	result, err := runtime.Exec(ctx, hostSystemctlCommand(
 		"show",
 		"--property=MainPID",
 		"--",
@@ -222,8 +234,7 @@ func querySystemdUnitDescription(ctx context.Context, runtime hostRuntime, unit 
 	if !systemdUnitPattern.MatchString(unit) {
 		return "", fmt.Errorf("%w: invalid Drive9 systemd unit", errSystemdQuery)
 	}
-	result, err := runtime.Exec(ctx, hostNamespaceCommand(
-		"systemctl",
+	result, err := runtime.Exec(ctx, hostSystemctlCommand(
 		"show",
 		"--property=Description",
 		"--",

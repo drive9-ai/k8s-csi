@@ -191,7 +191,7 @@ func runNodePreflight(ctx context.Context, runtime hostRuntime) nodeCapabilities
 	if !checkHostFUSEHelper(ctx, runtime) {
 		capabilities = capabilities.withUnavailable(nodeCapabilityFUSEHelper, fuseHelperUnavailable)
 	}
-	if !checkHostExecutable(ctx, runtime, "/usr/bin/systemctl") {
+	if !checkHostSystemctl(ctx, runtime) {
 		capabilities = capabilities.withUnavailable(nodeCapabilitySystemctl, systemctlUnavailable)
 	}
 	if !checkHostExecutable(ctx, runtime, "/usr/bin/journalctl") {
@@ -215,6 +215,15 @@ func runNodePreflight(ctx context.Context, runtime hostRuntime) nodeCapabilities
 	}
 
 	return capabilities
+}
+
+func checkHostSystemctl(ctx context.Context, runtime hostRuntime) bool {
+	observation, err := querySystemdUnit(
+		ctx,
+		runtime,
+		"drive9-mount-0000000000000000.service",
+	)
+	return err == nil && observation.State == systemdUnitNotFound
 }
 
 func openHostProcHandles(runtime hostRuntime) error {

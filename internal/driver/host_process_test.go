@@ -457,7 +457,8 @@ func assertNoDestructiveHostCalls(t *testing.T, calls []fakeHostCall) {
 
 func isReadOnlyHostObservation(command hostCommand) bool {
 	for i := 0; i+1 < len(command.Args); i++ {
-		if command.Args[i] == "systemctl" && command.Args[i+1] == "show" {
+		if (command.Args[i] == "systemctl" || command.Args[i] == "/usr/bin/systemctl") &&
+			command.Args[i+1] == "show" {
 			return true
 		}
 	}

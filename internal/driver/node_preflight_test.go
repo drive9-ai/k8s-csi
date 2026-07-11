@@ -348,14 +348,17 @@ func (f *nodePreflightFixture) installCallbacks() {
 			if containsArgument(inner, f.drive9Path) && f.failure == "drive9-exec" {
 				return hostCommandResult{ExitCode: 1, Stderr: []byte("Drive9 failed")}, errors.New("exit status 1")
 			}
+		case "systemctl":
+			if f.failure == "systemctl" {
+				return hostCommandResult{ExitCode: 1, Stderr: []byte("systemctl failed")}, errors.New("exit status 1")
+			}
+			return systemdShowResult(systemdUnitNotFound), nil
 		case "/bin/test":
 			path := inner[len(inner)-1]
 			switch {
 			case path == "/dev/fuse" && f.failure == "fuse":
 				return hostCommandResult{ExitCode: 1}, errors.New("test failed")
 			case isFUSEHelperPath(path) && f.failure == "fuse-helper":
-				return hostCommandResult{ExitCode: 1}, errors.New("test failed")
-			case path == "/usr/bin/systemctl" && f.failure == "systemctl":
 				return hostCommandResult{ExitCode: 1}, errors.New("test failed")
 			case path == "/usr/bin/journalctl" && f.failure == "journalctl":
 				return hostCommandResult{ExitCode: 1}, errors.New("test failed")
@@ -368,7 +371,20 @@ func (f *nodePreflightFixture) installCallbacks() {
 func hostInnerCommand(command hostCommand) []string {
 	for i, arg := range command.Args {
 		if arg == "--" && i+1 < len(command.Args) {
-			return command.Args[i+1:]
+			inner := command.Args[i+1:]
+			if len(inner) > 0 && inner[0] == "systemd-run" && containsArgument(inner, "--pipe") {
+				for j, systemdArg := range inner {
+					if systemdArg != "--" || j+1 >= len(inner) {
+						continue
+					}
+					payload := append([]string(nil), inner[j+1:]...)
+					if len(payload) > 0 && payload[0] == "/usr/bin/systemctl" {
+						payload[0] = "systemctl"
+					}
+					return payload
+				}
+			}
+			return inner
 		}
 	}
 	return nil
