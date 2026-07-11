@@ -16,35 +16,23 @@ jobs:
     outputs:
       drive9_version: ${{ steps.release.outputs.version }}
       drive9_source_commit: ${{ steps.release.outputs.source_commit }}
-      drive9_release_commit: ${{ steps.release.outputs.release_commit }}
+      drive9_amd64_sha256: ${{ steps.release.outputs.linux_amd64_sha256 }}
+      drive9_arm64_sha256: ${{ steps.release.outputs.linux_arm64_sha256 }}
       tags: ${{ steps.image-tags.outputs.tags }}
       trace_tag: ${{ steps.image-tags.outputs.trace_tag }}
     steps:
-      - name: Resolve latest Drive9 CLI release
+      - name: Resolve latest published Drive9 CLI release
         id: release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ! release_commit=$(gh api \
-            --method GET \
-            "repos/mem9-ai/drive9-fe/commits" \
-            -f path=site/releases/checksums.txt \
-            -f per_page=1 \
-            --jq '.[0].sha'); then
-            echo "Could not resolve the latest Drive9 CLI release commit" >&2
-            exit 1
-          fi
-          if [[ ! "$release_commit" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "Latest Drive9 CLI release did not resolve to a full commit SHA" >&2
-            exit 1
-          fi
-
-          release_base="https://raw.githubusercontent.com/mem9-ai/drive9-fe/${release_commit}/site/releases"
-          version_file="${RUNNER_TEMP}/drive9-version"
+          release_base="https://drive9.ai/releases"
+          version_before_file="${RUNNER_TEMP}/drive9-version-before"
+          version_after_file="${RUNNER_TEMP}/drive9-version-after"
           checksums_file="${RUNNER_TEMP}/drive9-checksums.txt"
           if ! curl --proto '=https' --tlsv1.2 -fsSL \
-            -o "$version_file" "${release_base}/version"; then
+            -o "$version_before_file" "${release_base}/version"; then
             echo "Could not download the Drive9 CLI version" >&2
             exit 1
           fi
@@ -53,10 +41,20 @@ jobs:
             echo "Could not download the Drive9 CLI checksums" >&2
             exit 1
           fi
+          if ! curl --proto '=https' --tlsv1.2 -fsSL \
+            -o "$version_after_file" "${release_base}/version"; then
+            echo "Could not confirm the Drive9 CLI version" >&2
+            exit 1
+          fi
 
-          version=$(<"$version_file")
+          version=$(<"$version_before_file")
+          version_after=$(<"$version_after_file")
           if [[ ! "$version" =~ ^[0-9a-f]{7}$ ]]; then
             echo "Drive9 CLI version must be a seven-character commit prefix" >&2
+            exit 1
+          fi
+          if [[ "$version" != "$version_after" ]]; then
+            echo "Drive9 CLI release changed while resolving metadata" >&2
             exit 1
           fi
           for artifact in drive9-linux-amd64 drive9-linux-arm64; do
@@ -68,6 +66,14 @@ jobs:
               echo "Release must contain exactly one checksum for $artifact" >&2
               exit 1
             fi
+            case "$artifact" in
+            drive9-linux-amd64)
+              printf 'linux_amd64_sha256=%s\n' "$checksum" >> "$GITHUB_OUTPUT"
+              ;;
+            drive9-linux-arm64)
+              printf 'linux_arm64_sha256=%s\n' "$checksum" >> "$GITHUB_OUTPUT"
+              ;;
+            esac
           done
 
           if ! source_commit=$(gh api \
@@ -84,7 +90,6 @@ jobs:
 
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
           printf 'source_commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
-          printf 'release_commit=%s\n' "$release_commit" >> "$GITHUB_OUTPUT"
 
       - name: Resolve image tags
         id: image-tags
@@ -135,7 +140,9 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           build-args: |
-            DRIVE9_CLI_RELEASE_COMMIT=${{ needs.metadata.outputs.drive9_release_commit }}
+            DRIVE9_CLI_VERSION=${{ needs.metadata.outputs.drive9_version }}
+            DRIVE9_CLI_LINUX_AMD64_SHA256=${{ needs.metadata.outputs.drive9_amd64_sha256 }}
+            DRIVE9_CLI_LINUX_ARM64_SHA256=${{ needs.metadata.outputs.drive9_arm64_sha256 }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.source=https://github.com/drive9-ai/k8s-csi
@@ -144,7 +151,6 @@ jobs:
             org.opencontainers.image.version=${{ needs.metadata.outputs.trace_tag }}
             ai.drive9.cli.version=${{ needs.metadata.outputs.drive9_version }}
             ai.drive9.cli.source-commit=${{ needs.metadata.outputs.drive9_source_commit }}
-            ai.drive9.cli.release-commit=${{ needs.metadata.outputs.drive9_release_commit }}
 
       - name: Export digest
         shell: bash
@@ -240,7 +246,6 @@ jobs:
           TRACE_TAG: ${{ needs.metadata.outputs.trace_tag }}
           DRIVE9_VERSION: ${{ needs.metadata.outputs.drive9_version }}
           DRIVE9_SOURCE_COMMIT: ${{ needs.metadata.outputs.drive9_source_commit }}
-          DRIVE9_RELEASE_COMMIT: ${{ needs.metadata.outputs.drive9_release_commit }}
         run: |
           image_ref="${IMAGE}:${TRACE_TAG}"
           manifest_file="${RUNNER_TEMP}/drive9-csi-manifest.json"
@@ -263,7 +268,6 @@ jobs:
             printf '### Published image\n\n'
             printf -- '- Drive9 CLI version: `%s`\n' "$DRIVE9_VERSION"
             printf -- '- Drive9 source commit: `%s`\n' "$DRIVE9_SOURCE_COMMIT"
-            printf -- '- Drive9 release commit: `%s`\n' "$DRIVE9_RELEASE_COMMIT"
             printf -- '- CSI source commit: `%s`\n' "$GITHUB_SHA"
             printf -- '- Tag: `%s`\n' "$image_ref"
             printf -- '- Digest: `%s`\n' "$image_digest"
