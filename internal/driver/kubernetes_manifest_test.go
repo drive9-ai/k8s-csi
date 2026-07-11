@@ -394,9 +394,9 @@ func TestKubernetesManifestUsesExplicitBaseAndLocalImageContracts(t *testing.T) 
 		}
 	}
 
-	local := readRepoFile(t, "deploy/kubernetes/overlays/local/kustomization.yaml")
+	local := readRepoFile(t, "deploy/overlays/local/kustomization.yaml")
 	for _, want := range []string{
-		"resources:\n  - ../..",
+		"resources:\n  - ../../kubernetes",
 		"name: registry.invalid/drive9-csi",
 		"newName: ghcr.io/drive9-ai/drive9-csi",
 		"newTag: local",
@@ -405,12 +405,15 @@ func TestKubernetesManifestUsesExplicitBaseAndLocalImageContracts(t *testing.T) 
 			t.Fatalf("local image overlay missing %q", want)
 		}
 	}
+	if strings.Contains(local, "  - ../..\n") {
+		t.Fatal("local overlay must not reference a parent kustomization that contains the overlay")
+	}
 	for _, forbidden := range []string{":latest", "drive9-aff1023-csi-ef5fab2"} {
 		if strings.Contains(node.Image+installer.Image+controller.Image+local, forbidden) {
 			t.Fatalf("Kubernetes image contract contains stale or mutable reference %q", forbidden)
 		}
 	}
-	if makefile := readRepoFile(t, "Makefile"); !strings.Contains(makefile, "kubectl apply -k deploy/kubernetes/overlays/local") {
+	if makefile := readRepoFile(t, "Makefile"); !strings.Contains(makefile, "kubectl apply -k deploy/overlays/local") {
 		t.Fatal("Makefile manifests target must select the explicit local overlay")
 	}
 }

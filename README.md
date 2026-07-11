@@ -99,7 +99,7 @@ make image IMAGE=ghcr.io/drive9-ai/drive9-csi:local
 Install that preloaded local image with the local overlay:
 
 ```sh
-kubectl apply -k deploy/kubernetes/overlays/local
+kubectl apply -k deploy/overlays/local
 ```
 
 For a published release, extract its workflow artifact and apply the release

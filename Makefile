@@ -58,4 +58,4 @@ image-multi:
 
 .PHONY: manifests
 manifests:
-	kubectl apply -k deploy/kubernetes/overlays/local
+	kubectl apply -k deploy/overlays/local

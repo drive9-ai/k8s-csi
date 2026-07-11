@@ -113,6 +113,9 @@ func TestPublishWorkflowProducesDigestPinnedReleaseManifests(t *testing.T) {
 		`docker buildx imagetools inspect`,
 		`--format '{{json .}}'`,
 		`.manifest.digest | select(test("^sha256:[0-9a-f]{64}$"))`,
+		`release_base="${release_root}/base"`,
+		`cp -R deploy/kubernetes "$release_base"`,
+		`'  - ../../base'`,
 		`registry.invalid/drive9-csi`,
 		`digest: %s`,
 		`drive9-csi-kubernetes`,
@@ -120,6 +123,9 @@ func TestPublishWorkflowProducesDigestPinnedReleaseManifests(t *testing.T) {
 		if !strings.Contains(mergeRun, want) {
 			t.Fatalf("merge job missing release-manifest evidence %q", want)
 		}
+	}
+	if strings.Contains(mergeRun, `'  - ../..'`) {
+		t.Fatal("release overlay must not reference a parent kustomization that contains the overlay")
 	}
 }
 
