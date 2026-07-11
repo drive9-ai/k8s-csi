@@ -278,8 +278,7 @@ func (g binaryGarbageCollector) listRuntimeArtifacts() ([]string, error) {
 }
 
 func (g binaryGarbageCollector) listDrive9SystemdUnits(ctx context.Context) ([]string, error) {
-	result, err := g.runtime.Exec(ctx, hostNamespaceCommand(
-		"systemctl",
+	result, err := g.runtime.Exec(ctx, hostSystemctlCommand(
 		"list-units",
 		"--all",
 		"--plain",

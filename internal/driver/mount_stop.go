@@ -350,7 +350,7 @@ func (s mountStopper) runDrain(ctx context.Context, state mountState) error {
 }
 
 func (s mountStopper) stopSystemdUnit(ctx context.Context, state mountState) error {
-	command := hostNamespaceCommand("systemctl", "stop", "--", state.SystemdUnit)
+	command := hostSystemctlCommand("stop", "--", state.SystemdUnit)
 	result, err := s.runtime.Exec(ctx, command)
 	if err != nil || result.ExitCode != 0 {
 		return fmt.Errorf("systemctl stop failed")
@@ -359,7 +359,7 @@ func (s mountStopper) stopSystemdUnit(ctx context.Context, state mountState) err
 }
 
 func (s mountStopper) resetFailedUnit(ctx context.Context, state mountState) error {
-	command := hostNamespaceCommand("systemctl", "reset-failed", "--", state.SystemdUnit)
+	command := hostSystemctlCommand("reset-failed", "--", state.SystemdUnit)
 	result, err := s.runtime.Exec(ctx, command)
 	if err != nil || result.ExitCode != 0 {
 		return fmt.Errorf("systemctl reset-failed failed")

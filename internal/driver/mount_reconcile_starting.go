@@ -516,7 +516,7 @@ func (r startingReconciler) removeFailedUnit(ctx context.Context, state mountSta
 	if err := verifyMountSystemdUnitDescription(ctx, r.runtime, state); err != nil {
 		return err
 	}
-	command := hostNamespaceCommand("systemctl", "reset-failed", "--", state.SystemdUnit)
+	command := hostSystemctlCommand("reset-failed", "--", state.SystemdUnit)
 	result, err := r.runtime.Exec(ctx, command)
 	if err != nil || result.ExitCode != 0 {
 		return fmt.Errorf("remove failed transient unit")
