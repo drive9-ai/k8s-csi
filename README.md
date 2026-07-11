@@ -76,9 +76,10 @@ the volume prefix, for example `/k8s/pvc`, and the metadata index path
 
 The checked-in Kubernetes manifests are a fail-closed base. Their CSI image is
 `registry.invalid/drive9-csi:unpublished`, so applying the base cannot silently
-run an older, incompatible driver. The publish workflow only builds and pushes
-the image, then reports its trace tag, manifest-list digest, and immutable
-reference in the workflow summary. It does not generate deployment manifests.
+run an older, incompatible driver. The manually triggered publish workflow
+resolves the latest complete Drive9 CLI release, builds and pushes the image,
+then reports its trace tag, manifest-list digest, and immutable reference in the
+workflow summary. It does not generate deployment manifests.
 Deployment and validation must inject that immutable reference through a local,
 environment-specific overlay.
 
@@ -91,10 +92,20 @@ ghcr.io/drive9-ai/drive9-csi:drive9-<drive9-short-sha>-csi-<csi-short-sha>
 The publish workflow does not publish `:latest` or `0.1.0`. Use a traceable tag
 or a digest.
 
-To build a local image:
+To build a validation image with the latest published Drive9 CLI:
 
 ```sh
-make image IMAGE=ghcr.io/drive9-ai/drive9-csi:local
+gh workflow run publish-image.yml \
+  -R drive9-ai/k8s-csi \
+  --ref <csi-branch>
+```
+
+To build a local image from the same immutable Drive9 CLI release:
+
+```sh
+make image \
+  IMAGE=ghcr.io/drive9-ai/drive9-csi:local \
+  DRIVE9_CLI_RELEASE_COMMIT=<full-drive9-fe-commit>
 ```
 
 Install that preloaded local image with the local overlay:

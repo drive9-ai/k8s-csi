@@ -21,17 +21,22 @@ RUN target_os="${TARGETOS:-linux}" \
 
 FROM --platform=$BUILDPLATFORM debian:bookworm-slim AS drive9-downloader
 ARG TARGETARCH
-COPY build/drive9-cli.lock.json /tmp/drive9-cli.lock.json
+ARG DRIVE9_CLI_RELEASE_COMMIT
 COPY --from=csi-builder /out/drive9-csi-build /usr/local/bin/drive9-csi-build
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl jq \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
-RUN target_arch="${TARGETARCH:-amd64}" \
- && platform="linux/${target_arch}" \
- && url="$(jq -er --arg platform "${platform}" '.current.artifacts[$platform].url' /tmp/drive9-cli.lock.json)" \
- && digest="$(jq -er --arg platform "${platform}" '.current.artifacts[$platform].sha256 | select(test("^[0-9a-f]{64}$"))' /tmp/drive9-cli.lock.json)" \
+RUN release_commit="${DRIVE9_CLI_RELEASE_COMMIT}" \
+ && if ! printf '%s' "${release_commit}" | grep -Eq '^[0-9a-f]{40}$'; then echo "DRIVE9_CLI_RELEASE_COMMIT must be a full commit SHA" >&2; exit 1; fi \
+ && target_arch="${TARGETARCH:-amd64}" \
+ && case "${target_arch}" in amd64|arm64) ;; *) echo "unsupported Drive9 CLI architecture: ${target_arch}" >&2; exit 1 ;; esac \
+ && artifact="drive9-linux-${target_arch}" \
+ && release_base="https://raw.githubusercontent.com/mem9-ai/drive9-fe/${release_commit}/site/releases" \
+ && curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/checksums.txt "${release_base}/checksums.txt" \
+ && digest="$(awk -v artifact="${artifact}" '$2 == artifact { count += 1; value = $1 } END { if (count == 1) print value }' /tmp/checksums.txt)" \
+ && if ! printf '%s' "${digest}" | grep -Eq '^[0-9a-f]{64}$'; then echo "release must contain exactly one valid checksum for ${artifact}" >&2; exit 1; fi \
  && mkdir -p /out \
- && curl --proto '=https' --tlsv1.2 -fsSL -o /out/drive9 "${url}" \
+ && curl --proto '=https' --tlsv1.2 -fsSL -o /out/drive9 "${release_base}/${artifact}" \
  && printf '%s  %s\n' "${digest}" /out/drive9 | sha256sum -c - \
  && chmod +x /out/drive9 \
  && /usr/local/bin/drive9-csi-build verify-host-binary --path=/out/drive9 --target-arch="${target_arch}" \
