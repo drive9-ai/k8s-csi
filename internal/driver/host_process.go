@@ -59,6 +59,7 @@ type verifiedProcessIdentity struct {
 	PIDStartTime      string
 	ControlSocketPath string
 	ProcessStatePath  string
+	IsLauncher        bool
 }
 
 type drive9ProcessState struct {

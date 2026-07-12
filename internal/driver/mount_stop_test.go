@@ -300,6 +300,52 @@ func TestMountStopCancelsActivatingStartingServiceWithoutMainPID(t *testing.T) {
 	}
 }
 
+func TestMountStopStartingLauncherIdentityStaysOutOfDurableDrive9Fields(t *testing.T) {
+	fixture := newMountStopFixture(t)
+	starting := validStartingState(t)
+	fixture.state = starting
+	fixture.states.states = []mountState{starting}
+	fixture.service = systemdUnitActivating
+	fixture.mounted = false
+	fixture.pidAlive = false
+	fixture.mainPID = 5252
+	fixture.mainPIDAlive = true
+	fixture.mainProcess = "launcher"
+	fixture.processStatePresent = false
+	fixture.failure = "systemctl-stop"
+	fixture.installCallbacks()
+
+	result, err := fixture.stopper.Stop(context.Background(), mountStopRequest{
+		State:  starting,
+		Intent: mountStopIntentCancelStart,
+	})
+	if err == nil || result != mountStopPreserved {
+		t.Fatalf("Stop(starting launcher) = %q, %v, want preserved stop failure", result, err)
+	}
+	if !containsString(fixture.events.snapshot(), "systemctl-stop") {
+		t.Fatalf("launcher cancellation failed before systemctl stop: %v", fixture.events.snapshot())
+	}
+	states := fixture.states.snapshot()
+	if len(states) < 2 {
+		t.Fatalf("Stop() did not persist stopping intent: %#v", states)
+	}
+	stopping := states[len(states)-1]
+	if stopping.Phase != mountStatePhaseStopping || stopping.PID != 0 ||
+		stopping.PIDStartTime != "" || stopping.ControlSocketPath != "" ||
+		stopping.ProcessStatePath != "" || stopping.StartedAt != "" {
+		t.Fatalf("stopping state persisted launcher as Drive9 identity: %#v", stopping)
+	}
+
+	fixture.failure = ""
+	fixture.service = systemdUnitNotFound
+	fixture.mainPIDAlive = false
+	fixture.installCallbacks()
+	result, err = fixture.stopper.Reconcile(context.Background(), stopping)
+	if err != nil || result != mountStopCleaned {
+		t.Fatalf("Reconcile(starting launcher) = %q, %v, want cleaned", result, err)
+	}
+}
+
 func TestMountStopPersistsVerifiedSystemdMainPIDForStaleActiveState(t *testing.T) {
 	fixture := newMountStopFixture(t)
 	fixture.pidAlive = false
@@ -402,6 +448,7 @@ type mountStopFixture struct {
 	pidAlive              bool
 	mainPID               int
 	mainPIDAlive          bool
+	mainProcess           string
 	processStatePID       int
 	processStatePIDAlive  bool
 	processStateStartTime string
@@ -432,6 +479,7 @@ func newMountStopFixture(t *testing.T) *mountStopFixture {
 		pidAlive:              true,
 		mainPID:               state.PID,
 		mainPIDAlive:          true,
+		mainProcess:           "drive9",
 		processStatePID:       state.PID,
 		processStatePIDAlive:  true,
 		processStateStartTime: state.PIDStartTime,
@@ -515,6 +563,9 @@ func (f *mountStopFixture) installCallbacks() {
 			}
 			return []byte(hostProcStatLine(f.processStatePID, "drive9 mount", f.processStateStartTime)), nil
 		case hostProcPIDPath(current.PID, "cmdline"):
+			if current.PID == f.mainPID && f.mainProcess == "launcher" {
+				return []byte(hostLauncherPath + "\x00" + current.EnvPath + "\x00" + current.ArgsPath + "\x00"), nil
+			}
 			target := current.StagingTarget
 			if f.ownershipMismatch {
 				target += "-other"
@@ -523,6 +574,9 @@ func (f *mountStopFixture) installCallbacks() {
 		case hostProcPIDPath(current.PID, "cgroup"):
 			return []byte("0::/system.slice/" + current.SystemdUnit + "\n"), nil
 		case hostProcPIDPath(f.mainPID, "cmdline"):
+			if f.mainProcess == "launcher" {
+				return []byte(hostLauncherPath + "\x00" + current.EnvPath + "\x00" + current.ArgsPath + "\x00"), nil
+			}
 			return []byte(current.BinaryPath + "\x00mount\x00" + current.StagingTarget + "\x00"), nil
 		case hostProcPIDPath(f.mainPID, "cgroup"):
 			return []byte("0::/system.slice/" + current.SystemdUnit + "\n"), nil
@@ -538,6 +592,9 @@ func (f *mountStopFixture) installCallbacks() {
 		current := f.currentState()
 		if path == hostProcPIDPath(current.PID, "exe") || path == hostProcPIDPath(f.mainPID, "exe") ||
 			path == hostProcPIDPath(f.processStatePID, "exe") {
+			if path == hostProcPIDPath(f.mainPID, "exe") && f.mainProcess == "launcher" {
+				return hostLauncherPath, nil
+			}
 			return current.BinaryPath, nil
 		}
 		return "", fmt.Errorf("unexpected readlink path %s", path)

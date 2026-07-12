@@ -658,7 +658,17 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		return nil, status.Errorf(codes.FailedPrecondition, "read durable mount state: %v", stateErr)
 	}
 	if stateExists && !mountStateMatches(state, volumeID, remoteRoot, stagingTarget) {
-		return nil, status.Error(codes.FailedPrecondition, "durable mount state belongs to a different volume or staging target")
+		if err := d.reconcileStaleStageStateForMount(
+			ctx,
+			repository,
+			state,
+			volumeID,
+			remoteRoot,
+			stagingTarget,
+		); err != nil {
+			return nil, err
+		}
+		stateExists = false
 	}
 
 	activeNeedsRecovery := false
@@ -1230,26 +1240,62 @@ const (
 	stateMismatched
 )
 
-func (d *Driver) prepareStageStateForMount(volumeID string, stagingTarget string) error {
-	state, err := d.readMountState(volumeID)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return status.Errorf(codes.FailedPrecondition, "read stage state: %v", err)
-	}
-	if state.VolumeID != volumeID {
-		return status.Error(codes.FailedPrecondition, "stage state belongs to a different Drive9 volume")
+func (d *Driver) reconcileStaleStageStateForMount(
+	ctx context.Context,
+	repository mountStateRepository,
+	state mountState,
+	volumeID string,
+	remoteRoot string,
+	stagingTarget string,
+) error {
+	if state.VolumeID != volumeID || state.RemoteRoot != remoteRoot {
+		return status.Error(codes.FailedPrecondition, "durable mount state belongs to a different volume")
 	}
 	if filepath.Clean(state.StagingTarget) == filepath.Clean(stagingTarget) {
-		return nil
+		return status.Error(codes.FailedPrecondition, "durable mount state identity does not match the stage request")
 	}
-	mounted, err := isMountPoint(state.StagingTarget)
+
+	active, err := d.hasActivePublishTargets(volumeID, state.StagingTarget)
 	if err != nil {
-		return status.Errorf(codes.Internal, "check previous staging mount: %v", err)
+		return status.Errorf(codes.FailedPrecondition, "recorded staging target publish state scan: %v", err)
+	}
+	if len(active) > 0 {
+		return status.Errorf(codes.FailedPrecondition,
+			"recorded staging target has %d active publish target(s)", len(active))
+	}
+	mounted, err := d.hostRuntime().IsMountPoint(state.StagingTarget)
+	if err != nil {
+		return status.Errorf(codes.Internal, "check recorded staging mount: %v", err)
 	}
 	if mounted {
-		return status.Error(codes.FailedPrecondition, "volume is already staged at a different target")
+		return status.Error(codes.FailedPrecondition, "volume remains staged at a different target")
+	}
+	if err := d.requireNodeCapabilities(nodeOperationUnstage); err != nil {
+		return err
+	}
+
+	stopper := newMountStopper(d.hostRuntime(), repository)
+	var result mountStopResult
+	switch state.Phase {
+	case mountStatePhaseActive:
+		result, err = stopper.Stop(ctx, mountStopRequest{
+			State:            state,
+			PublishConsumers: len(active),
+			Intent:           mountStopIntentRecovery,
+		})
+	case mountStatePhaseStarting:
+		result, err = stopper.Stop(ctx, mountStopRequest{
+			State:            state,
+			PublishConsumers: len(active),
+			Intent:           mountStopIntentCancelStart,
+		})
+	case mountStatePhaseStopping:
+		result, err = stopper.Reconcile(ctx, state)
+	default:
+		err = fmt.Errorf("unsupported durable mount phase %q", state.Phase)
+	}
+	if err != nil || result != mountStopCleaned {
+		return status.Errorf(codes.FailedPrecondition, "reconcile absent recorded staging target: %v", err)
 	}
 	return nil
 }
@@ -1438,7 +1484,7 @@ func (d *Driver) hasActivePublishTargets(volumeID string, stagingTarget string) 
 		if state.VolumeID != volumeID || filepath.Clean(state.StagingTarget) != stagingTarget {
 			continue
 		}
-		mounted, mountErr := isMountPoint(state.Target)
+		mounted, mountErr := d.hostRuntime().IsMountPoint(state.Target)
 		if mountErr != nil {
 			// Cannot determine mount status — conservative active.
 			log.Printf("drive9-csi: warning: cannot check mount for %s: %v", state.Target, mountErr)

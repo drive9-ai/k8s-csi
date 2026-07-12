@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -303,6 +305,127 @@ func TestNodeStageCleansAbandonedStartingStateBeforeFreshRemoteValidation(t *tes
 				t.Fatalf("fresh remote validation failure mutated host runtime: %#v", call.Command)
 			}
 		}
+	}
+}
+
+func TestNodeStageReconcilesAbsentRecordedTargetBeforeNewTarget(t *testing.T) {
+	fake := newFakeDrive9(t)
+	secret := fake.k8sSecret("drive9-secret", "default")
+	fake.close()
+
+	stateDir := t.TempDir()
+	starting := validStartingState(t)
+	active := validActiveState(t)
+	volumeID := volumeIDForRemoteRoot(active.RemoteRoot)
+	names, err := newVolumeHostNames(volumeID, active.AttemptID)
+	if err != nil {
+		t.Fatalf("newVolumeHostNames(): %v", err)
+	}
+	starting.VolumeID = volumeID
+	starting.SystemdUnit = names.SystemdUnit
+	starting.EnvPath = names.EnvPath
+	starting.ArgsPath = names.ArgsPath
+	active.VolumeID = volumeID
+	active.SystemdUnit = names.SystemdUnit
+	store := newMountStateStore(stateDir, newHostRuntime())
+	if err := store.Write(starting); err != nil {
+		t.Fatalf("write starting state: %v", err)
+	}
+	if err := store.Write(active); err != nil {
+		t.Fatalf("write active state: %v", err)
+	}
+
+	runtime := &fakeHostRuntime{}
+	runtime.isMountPointFn = func(string) (bool, error) { return false, nil }
+	runtime.lstatFn = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	runtime.readFileFn = func(path string) ([]byte, error) {
+		if path == hostProcPIDPath(active.PID, "stat") {
+			return nil, os.ErrNotExist
+		}
+		return nil, fmt.Errorf("unexpected read path %s", path)
+	}
+	runtime.execFn = func(_ context.Context, command hostCommand) (hostCommandResult, error) {
+		inner := hostInnerCommand(command)
+		if len(inner) > 1 && inner[0] == "systemctl" && inner[1] == "show" {
+			return systemdShowResult(systemdUnitNotFound), nil
+		}
+		return hostCommandResult{}, fmt.Errorf("unexpected command %#v", command)
+	}
+	runtime.nowFn = func() time.Time {
+		return time.Date(2026, 7, 10, 12, 2, 0, 0, time.UTC)
+	}
+	runtime.attemptIDFn = func() (string, error) {
+		return strings.Repeat("d", 32), nil
+	}
+	driver := &Driver{
+		cfg: Config{
+			StateDir:   stateDir,
+			DriverName: "csi.drive9.ai",
+		},
+		k8s:              k8sfake.NewSimpleClientset(secret),
+		nodeRuntime:      runtime,
+		nodeCapabilities: availableNodeCapabilities(),
+		nodePreflightSet: true,
+	}
+	newTarget := active.StagingTarget + "-new"
+
+	_, err = driver.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+		VolumeId:          active.VolumeID,
+		StagingTargetPath: newTarget,
+		VolumeCapability:  singleNodeMountCapability(),
+		VolumeContext: map[string]string{
+			"remoteRoot":        active.RemoteRoot,
+			attrSecretName:      secret.Name,
+			attrSecretNamespace: secret.Namespace,
+		},
+	})
+	if err == nil {
+		t.Fatal("NodeStageVolume() succeeded with unavailable Drive9 API")
+	}
+	if _, readErr := store.Read(active.VolumeID); !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatalf("absent recorded target was not reconciled before fresh validation: %v", readErr)
+	}
+}
+
+func TestNodeStagePreservesMountedRecordedTargetBeforeNewTarget(t *testing.T) {
+	fixture := newNodeStateFirstFixture(t, true)
+	fixture.stageRequest.StagingTargetPath = fixture.active.StagingTarget + "-new"
+
+	_, err := fixture.driver.NodeStageVolume(context.Background(), fixture.stageRequest)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("NodeStageVolume() status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
+	}
+	if _, readErr := fixture.driver.readMountState(fixture.active.VolumeID); readErr != nil {
+		t.Fatalf("new target request changed mounted durable state: %v", readErr)
+	}
+	if got := atomic.LoadInt32(&fixture.k8sActions); got != 0 {
+		t.Fatalf("new target request made %d Kubernetes API calls, want zero", got)
+	}
+}
+
+func TestNodeStagePreservesAbsentRecordedTargetWithPublishConsumer(t *testing.T) {
+	fixture := newNodeStateFirstFixture(t, true)
+	fixture.runtimeMounted[fixture.active.StagingTarget] = false
+	fixture.runtimeMounted[fixture.publishTarget] = true
+	if err := fixture.driver.writePublishState(publishState{
+		VolumeID:      fixture.active.VolumeID,
+		StagingTarget: fixture.active.StagingTarget,
+		Target:        fixture.publishTarget,
+		Status:        publishStatusPublished,
+	}); err != nil {
+		t.Fatalf("writePublishState(): %v", err)
+	}
+	fixture.stageRequest.StagingTargetPath = fixture.active.StagingTarget + "-new"
+
+	_, err := fixture.driver.NodeStageVolume(context.Background(), fixture.stageRequest)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("NodeStageVolume() status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
+	}
+	if _, readErr := fixture.driver.readMountState(fixture.active.VolumeID); readErr != nil {
+		t.Fatalf("new target request changed published durable state: %v", readErr)
+	}
+	if got := atomic.LoadInt32(&fixture.k8sActions); got != 0 {
+		t.Fatalf("new target request made %d Kubernetes API calls, want zero", got)
 	}
 }
 

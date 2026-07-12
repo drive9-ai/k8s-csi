@@ -87,7 +87,7 @@ func (s mountStopper) Stop(ctx context.Context, request mountStopRequest) (mount
 	stopping.StopAttemptID = stopAttemptID
 	stopping.StopIntent = request.Intent
 	stopping.StoppingAt = s.runtime.Now().UTC().Format(time.RFC3339Nano)
-	if process.State == stopProcessVerified {
+	if process.State == stopProcessVerified && !process.Verified.IsLauncher {
 		copyVerifiedProcessIdentity(&stopping, process.Verified)
 		if request.State.Phase == mountStatePhaseStarting {
 			stopping.StartedAt = stopping.StoppingAt
