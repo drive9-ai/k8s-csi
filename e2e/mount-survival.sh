@@ -15,9 +15,13 @@ cleanup() {
 		exit "$exit_code"
 	fi
 
-	if ((test_namespace_created != 0)); then
-		e2e_cleanup_owned_resource "namespace/$test_namespace" \
-			namespace "$test_namespace" "$case_run_id" || cleanup_failed=1
+	if ((case_resources_registered != 0)); then
+		e2e_delete_owned_namespaced_resource \
+			"pod/drive9-csi-survival" "$test_namespace" \
+			pod drive9-csi-survival "$case_run_id" || cleanup_failed=1
+		e2e_delete_owned_pvc "pvc/drive9-workspace-e2e" \
+			"$test_namespace" drive9-workspace-e2e "$case_run_id" ||
+			cleanup_failed=1
 	fi
 	if ((storage_class_created != 0)); then
 		e2e_cleanup_owned_resource "storageclass/$storage_class" \
@@ -352,12 +356,13 @@ wait_for_mount_cleanup() {
 repo_root="$(cd "$script_dir/.." && pwd)" || exit 1
 tmp_dir=""
 manifest_dir=""
-test_namespace_created=0
+case_resources_registered=0
 storage_class_created=0
 volume_attributes_class_created=0
 case_run_id="drive9-survival-$(date +%s)-$$"
 driver_namespace="${DRIVE9_CSI_E2E_DRIVER_NAMESPACE:-}"
-test_namespace="${DRIVE9_CSI_E2E_NAMESPACE:-drive9-csi-survival}"
+test_namespace=""
+secret_name=""
 storage_class="${DRIVE9_CSI_E2E_STORAGE_CLASS:-drive9-rwo-survival}"
 volume_attributes_class="${DRIVE9_CSI_E2E_VOLUME_ATTRIBUTES_CLASS:-}"
 if [[ -z "$volume_attributes_class" ]]; then
@@ -365,12 +370,9 @@ if [[ -z "$volume_attributes_class" ]]; then
 fi
 
 e2e_init
+e2e_configure_case
 e2e_need_cmd jq
 e2e_need_cmd diff
-e2e_need_env DRIVE9_SERVER
-e2e_need_env DRIVE9_API_KEY
-e2e_require_single_line "DRIVE9_SERVER" "$DRIVE9_SERVER"
-e2e_require_single_line "DRIVE9_API_KEY" "$DRIVE9_API_KEY"
 
 DRIVE9_REMOTE_ROOT_PREFIX="${DRIVE9_REMOTE_ROOT_PREFIX:-}"
 DRIVE9_PROFILE="${DRIVE9_PROFILE:-coding-agent}"
@@ -379,16 +381,12 @@ e2e_require_single_line \
 e2e_require_single_line "DRIVE9_PROFILE" "$DRIVE9_PROFILE"
 e2e_require_dns_label "case run ID" "$case_run_id"
 
-if [[ "$driver_namespace" == "$test_namespace" ]]; then
-	e2e_fail "driver and test namespaces must be different"
-fi
-e2e_require_dns_label "test namespace" "$test_namespace"
 e2e_require_dns_subdomain "StorageClass" "$storage_class"
 e2e_require_dns_subdomain \
 	"VolumeAttributesClass" "$volume_attributes_class"
 
 e2e_require_prepared_driver
-e2e_ensure_absent namespace "$test_namespace"
+e2e_require_case_environment
 e2e_ensure_absent storageclass "$storage_class"
 e2e_ensure_absent volumeattributesclass "$volume_attributes_class"
 
@@ -400,19 +398,11 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-e2e_info "using E2E namespace: $test_namespace"
-
 e2e_render_case_manifests
-e2e_write_case_namespace
 e2e_write_primary_workload
 e2e_write_test_pod drive9-csi-survival "$tmp_dir/pod.yaml"
 e2e_validate_case_manifests
 
-test_namespace_created=1
-e2e_create_owned_resource "namespace/$test_namespace" \
-	namespace "$test_namespace" "$case_run_id" \
-	"$tmp_dir/namespace.yaml" ||
-	e2e_fail "create case namespace"
 storage_class_created=1
 e2e_create_owned_resource "storageclass/$storage_class" \
 	storageclass "$storage_class" "$case_run_id" \
@@ -424,10 +414,15 @@ e2e_create_owned_resource \
 	volumeattributesclass "$volume_attributes_class" "$case_run_id" \
 	"$manifest_dir/volumeattributesclass.yaml" ||
 	e2e_fail "create case VolumeAttributesClass"
-kube create -f "$tmp_dir/workload.yaml" ||
-	e2e_fail "create survival workload"
-kube_retry apply -f "$tmp_dir/pod.yaml" ||
-	e2e_fail "apply survival Pod"
+case_resources_registered=1
+e2e_create_owned_namespaced_resource \
+	"pvc/drive9-workspace-e2e" "$test_namespace" \
+	pvc drive9-workspace-e2e "$case_run_id" "$tmp_dir/workload.yaml" ||
+	e2e_fail "create survival PVC"
+e2e_create_owned_namespaced_resource \
+	"pod/drive9-csi-survival" "$test_namespace" \
+	pod drive9-csi-survival "$case_run_id" "$tmp_dir/pod.yaml" ||
+	e2e_fail "create survival Pod"
 kube_retry -n "$test_namespace" wait pod/drive9-csi-survival \
 	--for=condition=Ready --timeout=300s || e2e_fail "survival Pod ready"
 
@@ -503,13 +498,12 @@ e2e_info "workload I/O progressed from $count_before to $count_final"
 e2e_info "passed: workload I/O and host mount identity survived"
 
 stop_io_loop drive9-csi-survival "$io_file"
-kube_retry -n "$test_namespace" delete pod drive9-csi-survival \
-	--ignore-not-found --wait=true --timeout=300s ||
+e2e_delete_owned_namespaced_resource "pod/drive9-csi-survival" \
+	"$test_namespace" pod drive9-csi-survival "$case_run_id" ||
 	e2e_fail "delete survival Pod"
-kube_retry -n "$test_namespace" delete pvc drive9-workspace-e2e \
-	--ignore-not-found --wait=true --timeout=300s ||
+e2e_delete_owned_pvc "pvc/drive9-workspace-e2e" \
+	"$test_namespace" drive9-workspace-e2e "$case_run_id" "$pv_name" ||
 	e2e_fail "delete survival PVC"
-e2e_wait_for_pv_deleted "$pv_name"
 wait_for_mount_cleanup "$replacement_pod" "$volume_id" \
 	"$tmp_dir/identity-before.json"
 

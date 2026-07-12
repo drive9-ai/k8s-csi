@@ -108,12 +108,19 @@ kube_retry() {
 	return "$status"
 }
 
-e2e_require_immutable_image() {
+e2e_require_validation_image() {
 	local label="$1"
 	local image="$2"
+	local digest_pattern
+	local trace_tag_pattern
 
-	if [[ ! "$image" =~ ^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$ ]]; then
-		e2e_fail "$label must be an immutable @sha256 reference"
+	digest_pattern='^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$'
+	trace_tag_pattern='^ghcr\.io/drive9-ai/drive9-csi:'
+	trace_tag_pattern+='drive9-[0-9a-f]{7}-csi-[0-9a-f]{7}$'
+	if [[ ! "$image" =~ $digest_pattern &&
+		! "$image" =~ $trace_tag_pattern ]]; then
+		e2e_fail \
+			"$label must be an @sha256 reference or a Drive9 CSI trace tag"
 	fi
 }
 
@@ -148,6 +155,31 @@ e2e_require_dns_subdomain() {
 	fi
 }
 
+e2e_require_namespace() {
+	local label="$1"
+	local value="$2"
+
+	e2e_require_dns_label "$label" "$value"
+	case "$value" in
+	default | kube-system | kube-public | kube-node-lease)
+		e2e_fail "$label cannot be a protected Kubernetes namespace"
+		;;
+	esac
+}
+
+e2e_configure_case() {
+	test_namespace="${DRIVE9_CSI_E2E_NAMESPACE:-$driver_namespace}"
+	secret_name="${DRIVE9_CSI_E2E_SECRET_NAME:-}"
+
+	e2e_need_env DRIVE9_CSI_E2E_SECRET_NAME
+	e2e_require_single_line \
+		"DRIVE9_CSI_E2E_NAMESPACE" "$test_namespace"
+	e2e_require_single_line \
+		"DRIVE9_CSI_E2E_SECRET_NAME" "$secret_name"
+	e2e_require_namespace "case namespace" "$test_namespace"
+	e2e_require_dns_subdomain "case Secret name" "$secret_name"
+}
+
 e2e_init() {
 	local context_lower
 	local server
@@ -160,13 +192,8 @@ e2e_init() {
 	e2e_require_single_line \
 		"DRIVE9_CSI_E2E_DRIVER_NAMESPACE" \
 		"$DRIVE9_CSI_E2E_DRIVER_NAMESPACE"
-	e2e_require_dns_label \
+	e2e_require_namespace \
 		"Driver namespace" "$DRIVE9_CSI_E2E_DRIVER_NAMESPACE"
-	case "$DRIVE9_CSI_E2E_DRIVER_NAMESPACE" in
-	default | kube-system | kube-public | kube-node-lease)
-		e2e_fail "protected Kubernetes namespaces cannot host the E2E Driver"
-		;;
-	esac
 
 	if [[ "${DRIVE9_CSI_E2E_CONFIRM:-}" != "1" ]]; then
 		e2e_fail "set DRIVE9_CSI_E2E_CONFIRM=1 to mutate the selected cluster"
@@ -233,6 +260,29 @@ e2e_ensure_namespaced_present() {
 	fi
 }
 
+e2e_require_case_environment() {
+	local existing
+
+	if ! existing=$(kube_retry get namespace "$test_namespace" \
+		--ignore-not-found -o name); then
+		e2e_fail "verify case namespace $test_namespace"
+	fi
+	if [[ -z "$existing" ]]; then
+		e2e_fail "case namespace $test_namespace does not exist"
+	fi
+	if ! existing=$(kube_retry -n "$test_namespace" get \
+		secret "$secret_name" --ignore-not-found -o name); then
+		e2e_fail "verify pre-provisioned Secret $test_namespace/$secret_name"
+	fi
+	if [[ -z "$existing" ]]; then
+		e2e_fail \
+			"pre-provisioned Secret $test_namespace/$secret_name does not exist"
+	fi
+
+	e2e_info "using E2E namespace: $test_namespace"
+	e2e_info "using pre-provisioned Secret: $test_namespace/$secret_name"
+}
+
 e2e_require_driver_binding() {
 	local account="$1"
 	local binding_data
@@ -296,9 +346,9 @@ e2e_require_prepared_driver() {
 		"$installer_jsonpath") ||
 		e2e_fail "read prepared installer image"
 
-	e2e_require_immutable_image "prepared controller image" "$controller_image"
-	e2e_require_immutable_image "prepared node image" "$node_image"
-	e2e_require_immutable_image "prepared installer image" "$installer_image"
+	e2e_require_validation_image "prepared controller image" "$controller_image"
+	e2e_require_validation_image "prepared node image" "$node_image"
+	e2e_require_validation_image "prepared installer image" "$installer_image"
 	if [[ "$controller_image" != "$node_image" ||
 		"$controller_image" != "$installer_image" ]]; then
 		e2e_fail "prepared Drive9 CSI containers use different images"
@@ -338,6 +388,38 @@ e2e_create_owned_resource() {
 	e2e_info "reconciled ambiguous create response: $description"
 }
 
+e2e_create_owned_namespaced_resource() {
+	local description="$1"
+	local namespace="$2"
+	local kind="$3"
+	local name="$4"
+	local run_id="$5"
+	local manifest="$6"
+	local create_succeeded=0
+	local identity
+	local jsonpath
+
+	if kube_retry -n "$namespace" create -f "$manifest"; then
+		create_succeeded=1
+	fi
+
+	jsonpath='jsonpath={.metadata.name}{"|"}'
+	jsonpath+='{.metadata.labels.drive9\.ai/e2e-run}'
+	if ! identity=$(kube_retry -n "$namespace" get "$kind" "$name" \
+		--ignore-not-found -o "$jsonpath"); then
+		e2e_info "create reconciliation failed: $description"
+		return 1
+	fi
+	if [[ "$identity" != "$name|$run_id" ]]; then
+		e2e_info "create failed without an owned resource: $description"
+		return 1
+	fi
+	if ((create_succeeded == 0)); then
+		e2e_info "reconciled ambiguous create response: $description"
+	fi
+	return 0
+}
+
 e2e_cleanup_delete() {
 	local description="$1"
 	shift
@@ -347,6 +429,74 @@ e2e_cleanup_delete() {
 		e2e_info "cleanup failed: $description"
 		return 1
 	fi
+}
+
+e2e_delete_owned_namespaced_resource() {
+	local description="$1"
+	local namespace="$2"
+	local kind="$3"
+	local name="$4"
+	local run_id="$5"
+	local identity
+	local jsonpath
+
+	jsonpath='jsonpath={.metadata.name}{"|"}'
+	jsonpath+='{.metadata.labels.drive9\.ai/e2e-run}'
+	if ! identity=$(kube_retry -n "$namespace" get "$kind" "$name" \
+		--ignore-not-found -o "$jsonpath"); then
+		e2e_info "ownership check failed: $description"
+		return 1
+	fi
+	if [[ -z "$identity" ]]; then
+		return 0
+	fi
+	if [[ "$identity" != "$name|$run_id" ]]; then
+		e2e_info "ownership mismatch: $description"
+		return 1
+	fi
+	e2e_cleanup_delete "$description" -n "$namespace" "$kind" "$name"
+}
+
+e2e_delete_owned_pvc() {
+	local description="$1"
+	local namespace="$2"
+	local name="$3"
+	local run_id="$4"
+	local expected_pv="${5:-}"
+	local actual_name
+	local actual_run_id
+	local identity
+	local jsonpath
+	local pv_name
+
+	jsonpath='jsonpath={.metadata.name}{"|"}'
+	jsonpath+='{.metadata.labels.drive9\.ai/e2e-run}{"|"}'
+	jsonpath+='{.spec.volumeName}'
+	if ! identity=$(kube_retry -n "$namespace" get pvc "$name" \
+		--ignore-not-found -o "$jsonpath"); then
+		e2e_info "ownership check failed: $description"
+		return 1
+	fi
+	if [[ -z "$identity" ]]; then
+		return 0
+	fi
+	IFS='|' read -r actual_name actual_run_id pv_name <<< "$identity"
+	if [[ "$actual_name" != "$name" || "$actual_run_id" != "$run_id" ]]; then
+		e2e_info "ownership mismatch: $description"
+		return 1
+	fi
+	if [[ -n "$expected_pv" && "$pv_name" != "$expected_pv" ]]; then
+		e2e_info "PV identity mismatch: $description"
+		return 1
+	fi
+	if ! e2e_cleanup_delete "$description" \
+		-n "$namespace" pvc "$name"; then
+		return 1
+	fi
+	if [[ -n "$pv_name" ]]; then
+		e2e_wait_for_pv_deleted "$pv_name" || return 1
+	fi
+	return 0
 }
 
 e2e_cleanup_owned_resource() {
@@ -394,5 +544,6 @@ e2e_wait_for_pv_deleted() {
 		sleep 5
 	done
 
-	e2e_fail "PV $pv_name deletion was not confirmed: $last_observation"
+	e2e_info "PV $pv_name deletion was not confirmed: $last_observation"
+	return 1
 }

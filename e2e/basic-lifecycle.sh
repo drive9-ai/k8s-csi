@@ -7,6 +7,14 @@ source "$script_dir/lib/manifests.sh" || exit 1
 cleanup() {
 	local exit_code="$?"
 	local cleanup_failed=0
+	local pod_name
+	local pod_names=(
+		drive9-csi-e2e-write
+		drive9-csi-e2e-read
+		drive9-csi-e2e-multi
+		drive9-csi-e2e-multi-pvc
+		drive9-csi-e2e-recreate-read
+	)
 
 	trap - EXIT INT TERM
 	if [[ "${DRIVE9_CSI_E2E_KEEP:-}" == "1" ]]; then
@@ -15,9 +23,18 @@ cleanup() {
 		exit "$exit_code"
 	fi
 
-	if ((test_namespace_created != 0)); then
-		e2e_cleanup_owned_resource "namespace/$test_namespace" \
-			namespace "$test_namespace" "$case_run_id" || cleanup_failed=1
+	if ((case_resources_registered != 0)); then
+		for pod_name in "${pod_names[@]}"; do
+			e2e_delete_owned_namespaced_resource "pod/$pod_name" \
+				"$test_namespace" pod "$pod_name" "$case_run_id" ||
+				cleanup_failed=1
+		done
+		e2e_delete_owned_pvc "pvc/drive9-workspace-e2e-b" \
+			"$test_namespace" drive9-workspace-e2e-b "$case_run_id" ||
+			cleanup_failed=1
+		e2e_delete_owned_pvc "pvc/drive9-workspace-e2e" \
+			"$test_namespace" drive9-workspace-e2e "$case_run_id" ||
+			cleanup_failed=1
 	fi
 	if ((storage_class_created != 0)); then
 		e2e_cleanup_owned_resource "storageclass/$storage_class" \
@@ -45,12 +62,13 @@ cleanup() {
 repo_root="$(cd "$script_dir/.." && pwd)" || exit 1
 tmp_dir=""
 manifest_dir=""
-test_namespace_created=0
+case_resources_registered=0
 storage_class_created=0
 volume_attributes_class_created=0
 case_run_id="drive9-basic-$(date +%s)-$$"
 driver_namespace="${DRIVE9_CSI_E2E_DRIVER_NAMESPACE:-}"
-test_namespace="${DRIVE9_CSI_E2E_NAMESPACE:-drive9-csi-e2e}"
+test_namespace=""
+secret_name=""
 storage_class="${DRIVE9_CSI_E2E_STORAGE_CLASS:-drive9-rwo-e2e}"
 volume_attributes_class="${DRIVE9_CSI_E2E_VOLUME_ATTRIBUTES_CLASS:-}"
 if [[ -z "$volume_attributes_class" ]]; then
@@ -58,10 +76,7 @@ if [[ -z "$volume_attributes_class" ]]; then
 fi
 
 e2e_init
-e2e_need_env DRIVE9_SERVER
-e2e_need_env DRIVE9_API_KEY
-e2e_require_single_line "DRIVE9_SERVER" "$DRIVE9_SERVER"
-e2e_require_single_line "DRIVE9_API_KEY" "$DRIVE9_API_KEY"
+e2e_configure_case
 
 DRIVE9_REMOTE_ROOT_PREFIX="${DRIVE9_REMOTE_ROOT_PREFIX:-}"
 DRIVE9_PROFILE="${DRIVE9_PROFILE:-coding-agent}"
@@ -70,16 +85,12 @@ e2e_require_single_line \
 e2e_require_single_line "DRIVE9_PROFILE" "$DRIVE9_PROFILE"
 e2e_require_dns_label "case run ID" "$case_run_id"
 
-if [[ "$driver_namespace" == "$test_namespace" ]]; then
-	e2e_fail "driver and test namespaces must be different"
-fi
-e2e_require_dns_label "test namespace" "$test_namespace"
 e2e_require_dns_subdomain "StorageClass" "$storage_class"
 e2e_require_dns_subdomain \
 	"VolumeAttributesClass" "$volume_attributes_class"
 
 e2e_require_prepared_driver
-e2e_ensure_absent namespace "$test_namespace"
+e2e_require_case_environment
 e2e_ensure_absent storageclass "$storage_class"
 e2e_ensure_absent volumeattributesclass "$volume_attributes_class"
 
@@ -91,7 +102,6 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-e2e_info "using E2E namespace: $test_namespace"
 e2e_info "using VolumeAttributesClass: $volume_attributes_class"
 if [[ -z "$DRIVE9_REMOTE_ROOT_PREFIX" ]]; then
 	e2e_info "using Drive9 workspace root mode"
@@ -100,7 +110,6 @@ else
 fi
 
 e2e_render_case_manifests
-e2e_write_case_namespace
 e2e_write_primary_workload
 e2e_write_test_pod drive9-csi-e2e-write "$tmp_dir/pod-write.yaml"
 e2e_write_test_pod drive9-csi-e2e-read "$tmp_dir/pod-read.yaml"
@@ -108,11 +117,6 @@ e2e_write_test_pod drive9-csi-e2e-recreate-read \
 	"$tmp_dir/pod-recreate-read.yaml"
 e2e_validate_case_manifests
 
-test_namespace_created=1
-e2e_create_owned_resource "namespace/$test_namespace" \
-	namespace "$test_namespace" "$case_run_id" \
-	"$tmp_dir/namespace.yaml" ||
-	e2e_fail "create case namespace"
 storage_class_created=1
 e2e_create_owned_resource "storageclass/$storage_class" \
 	storageclass "$storage_class" "$case_run_id" \
@@ -124,9 +128,15 @@ e2e_create_owned_resource \
 	volumeattributesclass "$volume_attributes_class" "$case_run_id" \
 	"$manifest_dir/volumeattributesclass.yaml" ||
 	e2e_fail "create case VolumeAttributesClass"
-kube create -f "$tmp_dir/workload.yaml" || e2e_fail "create test workload"
-kube_retry apply -f "$tmp_dir/pod-write.yaml" ||
-	e2e_fail "apply write pod"
+case_resources_registered=1
+e2e_create_owned_namespaced_resource \
+	"pvc/drive9-workspace-e2e" "$test_namespace" \
+	pvc drive9-workspace-e2e "$case_run_id" "$tmp_dir/workload.yaml" ||
+	e2e_fail "create test PVC"
+e2e_create_owned_namespaced_resource \
+	"pod/drive9-csi-e2e-write" "$test_namespace" \
+	pod drive9-csi-e2e-write "$case_run_id" "$tmp_dir/pod-write.yaml" ||
+	e2e_fail "create write Pod"
 kube_retry -n "$test_namespace" wait pod/drive9-csi-e2e-write \
 	--for=condition=Ready --timeout=300s || e2e_fail "write pod ready"
 
@@ -143,10 +153,13 @@ pv_name="$(kube_retry -n "$test_namespace" get pvc drive9-workspace-e2e \
 	-o jsonpath='{.spec.volumeName}')" || e2e_fail "read bound PV name"
 [[ -n "$pv_name" ]] || e2e_fail "PVC did not bind a PV"
 
-kube_retry -n "$test_namespace" delete pod drive9-csi-e2e-write \
-	--ignore-not-found --wait=true --timeout=300s ||
+e2e_delete_owned_namespaced_resource "pod/drive9-csi-e2e-write" \
+	"$test_namespace" pod drive9-csi-e2e-write "$case_run_id" ||
 	e2e_fail "delete write pod"
-kube_retry apply -f "$tmp_dir/pod-read.yaml" || e2e_fail "apply read pod"
+e2e_create_owned_namespaced_resource \
+	"pod/drive9-csi-e2e-read" "$test_namespace" \
+	pod drive9-csi-e2e-read "$case_run_id" "$tmp_dir/pod-read.yaml" ||
+	e2e_fail "create read Pod"
 kube_retry -n "$test_namespace" wait pod/drive9-csi-e2e-read \
 	--for=condition=Ready --timeout=300s || e2e_fail "read pod ready"
 kube_retry -n "$test_namespace" exec drive9-csi-e2e-read -- \
@@ -164,8 +177,10 @@ multi_token="drive9-csi-multi-$(date +%s)"
 multi_file=".drive9-csi-multi-$(date +%s).txt"
 e2e_write_test_pod_on_node drive9-csi-e2e-multi \
 	"$tmp_dir/pod-multi.yaml" "$pod1_node"
-kube_retry apply -f "$tmp_dir/pod-multi.yaml" ||
-	e2e_fail "apply second Pod"
+e2e_create_owned_namespaced_resource \
+	"pod/drive9-csi-e2e-multi" "$test_namespace" \
+	pod drive9-csi-e2e-multi "$case_run_id" "$tmp_dir/pod-multi.yaml" ||
+	e2e_fail "create second Pod"
 kube_retry -n "$test_namespace" wait pod/drive9-csi-e2e-multi \
 	--for=condition=Ready --timeout=300s || e2e_fail "second Pod ready"
 
@@ -176,8 +191,8 @@ kube_retry -n "$test_namespace" exec drive9-csi-e2e-multi -- \
 	sh -c "test \"\$(cat '/workspace/$multi_file')\" = '$multi_token'" ||
 	e2e_fail "second Pod read file written by first Pod"
 
-kube_retry -n "$test_namespace" delete pod drive9-csi-e2e-read \
-	--ignore-not-found --wait=true --timeout=300s ||
+e2e_delete_owned_namespaced_resource "pod/drive9-csi-e2e-read" \
+	"$test_namespace" pod drive9-csi-e2e-read "$case_run_id" ||
 	e2e_fail "delete first Pod while second Pod is running"
 second_token="drive9-csi-multi2-$(date +%s)"
 kube_retry -n "$test_namespace" exec drive9-csi-e2e-multi -- \
@@ -194,8 +209,8 @@ if [[ -n "$DRIVE9_REMOTE_ROOT_PREFIX" ]]; then
 		sh -c "rm -f '/workspace/$e2e_file' && sync" ||
 		e2e_fail "remove managed-directory lifecycle test file"
 fi
-kube_retry -n "$test_namespace" delete pod drive9-csi-e2e-multi \
-	--ignore-not-found --wait=true --timeout=300s ||
+e2e_delete_owned_namespaced_resource "pod/drive9-csi-e2e-multi" \
+	"$test_namespace" pod drive9-csi-e2e-multi "$case_run_id" ||
 	e2e_fail "delete second Pod"
 e2e_info "passed: multi-Pod same-node concurrent mount"
 
@@ -203,12 +218,16 @@ e2e_info "passed: multi-Pod same-node concurrent mount"
 # must keep each generated remote root isolated.
 e2e_info "starting one-Pod multi-PVC test"
 e2e_write_second_pvc
-kube_retry apply -f "$tmp_dir/workload-b.yaml" ||
-	e2e_fail "apply second PVC"
+e2e_create_owned_namespaced_resource \
+	"pvc/drive9-workspace-e2e-b" "$test_namespace" \
+	pvc drive9-workspace-e2e-b "$case_run_id" \
+	"$tmp_dir/workload-b.yaml" || e2e_fail "create second PVC"
 e2e_write_multi_pvc_pod drive9-csi-e2e-multi-pvc \
 	"$tmp_dir/pod-multi-pvc.yaml"
-kube_retry apply -f "$tmp_dir/pod-multi-pvc.yaml" ||
-	e2e_fail "apply multi-PVC Pod"
+e2e_create_owned_namespaced_resource \
+	"pod/drive9-csi-e2e-multi-pvc" "$test_namespace" \
+	pod drive9-csi-e2e-multi-pvc "$case_run_id" \
+	"$tmp_dir/pod-multi-pvc.yaml" || e2e_fail "create multi-PVC Pod"
 kube_retry -n "$test_namespace" wait pod/drive9-csi-e2e-multi-pvc \
 	--for=condition=Ready --timeout=300s || e2e_fail "multi-PVC Pod ready"
 
@@ -264,28 +283,31 @@ else
 		e2e_fail "remove PVC-B test file"
 fi
 
-kube_retry -n "$test_namespace" delete pod drive9-csi-e2e-multi-pvc \
-	--ignore-not-found --wait=true --timeout=300s ||
+e2e_delete_owned_namespaced_resource "pod/drive9-csi-e2e-multi-pvc" \
+	"$test_namespace" pod drive9-csi-e2e-multi-pvc "$case_run_id" ||
 	e2e_fail "delete multi-PVC Pod"
 pv_name_b="$(kube_retry -n "$test_namespace" get \
 	pvc drive9-workspace-e2e-b \
 	-o jsonpath='{.spec.volumeName}')" || e2e_fail "read second PV name"
 [[ -n "$pv_name_b" ]] || e2e_fail "second PVC did not bind a PV"
-kube_retry -n "$test_namespace" delete pvc drive9-workspace-e2e-b \
-	--ignore-not-found --wait=true --timeout=300s ||
+e2e_delete_owned_pvc "pvc/drive9-workspace-e2e-b" \
+	"$test_namespace" drive9-workspace-e2e-b "$case_run_id" "$pv_name_b" ||
 	e2e_fail "delete second PVC"
-e2e_wait_for_pv_deleted "$pv_name_b"
 e2e_info "passed: one-Pod multi-PVC mount"
 
 if [[ -z "$DRIVE9_REMOTE_ROOT_PREFIX" ]]; then
-	kube_retry -n "$test_namespace" delete pvc drive9-workspace-e2e \
-		--ignore-not-found --wait=true --timeout=300s ||
+	e2e_delete_owned_pvc "pvc/drive9-workspace-e2e" \
+		"$test_namespace" drive9-workspace-e2e "$case_run_id" "$pv_name" ||
 		e2e_fail "delete first PVC before recreation"
-	e2e_wait_for_pv_deleted "$pv_name"
-	kube_retry apply -f "$tmp_dir/workload.yaml" ||
+	e2e_create_owned_namespaced_resource \
+		"pvc/drive9-workspace-e2e" "$test_namespace" \
+		pvc drive9-workspace-e2e "$case_run_id" "$tmp_dir/workload.yaml" ||
 		e2e_fail "recreate test PVC"
-	kube_retry apply -f "$tmp_dir/pod-recreate-read.yaml" ||
-		e2e_fail "apply recreated reader Pod"
+	e2e_create_owned_namespaced_resource \
+		"pod/drive9-csi-e2e-recreate-read" "$test_namespace" \
+		pod drive9-csi-e2e-recreate-read "$case_run_id" \
+		"$tmp_dir/pod-recreate-read.yaml" ||
+		e2e_fail "create recreated reader Pod"
 	kube_retry -n "$test_namespace" wait pod/drive9-csi-e2e-recreate-read \
 		--for=condition=Ready --timeout=300s ||
 		e2e_fail "recreated reader Pod ready"
@@ -300,16 +322,15 @@ if [[ -z "$DRIVE9_REMOTE_ROOT_PREFIX" ]]; then
 		-o jsonpath='{.spec.volumeName}')" ||
 		e2e_fail "read recreated PV name"
 	[[ -n "$pv_name" ]] || e2e_fail "recreated PVC did not bind a PV"
-	kube_retry -n "$test_namespace" delete \
-		pod drive9-csi-e2e-recreate-read --ignore-not-found \
-		--wait=true --timeout=300s ||
+	e2e_delete_owned_namespaced_resource \
+		"pod/drive9-csi-e2e-recreate-read" "$test_namespace" \
+		pod drive9-csi-e2e-recreate-read "$case_run_id" ||
 		e2e_fail "delete recreated reader Pod"
 fi
 
-kube_retry -n "$test_namespace" delete pvc drive9-workspace-e2e \
-	--ignore-not-found --wait=true --timeout=300s ||
+e2e_delete_owned_pvc "pvc/drive9-workspace-e2e" \
+	"$test_namespace" drive9-workspace-e2e "$case_run_id" "$pv_name" ||
 	e2e_fail "delete test PVC"
-e2e_wait_for_pv_deleted "$pv_name"
 
 e2e_info \
 	"passed: mount/write/read/remount/multi-Pod/multi-PVC/unpublish/unstage/delete"
