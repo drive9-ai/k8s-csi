@@ -430,8 +430,45 @@ func TestRecoverActivePublishTargetFiltering(t *testing.T) {
 		{VolumeID: volumeID, StagingTarget: stage, Target: "/pending", Status: publishStatusPending},
 	}
 	got := publishStatesForActiveRecovery(states, volumeID, stage)
-	if len(got) != 1 || got[0].Target != "/match" {
+	if len(got) != 2 || got[0].Target != "/match" || got[1].Target != "/pending" {
 		t.Fatalf("filtered publish states = %#v", got)
+	}
+}
+
+func TestDriverActiveRecoveryTreatsReusedRecordedPIDAsAbsent(t *testing.T) {
+	state := validActiveState(t)
+	runtime := &fakeHostRuntime{}
+	runtime.isMountPointFn = func(string) (bool, error) { return false, nil }
+	runtime.execFn = func(_ context.Context, command hostCommand) (hostCommandResult, error) {
+		inner := hostInnerCommand(command)
+		if len(inner) > 1 && inner[0] == "systemctl" && inner[1] == "show" {
+			return systemdShowResult(systemdUnitNotFound), nil
+		}
+		return hostCommandResult{}, fmt.Errorf("unexpected command %#v", command)
+	}
+	runtime.readFileFn = func(path string) ([]byte, error) {
+		if path == hostProcPIDPath(state.PID, "stat") {
+			return []byte(hostProcStatLine(state.PID, "unrelated", "999")), nil
+		}
+		return nil, fmt.Errorf("unexpected read path %s", path)
+	}
+	runtime.lstatFn = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	driver := &Driver{nodeRuntime: runtime}
+
+	observation, err := driver.observeActiveRecovery(context.Background(), state)
+	if err != nil {
+		t.Fatalf("observeActiveRecovery(): %v", err)
+	}
+	if observation.PIDVerified || observation.PIDOwnershipMismatch {
+		t.Fatalf("reused PID observation = %#v, want absent recorded process", observation)
+	}
+	actions, err := decideActiveRecovery(observation)
+	if err != nil {
+		t.Fatalf("decideActiveRecovery(): %v", err)
+	}
+	want := []activeRecoveryAction{activeRecoveryStartDesired}
+	if !reflect.DeepEqual(actions, want) {
+		t.Fatalf("recovery actions = %v, want %v", actions, want)
 	}
 }
 

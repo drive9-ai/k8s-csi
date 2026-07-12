@@ -78,7 +78,7 @@ type mountStateStore struct {
 }
 
 var (
-	mountStateWriteLocks  sync.Map
+	stateWriteLocks       sync.Map
 	mountStateInventoryMu sync.RWMutex
 )
 
@@ -531,7 +531,7 @@ func (s mountStateStore) Write(state mountState) error {
 	if err != nil {
 		return err
 	}
-	unlock := lockMountStatePath(path)
+	unlock := lockStatePath(path)
 	defer unlock()
 
 	current, err := s.Read(state.VolumeID)
@@ -553,54 +553,7 @@ func (s mountStateStore) Write(state mountState) error {
 		return err
 	}
 	body = append(body, '\n')
-	attemptID, err := s.runtime.NewAttemptID()
-	if err != nil || !attemptIDPattern.MatchString(attemptID) {
-		return fmt.Errorf("create mount state temporary name")
-	}
-	tempPath := filepath.Join(s.stateDir, "."+filepath.Base(path)+"."+attemptID+".tmp")
-	file, err := s.runtime.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return fmt.Errorf("create mount state temporary file: %w", err)
-	}
-	tempExists := true
-	defer func() {
-		if tempExists {
-			_ = s.runtime.Remove(tempPath)
-		}
-	}()
-
-	if err := writeHostFile(file, body); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("write mount state temporary file: %w", err)
-	}
-	if err := s.runtime.Chmod(tempPath, 0o600); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("chmod mount state temporary file: %w", err)
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return fmt.Errorf("sync mount state temporary file: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("close mount state temporary file: %w", err)
-	}
-	if err := s.runtime.Rename(tempPath, path); err != nil {
-		return fmt.Errorf("replace mount state: %w", err)
-	}
-	tempExists = false
-
-	directory, err := s.runtime.OpenFile(s.stateDir, os.O_RDONLY, 0)
-	if err != nil {
-		return fmt.Errorf("open mount state directory: %w", err)
-	}
-	if err := directory.Sync(); err != nil {
-		_ = directory.Close()
-		return fmt.Errorf("sync mount state directory: %w", err)
-	}
-	if err := directory.Close(); err != nil {
-		return fmt.Errorf("close mount state directory: %w", err)
-	}
-	return nil
+	return writeAtomicStateFile(s.runtime, s.stateDir, path, "mount state", body)
 }
 
 func (s mountStateStore) Delete(expected mountState) error {
@@ -616,7 +569,7 @@ func (s mountStateStore) Delete(expected mountState) error {
 	if err != nil {
 		return err
 	}
-	unlock := lockMountStatePath(path)
+	unlock := lockStatePath(path)
 	defer unlock()
 
 	current, err := s.Read(expected.VolumeID)
@@ -657,6 +610,57 @@ func writeHostFile(file hostFile, body []byte) error {
 	return nil
 }
 
+func writeAtomicStateFile(runtime hostRuntime, stateDir string, path string, kind string, body []byte) error {
+	attemptID, err := runtime.NewAttemptID()
+	if err != nil || !attemptIDPattern.MatchString(attemptID) {
+		return fmt.Errorf("create %s temporary name", kind)
+	}
+	tempPath := filepath.Join(stateDir, "."+filepath.Base(path)+"."+attemptID+".tmp")
+	file, err := runtime.OpenFile(tempPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create %s temporary file: %w", kind, err)
+	}
+	tempExists := true
+	defer func() {
+		if tempExists {
+			_ = runtime.Remove(tempPath)
+		}
+	}()
+
+	if err := writeHostFile(file, body); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write %s temporary file: %w", kind, err)
+	}
+	if err := runtime.Chmod(tempPath, 0o600); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("chmod %s temporary file: %w", kind, err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("sync %s temporary file: %w", kind, err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close %s temporary file: %w", kind, err)
+	}
+	if err := runtime.Rename(tempPath, path); err != nil {
+		return fmt.Errorf("replace %s: %w", kind, err)
+	}
+	tempExists = false
+
+	directory, err := runtime.OpenFile(stateDir, os.O_RDONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open %s directory: %w", kind, err)
+	}
+	if err := directory.Sync(); err != nil {
+		_ = directory.Close()
+		return fmt.Errorf("sync %s directory: %w", kind, err)
+	}
+	if err := directory.Close(); err != nil {
+		return fmt.Errorf("close %s directory: %w", kind, err)
+	}
+	return nil
+}
+
 func (s mountStateStore) statePath(volumeID string) (string, error) {
 	if !volumeIDPattern.MatchString(volumeID) {
 		return "", fmt.Errorf("invalid Drive9 volume ID")
@@ -667,8 +671,8 @@ func (s mountStateStore) statePath(volumeID string) (string, error) {
 	return filepath.Join(s.stateDir, volumeID+".json"), nil
 }
 
-func lockMountStatePath(path string) func() {
-	value, _ := mountStateWriteLocks.LoadOrStore(path, &sync.Mutex{})
+func lockStatePath(path string) func() {
+	value, _ := stateWriteLocks.LoadOrStore(path, &sync.Mutex{})
 	mutex := value.(*sync.Mutex)
 	mutex.Lock()
 	return mutex.Unlock

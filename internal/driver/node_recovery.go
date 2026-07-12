@@ -336,29 +336,41 @@ func (d *Driver) repairPublishTargets(volumeID string, stagingTarget string) {
 				volumeID, state.Target, defaultKubeletRoot)
 			continue
 		}
-		if err := repairPublishTarget(stagingTarget, state); err != nil {
+		mounted, err := d.hostRuntime().IsMountPoint(state.Target)
+		if err != nil {
+			log.Printf("drive9-csi: warning: observe publish target %s for %s: %v", state.Target, volumeID, err)
+			continue
+		}
+		if !mounted {
+			if err := os.Remove(d.publishStatePath(state.Target)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				log.Printf("drive9-csi: warning: remove stale publish state for %s: %v", state.Target, err)
+			}
+			continue
+		}
+		if err := d.repairPublishTarget(stagingTarget, state); err != nil {
 			log.Printf("drive9-csi: warning: repair publish target %s for %s: %v", state.Target, volumeID, err)
 		}
 	}
 }
 
-func repairPublishTarget(stagingTarget string, state publishState) error {
-	mounted, err := isMountPoint(state.Target)
-	if err != nil {
-		return fmt.Errorf("check publish target: %w", err)
-	}
-	if mounted {
-		if err := unmountPath(state.Target); err != nil {
-			if !isBusyUnmountError(err) {
-				return fmt.Errorf("unmount publish target: %w", err)
-			}
-			if err := lazyUnmountPath(state.Target); err != nil {
-				return fmt.Errorf("lazy unmount publish target: %w", err)
-			}
+func (d *Driver) repairPublishTarget(stagingTarget string, state publishState) error {
+	mounts := d.mountOperations()
+	if err := mounts.Unmount(state.Target); err != nil {
+		if !isBusyUnmountError(err) {
+			return fmt.Errorf("unmount publish target: %w", err)
+		}
+		if err := mounts.LazyUnmount(state.Target); err != nil {
+			return fmt.Errorf("lazy unmount publish target: %w", err)
 		}
 	}
-	if err := bindMount(stagingTarget, state.Target, state.Readonly); err != nil {
+	if err := mounts.Bind(stagingTarget, state.Target, state.Readonly); err != nil {
 		return fmt.Errorf("bind mount publish target: %w", err)
+	}
+	if state.Status == publishStatusPending {
+		state.Status = publishStatusPublished
+		if err := d.writePublishState(state); err != nil {
+			return fmt.Errorf("promote repaired publish state: %w", err)
+		}
 	}
 	return nil
 }

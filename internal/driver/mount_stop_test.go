@@ -434,6 +434,62 @@ func TestReconcileStoppingUsesVerifiedMainPIDAfterRecordedPIDDies(t *testing.T) 
 	}
 }
 
+func TestMountStopFinalizesAfterRecordedPIDReuse(t *testing.T) {
+	fixture := newMountStopFixture(t)
+	fixture.service = systemdUnitNotFound
+	fixture.mounted = false
+	fixture.processStatePresent = false
+	fixture.installCallbacks()
+	originalRead := fixture.runtime.readFileFn
+	fixture.runtime.readFileFn = func(path string) ([]byte, error) {
+		if path == hostProcPIDPath(fixture.state.PID, "stat") {
+			return []byte(hostProcStatLine(fixture.state.PID, "unrelated", "999")), nil
+		}
+		return originalRead(path)
+	}
+
+	result, err := fixture.stopper.Stop(context.Background(), mountStopRequest{
+		State:  fixture.state,
+		Intent: mountStopIntentUnstage,
+	})
+	if err != nil || result != mountStopCleaned {
+		t.Fatalf("Stop() = %q, %v, want cleaned", result, err)
+	}
+	if states := fixture.states.snapshot(); len(states) != 0 {
+		t.Fatalf("PID reuse retained stale state: %#v", states)
+	}
+	for _, call := range fixture.runtime.Calls() {
+		if call.Operation == "exec" && containsArgument(hostInnerCommand(call.Command), "/bin/kill") {
+			t.Fatalf("PID reuse signaled unrelated process: %#v", call.Command)
+		}
+	}
+}
+
+func TestStoppingPIDAliveTreatsReusedPIDAsAbsent(t *testing.T) {
+	state := validStoppingState(t)
+	runtime := &fakeHostRuntime{
+		readFileFn: func(path string) ([]byte, error) {
+			if path == hostProcPIDPath(state.PID, "stat") {
+				return []byte(hostProcStatLine(state.PID, "unrelated", "999")), nil
+			}
+			return nil, fmt.Errorf("unexpected read path %s", path)
+		},
+	}
+
+	alive, err := newMountStopper(runtime, nil).stoppingPIDAlive(state)
+	if err != nil {
+		t.Fatalf("stoppingPIDAlive(): %v", err)
+	}
+	if alive {
+		t.Fatal("stoppingPIDAlive() = true for reused PID")
+	}
+	for _, call := range runtime.Calls() {
+		if call.Operation == "exec" {
+			t.Fatalf("stoppingPIDAlive() signaled reused PID: %#v", call.Command)
+		}
+	}
+}
+
 type mountStopFixture struct {
 	t                     *testing.T
 	runtime               *fakeHostRuntime
