@@ -373,4 +373,80 @@ secret_refs=$(awk -v secret="$secret_name" '
 [[ ! -e "$tmp_dir/namespace.yaml" ]] ||
 	fail "case rendered a namespace manifest"
 
+stop_function="$tmp_dir/stop-io-loop.sh"
+awk '
+	/^stop_io_loop\(\) \{/ { capture = 1 }
+	capture { print }
+	capture && /^}$/ { exit }
+' "$repo_root/e2e/mount-survival.sh" > "$stop_function" ||
+	fail "extract stop_io_loop"
+source "$stop_function" || fail "load stop_io_loop"
+
+test_split_stop_io_loop() {
+	kube_retry() {
+		local attempt
+		local remote_script="${8:-}"
+
+		attempt=$(increment_counter) || return 1
+		[[ "$1" == "-n" && "$2" == "$test_namespace" &&
+			"$3" == "exec" && "$4" == "drive9-csi-survival" &&
+			"$5" == "--" && "$6" == "sh" && "$7" == "-c" ]] ||
+			return 80
+		if [[ "$remote_script" == *"sleep 1"* ||
+			"$remote_script" == *"while test"* ]]; then
+			return 81
+		fi
+		case "$attempt" in
+		1)
+			[[ "$remote_script" == *"drive9-survival-stop"* ]] ||
+				return 82
+			;;
+		2 | 3)
+			[[ "$remote_script" == *"drive9-survival-stopped"* &&
+				"$remote_script" == *"drive9-survival-failure"* ]] ||
+				return 83
+			((attempt == 2)) && return 1
+			;;
+		4)
+			[[ "$remote_script" == *'rm -f "/workspace/$1"'* &&
+				"$remote_script" != *"sync"* ]] ||
+				return 84
+			;;
+		*)
+			return 85
+			;;
+		esac
+		return 0
+	}
+
+	stop_io_loop drive9-csi-survival survival.txt
+}
+
+printf '0\n' > "$counter_file" || fail "reset retry counter"
+if ! (test_split_stop_io_loop > "$stdout_file" 2> "$stderr_file"); then
+	command cat "$stderr_file" >&2
+	fail "stop_io_loop did not use short idempotent exec calls"
+fi
+[[ "$(read_counter)" == "4" ]] ||
+	fail "stop_io_loop made an unexpected number of exec calls"
+
+test_stop_io_loop_exit_137() {
+	kube_retry() {
+		local attempt
+
+		attempt=$(increment_counter) || return 1
+		((attempt == 1)) && return 0
+		return 137
+	}
+
+	stop_io_loop drive9-csi-survival survival.txt
+}
+
+printf '0\n' > "$counter_file" || fail "reset retry counter"
+if (test_stop_io_loop_exit_137 > "$stdout_file" 2> "$stderr_file"); then
+	fail "stop_io_loop accepted a remote exit 137"
+fi
+[[ "$(read_counter)" == "2" ]] ||
+	fail "stop_io_loop retried or continued after a remote exit 137"
+
 printf 'e2e common checks passed\n'
