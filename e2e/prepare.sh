@@ -38,14 +38,16 @@ e2e_info "preparing Driver image: $DRIVE9_CSI_IMAGE"
 e2e_render_driver_manifests
 e2e_validate_driver_manifests
 
-kube apply -f "$manifest_dir/namespace.yaml" ||
+kube_retry apply -f "$manifest_dir/namespace.yaml" ||
 	e2e_fail "apply Driver namespace"
-kube apply -f "$manifest_dir/csidriver.yaml" ||
+kube_retry apply -f "$manifest_dir/csidriver.yaml" ||
 	e2e_fail "apply CSIDriver"
-kube apply -f "$manifest_dir/rbac.yaml" || e2e_fail "apply Driver RBAC"
-kube apply -f "$manifest_dir/controller.yaml" ||
+kube_retry apply -f "$manifest_dir/rbac.yaml" ||
+	e2e_fail "apply Driver RBAC"
+kube_retry apply -f "$manifest_dir/controller.yaml" ||
 	e2e_fail "apply controller"
-kube apply -f "$manifest_dir/node.yaml" || e2e_fail "apply node DaemonSet"
+kube_retry apply -f "$manifest_dir/node.yaml" ||
+	e2e_fail "apply node DaemonSet"
 
 e2e_require_prepared_driver "$DRIVE9_CSI_IMAGE"
 e2e_info "prepared reusable Driver environment"

@@ -73,6 +73,29 @@ includes the non-mutating `e2e-check` static validation.
 4. Keep credentials in mode-0600 temporary files and remove them during
    cleanup.
 
+## Codex Execution
+
+1. Before asking Codex to run an E2E entrypoint, make every required environment
+   variable available to its command subprocess. If a variable is missing,
+   Codex must stop instead of constructing a wrapped command to supply it.
+2. From the repository root, invoke exactly one entrypoint directly per command:
+
+   ```sh
+   e2e/prepare.sh
+   e2e/basic-lifecycle.sh
+   e2e/mount-survival.sh
+   ```
+
+3. Do not prefix an entrypoint with `bash`, `sh`, `zsh`, `env`, or `./`. Do not
+   use `zsh -lc`, inline environment assignments, or command substitutions.
+   These forms do not match `.codex/rules/e2e.rules` and can persist sensitive
+   command text in approval rules.
+4. The project rule removes repeated command-execution approval only for the
+   three direct entrypoints. It does not waive the required environment,
+   explicit real-cluster authorization, or any Hard Safety Rule above.
+5. Never place `DRIVE9_API_KEY` in a prompt, command line, approval rule, or
+   persisted Codex configuration.
+
 ## Mount-Survival Evidence
 
 The survival case must compare the following values before and after CSI node

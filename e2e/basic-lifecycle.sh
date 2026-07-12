@@ -108,45 +108,54 @@ e2e_write_test_pod drive9-csi-e2e-recreate-read \
 	"$tmp_dir/pod-recreate-read.yaml"
 e2e_validate_case_manifests
 
-kube create -f "$tmp_dir/namespace.yaml" ||
-	e2e_fail "create case namespace"
 test_namespace_created=1
-kube create -f "$manifest_dir/storageclass.yaml" ||
-	e2e_fail "create case StorageClass"
+e2e_create_owned_resource "namespace/$test_namespace" \
+	namespace "$test_namespace" "$case_run_id" \
+	"$tmp_dir/namespace.yaml" ||
+	e2e_fail "create case namespace"
 storage_class_created=1
-kube create -f "$manifest_dir/volumeattributesclass.yaml" ||
-	e2e_fail "create case VolumeAttributesClass"
+e2e_create_owned_resource "storageclass/$storage_class" \
+	storageclass "$storage_class" "$case_run_id" \
+	"$manifest_dir/storageclass.yaml" ||
+	e2e_fail "create case StorageClass"
 volume_attributes_class_created=1
+e2e_create_owned_resource \
+	"volumeattributesclass/$volume_attributes_class" \
+	volumeattributesclass "$volume_attributes_class" "$case_run_id" \
+	"$manifest_dir/volumeattributesclass.yaml" ||
+	e2e_fail "create case VolumeAttributesClass"
 kube create -f "$tmp_dir/workload.yaml" || e2e_fail "create test workload"
-kube apply -f "$tmp_dir/pod-write.yaml" || e2e_fail "apply write pod"
-kube -n "$test_namespace" wait pod/drive9-csi-e2e-write \
+kube_retry apply -f "$tmp_dir/pod-write.yaml" ||
+	e2e_fail "apply write pod"
+kube_retry -n "$test_namespace" wait pod/drive9-csi-e2e-write \
 	--for=condition=Ready --timeout=300s || e2e_fail "write pod ready"
 
 e2e_token="drive9-csi-e2e-$(date +%s)"
 e2e_file=".drive9-csi-e2e-$(date +%s).txt"
-kube -n "$test_namespace" exec drive9-csi-e2e-write -- \
+kube_retry -n "$test_namespace" exec drive9-csi-e2e-write -- \
 	sh -c "printf '%s\n' '$e2e_token' > '/workspace/$e2e_file' && sync" ||
 	e2e_fail "write through mounted volume"
-kube -n "$test_namespace" exec drive9-csi-e2e-write -- \
+kube_retry -n "$test_namespace" exec drive9-csi-e2e-write -- \
 	sh -c "test \"\$(cat '/workspace/$e2e_file')\" = '$e2e_token'" ||
 	e2e_fail "read through mounted volume"
 
-pv_name="$(kube -n "$test_namespace" get pvc drive9-workspace-e2e \
+pv_name="$(kube_retry -n "$test_namespace" get pvc drive9-workspace-e2e \
 	-o jsonpath='{.spec.volumeName}')" || e2e_fail "read bound PV name"
 [[ -n "$pv_name" ]] || e2e_fail "PVC did not bind a PV"
 
-kube -n "$test_namespace" delete pod drive9-csi-e2e-write \
-	--wait=true --timeout=300s || e2e_fail "delete write pod"
-kube apply -f "$tmp_dir/pod-read.yaml" || e2e_fail "apply read pod"
-kube -n "$test_namespace" wait pod/drive9-csi-e2e-read \
+kube_retry -n "$test_namespace" delete pod drive9-csi-e2e-write \
+	--ignore-not-found --wait=true --timeout=300s ||
+	e2e_fail "delete write pod"
+kube_retry apply -f "$tmp_dir/pod-read.yaml" || e2e_fail "apply read pod"
+kube_retry -n "$test_namespace" wait pod/drive9-csi-e2e-read \
 	--for=condition=Ready --timeout=300s || e2e_fail "read pod ready"
-kube -n "$test_namespace" exec drive9-csi-e2e-read -- \
+kube_retry -n "$test_namespace" exec drive9-csi-e2e-read -- \
 	sh -c "test \"\$(cat '/workspace/$e2e_file')\" = '$e2e_token'" ||
 	e2e_fail "read after pod remount"
 
 # Keep the first reader running and mount the same PVC into a second Pod on the
 # same node. Deleting the first Pod must not unstage the shared mount.
-pod1_node="$(kube -n "$test_namespace" get pod drive9-csi-e2e-read \
+pod1_node="$(kube_retry -n "$test_namespace" get pod drive9-csi-e2e-read \
 	-o jsonpath='{.spec.nodeName}')" || e2e_fail "read first Pod node"
 [[ -n "$pod1_node" ]] || e2e_fail "first Pod has no node assignment"
 e2e_info "multi-Pod test node: $pod1_node"
@@ -155,141 +164,151 @@ multi_token="drive9-csi-multi-$(date +%s)"
 multi_file=".drive9-csi-multi-$(date +%s).txt"
 e2e_write_test_pod_on_node drive9-csi-e2e-multi \
 	"$tmp_dir/pod-multi.yaml" "$pod1_node"
-kube apply -f "$tmp_dir/pod-multi.yaml" || e2e_fail "apply second Pod"
-kube -n "$test_namespace" wait pod/drive9-csi-e2e-multi \
+kube_retry apply -f "$tmp_dir/pod-multi.yaml" ||
+	e2e_fail "apply second Pod"
+kube_retry -n "$test_namespace" wait pod/drive9-csi-e2e-multi \
 	--for=condition=Ready --timeout=300s || e2e_fail "second Pod ready"
 
-kube -n "$test_namespace" exec drive9-csi-e2e-read -- \
+kube_retry -n "$test_namespace" exec drive9-csi-e2e-read -- \
 	sh -c "printf '%s\n' '$multi_token' > '/workspace/$multi_file' && sync" ||
 	e2e_fail "first Pod write for multi-Pod test"
-kube -n "$test_namespace" exec drive9-csi-e2e-multi -- \
+kube_retry -n "$test_namespace" exec drive9-csi-e2e-multi -- \
 	sh -c "test \"\$(cat '/workspace/$multi_file')\" = '$multi_token'" ||
 	e2e_fail "second Pod read file written by first Pod"
 
-kube -n "$test_namespace" delete pod drive9-csi-e2e-read \
-	--wait=true --timeout=300s ||
+kube_retry -n "$test_namespace" delete pod drive9-csi-e2e-read \
+	--ignore-not-found --wait=true --timeout=300s ||
 	e2e_fail "delete first Pod while second Pod is running"
 second_token="drive9-csi-multi2-$(date +%s)"
-kube -n "$test_namespace" exec drive9-csi-e2e-multi -- \
+kube_retry -n "$test_namespace" exec drive9-csi-e2e-multi -- \
 	sh -c "printf '%s\n' '$second_token' > '/workspace/$multi_file' && sync" ||
 	e2e_fail "second Pod write after first Pod deletion"
-kube -n "$test_namespace" exec drive9-csi-e2e-multi -- \
+kube_retry -n "$test_namespace" exec drive9-csi-e2e-multi -- \
 	sh -c "test \"\$(cat '/workspace/$multi_file')\" = '$second_token'" ||
 	e2e_fail "second Pod read after first Pod deletion"
-kube -n "$test_namespace" exec drive9-csi-e2e-multi -- \
+kube_retry -n "$test_namespace" exec drive9-csi-e2e-multi -- \
 	sh -c "rm -f '/workspace/$multi_file' && sync" ||
 	e2e_fail "remove multi-Pod test file"
 if [[ -n "$DRIVE9_REMOTE_ROOT_PREFIX" ]]; then
-	kube -n "$test_namespace" exec drive9-csi-e2e-multi -- \
+	kube_retry -n "$test_namespace" exec drive9-csi-e2e-multi -- \
 		sh -c "rm -f '/workspace/$e2e_file' && sync" ||
 		e2e_fail "remove managed-directory lifecycle test file"
 fi
-kube -n "$test_namespace" delete pod drive9-csi-e2e-multi \
-	--wait=true --timeout=300s || e2e_fail "delete second Pod"
+kube_retry -n "$test_namespace" delete pod drive9-csi-e2e-multi \
+	--ignore-not-found --wait=true --timeout=300s ||
+	e2e_fail "delete second Pod"
 e2e_info "passed: multi-Pod same-node concurrent mount"
 
 # Mount two PVCs in one Pod. Workspace-root mode shares one root; managed mode
 # must keep each generated remote root isolated.
 e2e_info "starting one-Pod multi-PVC test"
 e2e_write_second_pvc
-kube apply -f "$tmp_dir/workload-b.yaml" || e2e_fail "apply second PVC"
+kube_retry apply -f "$tmp_dir/workload-b.yaml" ||
+	e2e_fail "apply second PVC"
 e2e_write_multi_pvc_pod drive9-csi-e2e-multi-pvc \
 	"$tmp_dir/pod-multi-pvc.yaml"
-kube apply -f "$tmp_dir/pod-multi-pvc.yaml" ||
+kube_retry apply -f "$tmp_dir/pod-multi-pvc.yaml" ||
 	e2e_fail "apply multi-PVC Pod"
-kube -n "$test_namespace" wait pod/drive9-csi-e2e-multi-pvc \
+kube_retry -n "$test_namespace" wait pod/drive9-csi-e2e-multi-pvc \
 	--for=condition=Ready --timeout=300s || e2e_fail "multi-PVC Pod ready"
 
 multi_pvc_token_a="drive9-csi-mpvc-a-$(date +%s)"
 multi_pvc_token_b="drive9-csi-mpvc-b-$(date +%s)"
 multi_pvc_file_a=".drive9-csi-mpvc-a-$(date +%s).txt"
 multi_pvc_file_b=".drive9-csi-mpvc-b-$(date +%s).txt"
-kube -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
+kube_retry -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
 	sh -c \
 	"printf '%s\n' '$multi_pvc_token_a' > \
 	'/workspace-a/$multi_pvc_file_a' && sync" ||
 	e2e_fail "multi-PVC write to PVC-A"
-kube -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
+kube_retry -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
 	sh -c \
 	"test \"\$(cat '/workspace-a/$multi_pvc_file_a')\" = '$multi_pvc_token_a'" ||
 	e2e_fail "multi-PVC read from PVC-A"
-kube -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
+kube_retry -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
 	sh -c \
 	"printf '%s\n' '$multi_pvc_token_b' > \
 	'/workspace-b/$multi_pvc_file_b' && sync" ||
 	e2e_fail "multi-PVC write to PVC-B"
-kube -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
+kube_retry -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
 	sh -c \
 	"test \"\$(cat '/workspace-b/$multi_pvc_file_b')\" = '$multi_pvc_token_b'" ||
 	e2e_fail "multi-PVC read from PVC-B"
 
 if [[ -z "$DRIVE9_REMOTE_ROOT_PREFIX" ]]; then
-	kube -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
+	kube_retry -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
 		sh -c \
 		"test \"\$(cat '/workspace-b/$multi_pvc_file_a')\" = '$multi_pvc_token_a'" ||
 		e2e_fail "PVC-A file is not visible through PVC-B"
-	kube -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
+	kube_retry -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
 		sh -c \
 		"test \"\$(cat '/workspace-a/$multi_pvc_file_b')\" = '$multi_pvc_token_b'" ||
 		e2e_fail "PVC-B file is not visible through PVC-A"
-	kube -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
+	kube_retry -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
 		sh -c \
 		"rm -f '/workspace-a/$multi_pvc_file_a' \
 		'/workspace-a/$multi_pvc_file_b' && sync" ||
 		e2e_fail "remove multi-PVC files"
 else
-	kube -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
+	kube_retry -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
 		sh -c "! test -f '/workspace-b/$multi_pvc_file_a'" ||
 		e2e_fail "PVC-A file leaked into PVC-B"
-	kube -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
+	kube_retry -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
 		sh -c "! test -f '/workspace-a/$multi_pvc_file_b'" ||
 		e2e_fail "PVC-B file leaked into PVC-A"
-	kube -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
+	kube_retry -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
 		sh -c "rm -f '/workspace-a/$multi_pvc_file_a' && sync" ||
 		e2e_fail "remove PVC-A test file"
-	kube -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
+	kube_retry -n "$test_namespace" exec drive9-csi-e2e-multi-pvc -- \
 		sh -c "rm -f '/workspace-b/$multi_pvc_file_b' && sync" ||
 		e2e_fail "remove PVC-B test file"
 fi
 
-kube -n "$test_namespace" delete pod drive9-csi-e2e-multi-pvc \
-	--wait=true --timeout=300s || e2e_fail "delete multi-PVC Pod"
-pv_name_b="$(kube -n "$test_namespace" get pvc drive9-workspace-e2e-b \
+kube_retry -n "$test_namespace" delete pod drive9-csi-e2e-multi-pvc \
+	--ignore-not-found --wait=true --timeout=300s ||
+	e2e_fail "delete multi-PVC Pod"
+pv_name_b="$(kube_retry -n "$test_namespace" get \
+	pvc drive9-workspace-e2e-b \
 	-o jsonpath='{.spec.volumeName}')" || e2e_fail "read second PV name"
 [[ -n "$pv_name_b" ]] || e2e_fail "second PVC did not bind a PV"
-kube -n "$test_namespace" delete pvc drive9-workspace-e2e-b \
-	--wait=true --timeout=300s || e2e_fail "delete second PVC"
+kube_retry -n "$test_namespace" delete pvc drive9-workspace-e2e-b \
+	--ignore-not-found --wait=true --timeout=300s ||
+	e2e_fail "delete second PVC"
 e2e_wait_for_pv_deleted "$pv_name_b"
 e2e_info "passed: one-Pod multi-PVC mount"
 
 if [[ -z "$DRIVE9_REMOTE_ROOT_PREFIX" ]]; then
-	kube -n "$test_namespace" delete pvc drive9-workspace-e2e \
-		--wait=true --timeout=300s ||
+	kube_retry -n "$test_namespace" delete pvc drive9-workspace-e2e \
+		--ignore-not-found --wait=true --timeout=300s ||
 		e2e_fail "delete first PVC before recreation"
 	e2e_wait_for_pv_deleted "$pv_name"
-	kube apply -f "$tmp_dir/workload.yaml" || e2e_fail "recreate test PVC"
-	kube apply -f "$tmp_dir/pod-recreate-read.yaml" ||
+	kube_retry apply -f "$tmp_dir/workload.yaml" ||
+		e2e_fail "recreate test PVC"
+	kube_retry apply -f "$tmp_dir/pod-recreate-read.yaml" ||
 		e2e_fail "apply recreated reader Pod"
-	kube -n "$test_namespace" wait pod/drive9-csi-e2e-recreate-read \
+	kube_retry -n "$test_namespace" wait pod/drive9-csi-e2e-recreate-read \
 		--for=condition=Ready --timeout=300s ||
 		e2e_fail "recreated reader Pod ready"
-	kube -n "$test_namespace" exec drive9-csi-e2e-recreate-read -- \
+	kube_retry -n "$test_namespace" exec drive9-csi-e2e-recreate-read -- \
 		sh -c "test \"\$(cat '/workspace/$e2e_file')\" = '$e2e_token'" ||
 		e2e_fail "read after PVC recreation"
-	kube -n "$test_namespace" exec drive9-csi-e2e-recreate-read -- \
+	kube_retry -n "$test_namespace" exec drive9-csi-e2e-recreate-read -- \
 		sh -c "rm -f '/workspace/$e2e_file' && sync" ||
 		e2e_fail "remove workspace-root test file"
-	pv_name="$(kube -n "$test_namespace" get pvc drive9-workspace-e2e \
+	pv_name="$(kube_retry -n "$test_namespace" get \
+		pvc drive9-workspace-e2e \
 		-o jsonpath='{.spec.volumeName}')" ||
 		e2e_fail "read recreated PV name"
 	[[ -n "$pv_name" ]] || e2e_fail "recreated PVC did not bind a PV"
-	kube -n "$test_namespace" delete pod drive9-csi-e2e-recreate-read \
+	kube_retry -n "$test_namespace" delete \
+		pod drive9-csi-e2e-recreate-read --ignore-not-found \
 		--wait=true --timeout=300s ||
 		e2e_fail "delete recreated reader Pod"
 fi
 
-kube -n "$test_namespace" delete pvc drive9-workspace-e2e \
-	--wait=true --timeout=300s || e2e_fail "delete test PVC"
+kube_retry -n "$test_namespace" delete pvc drive9-workspace-e2e \
+	--ignore-not-found --wait=true --timeout=300s ||
+	e2e_fail "delete test PVC"
 e2e_wait_for_pv_deleted "$pv_name"
 
 e2e_info \

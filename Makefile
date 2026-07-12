@@ -58,11 +58,13 @@ script-check:
 
 .PHONY: e2e-check
 e2e-check:
+	bash -n hack/check-e2e-common.sh
 	bash -n e2e/prepare.sh
 	bash -n e2e/basic-lifecycle.sh
 	bash -n e2e/mount-survival.sh
 	bash -n e2e/lib/common.sh
 	bash -n e2e/lib/manifests.sh
+	hack/check-e2e-common.sh
 	@awk 'length($$0) > 80 { print FILENAME ":" FNR ": line exceeds 80 columns"; bad=1 } END { exit bad }' $(E2E_SCRIPTS) e2e/lib/*.sh
 	@test -f e2e/AGENTS.md
 	@test -f e2e/README.md
@@ -82,9 +84,11 @@ e2e-check:
 		rg -Fq 'storage_class_created=1' "$$script" || { echo "E2E case does not track StorageClass ownership: $$script" >&2; exit 1; }; \
 		rg -Fq 'volume_attributes_class_created=1' "$$script" || { echo "E2E case does not track VAC ownership: $$script" >&2; exit 1; }; \
 		rg -Fq 'e2e_cleanup_owned_resource' "$$script" || { echo "E2E case cleanup is not ownership-aware: $$script" >&2; exit 1; }; \
-		rg -Fq 'kube create -f "$$tmp_dir/namespace.yaml"' "$$script" || { echo "E2E case does not create its namespace safely: $$script" >&2; exit 1; }; \
-		rg -Fq 'kube create -f "$$manifest_dir/storageclass.yaml"' "$$script" || { echo "E2E case does not create its StorageClass safely: $$script" >&2; exit 1; }; \
-		rg -Fq 'kube create -f "$$manifest_dir/volumeattributesclass.yaml"' "$$script" || { echo "E2E case does not create its VAC safely: $$script" >&2; exit 1; }; \
+		owned_creates="$$(rg -c '^e2e_create_owned_resource' "$$script")"; \
+		test "$$owned_creates" = 3 || { echo "E2E case must reconcile exactly three owned creates: $$script" >&2; exit 1; }; \
+		rg -Fq '"$$tmp_dir/namespace.yaml"' "$$script" || { echo "E2E case does not create its namespace safely: $$script" >&2; exit 1; }; \
+		rg -Fq '"$$manifest_dir/storageclass.yaml"' "$$script" || { echo "E2E case does not create its StorageClass safely: $$script" >&2; exit 1; }; \
+		rg -Fq '"$$manifest_dir/volumeattributesclass.yaml"' "$$script" || { echo "E2E case does not create its VAC safely: $$script" >&2; exit 1; }; \
 		if rg -n 'DRIVE9_CSI_IMAGE|e2e_render_driver_manifests' "$$script"; then \
 			echo "E2E case must not prepare the Driver: $$script" >&2; \
 			exit 1; \
@@ -106,6 +110,10 @@ e2e-check:
 	@rg -Fq 'prod|production' e2e/lib/common.sh
 	@rg -Fq 'DRIVE9_CSI_E2E_CONFIRM' e2e/lib/common.sh
 	@rg -Fq 'DRIVE9_CSI_E2E_DRIVER_NAMESPACE' e2e/lib/common.sh
+	@rg -Fq 'e2e_kube_error_is_transient' e2e/lib/common.sh
+	@rg -Fq 'kube_retry()' e2e/lib/common.sh
+	@rg -Fq 'e2e_create_owned_resource()' e2e/lib/common.sh
+	@rg -Fq 'kube_retry delete "$$@"' e2e/lib/common.sh
 	@if rg -n 'config (current-context|use-context)' $(E2E_SCRIPTS) e2e/lib/*.sh; then \
 		echo "E2E scripts must not read or change the current kubectl context" >&2; \
 		exit 1; \
@@ -118,6 +126,12 @@ e2e-check:
 	@rg -Fq 'registry\.invalid\/drive9-csi:unpublished' e2e/lib/manifests.sh
 	@rg -Fq 'using Drive9 workspace root mode' e2e/basic-lifecycle.sh
 	@rg -Fq 'read after PVC recreation' e2e/basic-lifecycle.sh
+	@rg -Fq '/tmp/drive9-survival-stop' e2e/mount-survival.sh
+	@rg -Fq '/tmp/drive9-survival-stopped' e2e/mount-survival.sh
+	@if rg -n 'drive9-survival-pid|kill -9' e2e/mount-survival.sh; then \
+		echo "mount-survival I/O loop must stop cooperatively" >&2; \
+		exit 1; \
+	fi
 	@test ! -e hack/e2e-k8s.sh
 
 .PHONY: check

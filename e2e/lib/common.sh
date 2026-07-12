@@ -42,6 +42,72 @@ kube() {
 	kubectl --context "$DRIVE9_CSI_E2E_CONTEXT" "$@"
 }
 
+e2e_kube_error_is_transient() {
+	local error_file="$1"
+	local pattern
+
+	pattern='Unable to connect to the server'
+	pattern+='|TLS handshake timeout'
+	pattern+='|unexpected EOF'
+	pattern+='|(^|[^[:alpha:]])EOF([^[:alpha:]]|$)'
+	pattern+='|connection reset by peer'
+	pattern+='|connection refused'
+	pattern+='|error dialing backend'
+	pattern+='|i/o timeout'
+	pattern+='|context deadline exceeded'
+	pattern+='|Client.Timeout exceeded while awaiting headers'
+	pattern+='|request canceled while waiting for connection'
+	pattern+='|http2: client connection lost'
+	pattern+='|stream error'
+	pattern+='|no such host'
+	pattern+='|the server was unable to return a response in the time allotted'
+	LC_ALL=C grep -Eiq "$pattern" "$error_file"
+}
+
+kube_retry() {
+	local attempt
+	local delay=1
+	local error_file
+	local max_attempts=4
+	local output_file
+	local retry_dir
+	local status=1
+
+	retry_dir=$(mktemp -d \
+		"${TMPDIR:-/tmp}/drive9-csi-kube-retry.XXXXXX") ||
+		e2e_fail "create kubectl retry directory"
+	error_file="$retry_dir/stderr"
+	output_file="$retry_dir/stdout"
+	for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+		if ! : > "$error_file" || ! : > "$output_file"; then
+			rm -rf "$retry_dir"
+			e2e_fail "reset kubectl retry output files"
+		fi
+		kube "$@" > "$output_file" 2> "$error_file"
+		status="$?"
+		if [[ -s "$error_file" ]]; then
+			command cat "$error_file" >&2
+		fi
+		if ((status == 0)); then
+			command cat "$output_file"
+			rm -rf "$retry_dir"
+			return 0
+		fi
+		if ((attempt == max_attempts)) ||
+			! e2e_kube_error_is_transient "$error_file"; then
+			rm -rf "$retry_dir"
+			return "$status"
+		fi
+		e2e_info \
+			"retrying kubectl after transient transport error ($attempt/$max_attempts)"
+		sleep "$delay"
+		delay=$((delay * 2))
+	done
+
+	rm -rf "$retry_dir"
+	return "$status"
+}
+
 e2e_require_immutable_image() {
 	local label="$1"
 	local image="$2"
@@ -130,7 +196,7 @@ e2e_ensure_absent() {
 	local name="$2"
 	local existing
 
-	if ! existing=$(kube get "$kind" "$name" \
+	if ! existing=$(kube_retry get "$kind" "$name" \
 		--ignore-not-found -o name); then
 		e2e_fail "verify that $kind/$name does not exist"
 	fi
@@ -144,7 +210,7 @@ e2e_ensure_present() {
 	local name="$2"
 	local existing
 
-	if ! existing=$(kube get "$kind" "$name" \
+	if ! existing=$(kube_retry get "$kind" "$name" \
 		--ignore-not-found -o name); then
 		e2e_fail "verify that $kind/$name exists"
 	fi
@@ -158,7 +224,7 @@ e2e_ensure_namespaced_present() {
 	local name="$2"
 	local existing
 
-	if ! existing=$(kube -n "$driver_namespace" get "$kind" "$name" \
+	if ! existing=$(kube_retry -n "$driver_namespace" get "$kind" "$name" \
 		--ignore-not-found -o name); then
 		e2e_fail "verify that $kind/$name exists in $driver_namespace"
 	fi
@@ -176,7 +242,7 @@ e2e_require_driver_binding() {
 	jsonpath='jsonpath={.roleRef.kind}{"|"}{.roleRef.name}{"|"}'
 	jsonpath+='{.subjects[0].kind}{"|"}{.subjects[0].name}{"|"}'
 	jsonpath+='{.subjects[0].namespace}'
-	if ! binding_data=$(kube get clusterrolebinding "$account" \
+	if ! binding_data=$(kube_retry get clusterrolebinding "$account" \
 		-o "$jsonpath"); then
 		e2e_fail "read prepared ClusterRoleBinding $account"
 	fi
@@ -211,21 +277,21 @@ e2e_require_prepared_driver() {
 	e2e_ensure_namespaced_present serviceaccount drive9-csi-node
 	e2e_require_driver_binding drive9-csi-controller
 	e2e_require_driver_binding drive9-csi-node
-	kube -n "$driver_namespace" rollout status \
+	kube_retry -n "$driver_namespace" rollout status \
 		deployment/drive9-csi-controller --timeout=300s ||
 		e2e_fail "prepared controller is not ready"
-	kube -n "$driver_namespace" rollout status \
+	kube_retry -n "$driver_namespace" rollout status \
 		daemonset/drive9-csi-node --timeout=300s ||
 		e2e_fail "prepared node DaemonSet is not ready"
 
-	controller_image=$(kube -n "$driver_namespace" get \
+	controller_image=$(kube_retry -n "$driver_namespace" get \
 		deployment drive9-csi-controller -o \
 		"$controller_jsonpath") ||
 		e2e_fail "read prepared controller image"
-	node_image=$(kube -n "$driver_namespace" get daemonset drive9-csi-node -o \
-		"$node_jsonpath") ||
+	node_image=$(kube_retry -n "$driver_namespace" get \
+		daemonset drive9-csi-node -o "$node_jsonpath") ||
 		e2e_fail "read prepared node image"
-	installer_image=$(kube -n "$driver_namespace" get \
+	installer_image=$(kube_retry -n "$driver_namespace" get \
 		daemonset drive9-csi-node -o \
 		"$installer_jsonpath") ||
 		e2e_fail "read prepared installer image"
@@ -244,11 +310,39 @@ e2e_require_prepared_driver() {
 	e2e_info "prepared Driver is ready with image: $controller_image"
 }
 
+e2e_create_owned_resource() {
+	local description="$1"
+	local kind="$2"
+	local name="$3"
+	local run_id="$4"
+	local manifest="$5"
+	local identity
+	local jsonpath
+
+	if kube_retry create -f "$manifest"; then
+		return 0
+	fi
+
+	jsonpath='jsonpath={.metadata.name}{"|"}'
+	jsonpath+='{.metadata.labels.drive9\.ai/e2e-run}'
+	if ! identity=$(kube_retry get "$kind" "$name" \
+		--ignore-not-found -o "$jsonpath"); then
+		e2e_info "create reconciliation failed: $description"
+		return 1
+	fi
+	if [[ "$identity" != "$name|$run_id" ]]; then
+		e2e_info "create failed without an owned resource: $description"
+		return 1
+	fi
+
+	e2e_info "reconciled ambiguous create response: $description"
+}
+
 e2e_cleanup_delete() {
 	local description="$1"
 	shift
 
-	if ! kube delete "$@" --ignore-not-found --wait=true \
+	if ! kube_retry delete "$@" --ignore-not-found --wait=true \
 		--timeout=300s >/dev/null; then
 		e2e_info "cleanup failed: $description"
 		return 1
@@ -265,7 +359,7 @@ e2e_cleanup_owned_resource() {
 
 	jsonpath='jsonpath={.metadata.name}{"|"}'
 	jsonpath+='{.metadata.labels.drive9\.ai/e2e-run}'
-	if ! identity=$(kube get "$kind" "$name" --ignore-not-found \
+	if ! identity=$(kube_retry get "$kind" "$name" --ignore-not-found \
 		-o "$jsonpath"); then
 		e2e_info "cleanup ownership check failed: $description"
 		return 1
