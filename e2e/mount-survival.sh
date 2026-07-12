@@ -253,37 +253,61 @@ wait_for_io_progress() {
 }
 
 stop_io_loop() {
+	local attempt
 	local pod_name="$1"
 	local file_name="$2"
+	local status
+	local stopped=0
 
-	kube_retry -n "$test_namespace" exec "$pod_name" -- sh -c '
-		stopped=false
+	if ! kube_retry -n "$test_namespace" exec "$pod_name" -- sh -c '
 		if test -s /tmp/drive9-survival-failure; then
 			cat /tmp/drive9-survival.log >&2
-			exit 1
+			exit 2
 		fi
 		: > /tmp/drive9-survival-stop
-		attempt=0
-		while test "$attempt" -lt 15; do
-			if test -s /tmp/drive9-survival-stopped; then
-				stopped=true
-				break
-			fi
+	'; then
+		e2e_fail "request workload I/O loop stop"
+	fi
+
+	for attempt in {1..15}; do
+		kube_retry -n "$test_namespace" exec "$pod_name" -- sh -c '
 			if test -s /tmp/drive9-survival-failure; then
 				cat /tmp/drive9-survival.log >&2
-				exit 1
+				exit 2
 			fi
-			attempt=$((attempt + 1))
+			test -s /tmp/drive9-survival-stopped
+		'
+		status="$?"
+		case "$status" in
+		0)
+			stopped=1
+			break
+			;;
+		1)
 			sleep 1
-		done
-		if test "$stopped" != true; then
-			cat /tmp/drive9-survival.log >&2
-			printf "I/O loop did not stop cooperatively\n" >&2
-			exit 1
+			;;
+		2)
+			e2e_fail "workload I/O loop recorded a failure"
+			;;
+		*)
+			e2e_fail "observe workload I/O loop stop"
+			;;
+		esac
+	done
+	if ((stopped == 0)); then
+		if ! kube_retry -n "$test_namespace" exec "$pod_name" -- \
+			cat /tmp/drive9-survival.log >&2; then
+			e2e_info "could not read workload I/O loop log after stop timeout"
 		fi
+		e2e_fail "workload I/O loop did not stop cooperatively"
+	fi
+	e2e_info "workload I/O loop stopped cooperatively"
+
+	if ! kube_retry -n "$test_namespace" exec "$pod_name" -- sh -c '
 		rm -f "/workspace/$1" "/workspace/$1.tmp"
-		sync
-	' sh "$file_name" || e2e_fail "stop workload I/O loop"
+	' sh "$file_name"; then
+		e2e_fail "clean workload I/O files"
+	fi
 }
 
 wait_for_mount_cleanup() {
