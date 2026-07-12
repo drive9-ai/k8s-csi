@@ -255,9 +255,10 @@ Key deploy details:
 Stored under `$DRIVE9_CSI_STATE_DIR` (default `/var/lib/drive9-csi`):
 
 - `{volumeID}.json` — mount state (PID, PIDStartTime, staging target)
-- `published-{sha256(target)}.json` — publish state with status field
-  (`pending`/`published`), supports legacy state files without
-  `status`/`accessMode` fields
+- `published-{sha256(target)}.json` — publish state with required status field
+  (`pending`/`published`/`unpublishing`); missing or unknown status fails
+  closed. Legacy files may omit only `accessMode`, which defaults to
+  `SINGLE_NODE_WRITER`.
 
 ## CI
 
