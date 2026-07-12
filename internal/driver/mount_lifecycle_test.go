@@ -64,7 +64,7 @@ func TestMountLaunchCommitsStartsVerifiesAndPromotesInOrder(t *testing.T) {
 		"DRIVE9_API_KEY=" + request.APIKey,
 		"TMPDIR=" + hostRuntimeDir,
 		"XDG_RUNTIME_DIR=" + hostRuntimeDir,
-		"PATH=" + hostBinaryDir + ":/usr/sbin:/usr/bin:/sbin:/bin",
+		"PATH=/usr/sbin:/usr/bin:/sbin:/bin",
 		"",
 	}, "\x00")
 	if string(envBody) != wantEnv {
@@ -89,6 +89,7 @@ func TestMountLaunchPreservesAllDrive9MountArgs(t *testing.T) {
 		"mount",
 		"--foreground",
 		"--mode=fuse",
+		"--direct-mount-strict",
 		"--server", "https://api.drive9.ai",
 		"--allow-other",
 		"--cache-dir", "/var/lib/drive9-csi/cache/volume",
@@ -108,6 +109,49 @@ func TestMountLaunchPreservesAllDrive9MountArgs(t *testing.T) {
 	}
 	if !reflect.DeepEqual(request.MountArgs, want) {
 		t.Fatalf("mount args = %#v, want %#v", request.MountArgs, want)
+	}
+}
+
+func TestMountLaunchRejectsNonStrictPrimaryBeforeSideEffects(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func([]string) []string
+	}{
+		{
+			name: "missing",
+			mutate: func(args []string) []string {
+				for i, arg := range args {
+					if arg == "--direct-mount-strict" {
+						return append(args[:i:i], args[i+1:]...)
+					}
+				}
+				return args
+			},
+		},
+		{
+			name: "duplicate",
+			mutate: func(args []string) []string {
+				return append([]string{"--direct-mount-strict"}, args...)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newMountLaunchFixture(t, "")
+			request := validMountLaunchRequest(t)
+			request.MountArgs = test.mutate(request.MountArgs)
+
+			if _, err := fixture.lifecycle.Launch(context.Background(), request); err == nil {
+				t.Fatal("Launch() accepted a non-strict primary mount argv")
+			}
+			if len(fixture.states.snapshot()) != 0 {
+				t.Fatal("invalid primary argv wrote durable state")
+			}
+			if calls := fixture.runtime.Calls(); len(calls) != 0 {
+				t.Fatalf("invalid primary argv caused host observations: %#v", calls)
+			}
+		})
 	}
 }
 

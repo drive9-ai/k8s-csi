@@ -25,6 +25,14 @@ func TestMountStateValidPhases(t *testing.T) {
 	}
 }
 
+func TestMountStateAcceptsLegacyNonStrictArgv(t *testing.T) {
+	state := validStartingState(t)
+	state.MountArgs = withoutMountArg(state.MountArgs, directMountStrictFlag)
+	if err := validateMountState(state); err != nil {
+		t.Fatalf("validateMountState() rejected legacy non-strict state: %v", err)
+	}
+}
+
 func TestMountStateRejectsEveryMissingIdentity(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -370,21 +378,40 @@ func validStartingState(t *testing.T) mountState {
 	stagingTarget := "/var/lib/kubelet/plugins/kubernetes.io/csi/pv/volume/globalmount"
 	remoteRoot := "/k8s/pvc/volume"
 	return mountState{
-		SchemaVersion:   mountStateSchemaVersion,
-		Phase:           mountStatePhaseStarting,
-		Reason:          mountStartReasonStage,
-		AttemptID:       attemptID,
-		VolumeID:        volumeID,
-		RemoteRoot:      remoteRoot,
-		StagingTarget:   stagingTarget,
-		SystemdUnit:     names.SystemdUnit,
-		BinaryPath:      "/var/lib/drive9-csi/bin/drive9-" + strings.Repeat("a", 64),
-		MountArgs:       []string{"mount", "--foreground", "--server", "https://api.drive9.ai", ":" + remoteRoot, stagingTarget},
+		SchemaVersion: mountStateSchemaVersion,
+		Phase:         mountStatePhaseStarting,
+		Reason:        mountStartReasonStage,
+		AttemptID:     attemptID,
+		VolumeID:      volumeID,
+		RemoteRoot:    remoteRoot,
+		StagingTarget: stagingTarget,
+		SystemdUnit:   names.SystemdUnit,
+		BinaryPath:    "/var/lib/drive9-csi/bin/drive9-" + strings.Repeat("a", 64),
+		MountArgs: []string{
+			"mount",
+			"--foreground",
+			"--mode=fuse",
+			directMountStrictFlag,
+			"--server",
+			"https://api.drive9.ai",
+			":" + remoteRoot,
+			stagingTarget,
+		},
 		EnvPath:         names.EnvPath,
 		ArgsPath:        names.ArgsPath,
 		CreatedAt:       "2026-07-10T12:00:00Z",
 		StartupDeadline: "2026-07-10T12:01:30Z",
 	}
+}
+
+func withoutMountArg(args []string, remove string) []string {
+	result := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg != remove {
+			result = append(result, arg)
+		}
+	}
+	return result
 }
 
 func validActiveState(t *testing.T) mountState {

@@ -168,7 +168,7 @@ func TestRecoverActiveCreatesDesiredFirstCandidateWithExactFallback(t *testing.T
 	active := validActiveState(t)
 	desiredBinary := "/var/lib/drive9-csi/bin/drive9-" + strings.Repeat("b", 64)
 	desiredArgs := append([]string(nil), active.MountArgs...)
-	desiredArgs[3] = "https://new-api.drive9.ai"
+	desiredArgs[5] = "https://new-api.drive9.ai"
 	candidate, err := newActiveRecoveryCandidate(
 		active,
 		desiredBinary,
@@ -192,11 +192,26 @@ func TestRecoverActiveCreatesDesiredFirstCandidateWithExactFallback(t *testing.T
 	}
 }
 
+func TestRecoverActiveRejectsNonStrictDesired(t *testing.T) {
+	active := validActiveState(t)
+	desiredArgs := withoutMountArg(active.MountArgs, directMountStrictFlag)
+	_, err := newActiveRecoveryCandidate(
+		active,
+		"/var/lib/drive9-csi/bin/drive9-"+strings.Repeat("b", 64),
+		desiredArgs,
+		strings.Repeat("d", 32),
+		time.Date(2026, 7, 10, 12, 5, 0, 0, time.UTC),
+	)
+	if err == nil || !strings.Contains(err.Error(), directMountStrictFlag) {
+		t.Fatalf("newActiveRecoveryCandidate() error = %v, want strict contract error", err)
+	}
+}
+
 func TestRecoverActiveDesiredSuccessDoesNotStartFallback(t *testing.T) {
 	active := validActiveState(t)
 	desiredBinary := "/var/lib/drive9-csi/bin/drive9-" + strings.Repeat("b", 64)
 	desiredArgs := append([]string(nil), active.MountArgs...)
-	desiredArgs[3] = "https://new-api.drive9.ai"
+	desiredArgs[5] = "https://new-api.drive9.ai"
 	var persisted []mountState
 	var started []mountState
 	cleanupCandidateCalls := 0
@@ -256,7 +271,7 @@ func TestRecoverActiveDesiredFailureCleansBeforeFallback(t *testing.T) {
 	active := validActiveState(t)
 	desiredBinary := "/var/lib/drive9-csi/bin/drive9-" + strings.Repeat("b", 64)
 	desiredArgs := append([]string(nil), active.MountArgs...)
-	desiredArgs[3] = "https://new-api.drive9.ai"
+	desiredArgs[5] = "https://new-api.drive9.ai"
 	events := []string{}
 	var started []mountState
 	executor := activeRecoveryFactoryExecutor{
@@ -334,6 +349,31 @@ func TestRecoverActiveDesiredFailureCleansBeforeFallback(t *testing.T) {
 		!reflect.DeepEqual(started[1].MountArgs, active.MountArgs) ||
 		reflect.DeepEqual(started[1].MountArgs, desiredArgs) {
 		t.Fatalf("fallback candidate = %#v, want exact previous binary and argv", started[1])
+	}
+}
+
+func TestDriverActiveRecoveryRejectsLegacyFallbackBeforeAttemptID(t *testing.T) {
+	desired := validStartingState(t)
+	desired.Reason = mountStartReasonRecovery
+	desired.FallbackBinaryPath = "/var/lib/drive9-csi/bin/drive9-" + strings.Repeat("b", 64)
+	desired.FallbackMountArgs = withoutMountArg(desired.MountArgs, directMountStrictFlag)
+
+	attemptIDs := 0
+	runtime := &fakeHostRuntime{}
+	runtime.attemptIDFn = func() (string, error) {
+		attemptIDs++
+		return strings.Repeat("e", 32), nil
+	}
+	executor := &driverActiveRecoveryExecutor{
+		driver: &Driver{nodeRuntime: runtime},
+	}
+
+	_, err := executor.NewFallback(desired)
+	if err == nil || !strings.Contains(err.Error(), "predates") {
+		t.Fatalf("NewFallback() error = %v, want legacy eligibility error", err)
+	}
+	if attemptIDs != 0 {
+		t.Fatalf("NewFallback() generated %d attempt IDs, want zero", attemptIDs)
 	}
 }
 

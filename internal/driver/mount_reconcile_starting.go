@@ -113,6 +113,12 @@ func (r startingReconciler) Reconcile(
 		if process.State == startingProcessDead {
 			return startingReconcilePreserved, fmt.Errorf("active service has a dead recorded process")
 		}
+		if !mountArgsUseDirectMountStrict(state.MountArgs) {
+			if !allowCleanup {
+				return startingReconcilePreserved, errStartingCleanupRequired
+			}
+			return r.failExpiredStarting(ctx, state, credentials, process, observation)
+		}
 		if remaining == 0 {
 			if !allowCleanup {
 				return startingReconcilePreserved, errStartingCleanupRequired
@@ -259,21 +265,14 @@ func (r startingReconciler) failExpiredStarting(
 		return startingReconcilePreserved, fmt.Errorf("verify expired starting mount: %w", err)
 	}
 	if mounted {
-		_ = stopper.runDrive9Umount(ctx, owned)
+		_ = stopper.runKernelUnmount(ctx, owned, false)
 		mounted, err = r.runtime.IsMountPoint(state.StagingTarget)
 		if err != nil {
 			return startingReconcilePreserved, err
 		}
 		if mounted {
-			_ = stopper.runKernelUnmount(ctx, owned, false)
-			mounted, err = r.runtime.IsMountPoint(state.StagingTarget)
-			if err != nil {
+			if err := stopper.runKernelUnmount(ctx, owned, true); err != nil {
 				return startingReconcilePreserved, err
-			}
-			if mounted {
-				if err := stopper.runKernelUnmount(ctx, owned, true); err != nil {
-					return startingReconcilePreserved, err
-				}
 			}
 		}
 	}
@@ -369,6 +368,10 @@ func (r startingReconciler) handleAbsentStarting(
 		}
 		return startingReconcileDeleted, nil
 	}
+	if !mountArgsUseDirectMountStrict(state.MountArgs) {
+		return startingReconcileDegraded,
+			fmt.Errorf("recorded starting mount predates %s and cannot be relaunched", directMountStrictFlag)
+	}
 
 	if state.FallbackBinaryPath != "" {
 		if !failed && remaining > 0 {
@@ -463,6 +466,9 @@ func (r startingReconciler) switchToFallback(
 	if state.FallbackBinaryPath == "" || len(state.FallbackMountArgs) == 0 {
 		return startingReconcileDegraded, fmt.Errorf("recovery fallback candidate is unavailable")
 	}
+	if err := validateRecoveryFallbackEligibility(state.FallbackMountArgs); err != nil {
+		return startingReconcileDegraded, err
+	}
 	fallbackServer, ok := mountStateServer(state.FallbackMountArgs)
 	if credentials == nil || !ok || credentials.Server != fallbackServer {
 		return startingReconcilePreserved, fmt.Errorf("%w: recovery fallback", errStartingCredentialsRequired)
@@ -529,7 +535,6 @@ func (r startingReconciler) removeFailedUnit(ctx context.Context, state mountSta
 
 func (r startingReconciler) unmountDisconnectedStarting(ctx context.Context, state mountState) error {
 	stopper := newMountStopper(r.runtime, r.states)
-	_ = stopper.runDrive9Umount(ctx, state)
 	mounted, err := r.runtime.IsMountPoint(state.StagingTarget)
 	if err != nil {
 		return err
