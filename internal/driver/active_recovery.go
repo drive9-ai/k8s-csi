@@ -474,9 +474,7 @@ func (e *driverActiveRecoveryExecutor) Cleanup(
 			// Artifacts are removed only after terminal verification below.
 		}
 	}
-	if err := e.ensureOldRuntimeAbsent(cleanupState); err == nil {
-		return nil
-	} else {
+	if err := e.ensureOldRuntimeAbsent(cleanupState); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
@@ -571,9 +569,7 @@ func (e *driverActiveRecoveryExecutor) CleanupCandidate(_ context.Context, state
 	if err := removeAttemptStartupFiles(runtime, state); err != nil {
 		cleanupErrors = append(cleanupErrors, err)
 	}
-	if err := e.ensureOldRuntimeAbsent(owned); err == nil {
-		return nil
-	} else {
+	if err := e.ensureOldRuntimeAbsent(owned); err != nil {
 		cleanupErrors = append(cleanupErrors, err)
 	}
 	return errors.Join(cleanupErrors...)
