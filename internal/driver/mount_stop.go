@@ -118,10 +118,7 @@ func (s mountStopper) observeStopProcess(state mountState) (stopProcessObservati
 		}
 		startTime, err := readHostProcessStartTime(s.runtime, state.PID)
 		switch {
-		case err == nil:
-			if startTime != state.PIDStartTime {
-				return stopProcessObservation{}, errProcessOwnership
-			}
+		case err == nil && startTime == state.PIDStartTime:
 			verified, err := verifyHostPIDOwnership(s.runtime, processOwnershipExpectation{
 				VolumeID:      state.VolumeID,
 				StagingTarget: state.StagingTarget,
@@ -137,6 +134,9 @@ func (s mountStopper) observeStopProcess(state mountState) (stopProcessObservati
 			verified.ControlSocketPath = state.ControlSocketPath
 			verified.ProcessStatePath = state.ProcessStatePath
 			result = stopProcessObservation{State: stopProcessVerified, Verified: verified}
+		case err == nil:
+			// The recorded process is gone and its numeric PID has been reused.
+			// Continue with process-state and systemd ownership checks.
 		case !errors.Is(err, os.ErrNotExist):
 			return stopProcessObservation{}, err
 		}
@@ -413,7 +413,7 @@ func (s mountStopper) stoppingPIDAlive(state mountState) (bool, error) {
 		return false, err
 	}
 	if startTime != state.PIDStartTime {
-		return false, fmt.Errorf("%w: stopping PID was reused", errProcessOwnership)
+		return false, nil
 	}
 	return true, nil
 }

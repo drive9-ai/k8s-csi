@@ -1425,16 +1425,28 @@ func isWorkspaceRootVolumeID(volumeID string) bool {
 }
 
 func (d *Driver) publishStatePath(target string) string {
+	return publishStateFilePath(d.cfg.StateDir, target)
+}
+
+func publishStateFilePath(stateDir string, target string) string {
 	sum := sha256.Sum256([]byte(filepath.Clean(target)))
-	return filepath.Join(d.cfg.StateDir, "published-"+hex.EncodeToString(sum[:])[:32]+".json")
+	return filepath.Join(stateDir, "published-"+hex.EncodeToString(sum[:])[:32]+".json")
 }
 
 func (d *Driver) writePublishState(state publishState) error {
+	return writePublishStateFile(newHostRuntime(), d.cfg.StateDir, state)
+}
+
+func writePublishStateFile(runtime hostRuntime, stateDir string, state publishState) error {
 	body, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(d.publishStatePath(state.Target), body, 0o600)
+	body = append(body, '\n')
+	path := publishStateFilePath(stateDir, state.Target)
+	unlock := lockStatePath(path)
+	defer unlock()
+	return writeAtomicStateFile(runtime, stateDir, path, "publish state", body)
 }
 
 func (d *Driver) readPublishState(target string) (publishState, error) {

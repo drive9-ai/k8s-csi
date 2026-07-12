@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -184,6 +185,71 @@ func TestListMountStatesIgnoresPublishAndMalformedState(t *testing.T) {
 	}
 	if states[0].VolumeID != mountState.VolumeID {
 		t.Fatalf("state volumeID = %q, want %q", states[0].VolumeID, mountState.VolumeID)
+	}
+}
+
+func TestRepairPublishTargetsUsesObservedMountState(t *testing.T) {
+	stateDir := t.TempDir()
+	volumeID := "drive9-" + strings.Repeat("a", 32)
+	stagingTarget := "/var/lib/kubelet/plugins/kubernetes.io/csi/pv/volume/globalmount"
+	targetRoot := "/var/lib/kubelet/pods/pod/volumes/kubernetes.io~csi/volume"
+	tests := []struct {
+		name       string
+		status     string
+		mounted    bool
+		wantStatus string
+	}{
+		{name: "published-mounted", status: publishStatusPublished, mounted: true, wantStatus: publishStatusPublished},
+		{name: "published-absent", status: publishStatusPublished},
+		{name: "pending-mounted", status: publishStatusPending, mounted: true, wantStatus: publishStatusPublished},
+		{name: "pending-absent", status: publishStatusPending},
+	}
+	mounted := make(map[string]bool, len(tests))
+	runtime := &fakeHostRuntime{
+		isMountPointFn: func(path string) (bool, error) {
+			return mounted[path], nil
+		},
+	}
+	mountOps := &fakeNodeMountOperations{}
+	driver := &Driver{
+		cfg:          Config{StateDir: stateDir},
+		nodeRuntime:  runtime,
+		nodeMountOps: mountOps,
+	}
+	for i, test := range tests {
+		target := filepath.Join(targetRoot, test.name)
+		mounted[target] = test.mounted
+		if err := driver.writePublishState(publishState{
+			VolumeID:      volumeID,
+			StagingTarget: stagingTarget,
+			Target:        target,
+			Status:        test.status,
+		}); err != nil {
+			t.Fatalf("write publish state %d: %v", i, err)
+		}
+	}
+
+	driver.repairPublishTargets(volumeID, stagingTarget)
+
+	if mountOps.unmountCalls != 2 || mountOps.bindCalls != 2 || mountOps.lazyUnmountCalls != 0 {
+		t.Fatalf("repair calls = unmount:%d bind:%d lazy:%d, want 2/2/0",
+			mountOps.unmountCalls, mountOps.bindCalls, mountOps.lazyUnmountCalls)
+	}
+	for _, test := range tests {
+		target := filepath.Join(targetRoot, test.name)
+		state, err := driver.readPublishState(target)
+		if !test.mounted {
+			if !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("%s state error = %v, want not exist", test.name, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("read %s state: %v", test.name, err)
+		}
+		if state.Status != test.wantStatus {
+			t.Fatalf("%s status = %q, want %q", test.name, state.Status, test.wantStatus)
+		}
 	}
 }
 

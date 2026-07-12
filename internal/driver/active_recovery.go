@@ -262,7 +262,7 @@ func publishStatesForActiveRecovery(states []publishState, volumeID string, stag
 	stagingTarget = filepath.Clean(stagingTarget)
 	var matching []publishState
 	for _, state := range states {
-		if state.Status != publishStatusPublished ||
+		if (state.Status != publishStatusPublished && state.Status != publishStatusPending) ||
 			state.VolumeID != volumeID ||
 			filepath.Clean(state.StagingTarget) != stagingTarget {
 			continue
@@ -296,11 +296,7 @@ func (d *Driver) observeActiveRecovery(
 	verifiedPID := 0
 	startTime, startErr := readHostProcessStartTime(runtime, state.PID)
 	switch {
-	case startErr == nil:
-		if startTime != state.PIDStartTime {
-			observation.PIDOwnershipMismatch = true
-			return observation, errProcessOwnership
-		}
+	case startErr == nil && startTime == state.PIDStartTime:
 		if _, err := verifyHostPIDOwnership(runtime, processOwnershipExpectation{
 			VolumeID:      state.VolumeID,
 			StagingTarget: state.StagingTarget,
@@ -315,6 +311,9 @@ func (d *Driver) observeActiveRecovery(
 		}
 		observation.PIDVerified = true
 		verifiedPID = state.PID
+	case startErr == nil:
+		// The recorded process is gone and its numeric PID has been reused.
+		// Continue with process-state and systemd ownership checks.
 	case !errors.Is(startErr, os.ErrNotExist):
 		observation.PIDOwnershipMismatch = true
 		return observation, startErr
