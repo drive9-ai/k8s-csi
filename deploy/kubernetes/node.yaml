@@ -13,7 +13,20 @@ spec:
         app: drive9-csi-node
     spec:
       serviceAccountName: drive9-csi-node
+      priorityClassName: system-node-critical
       terminationGracePeriodSeconds: 120
+      initContainers:
+        - name: install-host-binaries
+          image: registry.invalid/drive9-csi:unpublished
+          imagePullPolicy: IfNotPresent
+          args:
+            - install-host-binaries
+            - --host-state-dir=/var/lib/drive9-csi
+            - --drive9-source=/usr/local/bin/drive9
+            - --launcher-source=/usr/local/bin/drive9-csi-launcher
+          volumeMounts:
+            - name: state-dir
+              mountPath: /var/lib/drive9-csi
       containers:
         - name: node-driver-registrar
           image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0
@@ -27,7 +40,7 @@ spec:
             - name: registration-dir
               mountPath: /registration
         - name: drive9-csi
-          image: ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2
+          image: registry.invalid/drive9-csi:unpublished
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
@@ -36,6 +49,7 @@ spec:
           args:
             - --endpoint=unix:///csi/csi.sock
             - --node-id=$(NODE_NAME)
+            - --service-mode=node
             - --recover-node-mounts=enabled
           env:
             - name: NODE_NAME
@@ -58,6 +72,11 @@ spec:
               mountPropagation: Bidirectional
             - name: state-dir
               mountPath: /var/lib/drive9-csi
+            - name: host-proc
+              mountPath: /host-proc
+              readOnly: true
+            - name: host-runtime
+              mountPath: /run/drive9-csi
             - name: dev-fuse
               mountPath: /dev/fuse
       volumes:
@@ -76,6 +95,14 @@ spec:
         - name: state-dir
           hostPath:
             path: /var/lib/drive9-csi
+            type: DirectoryOrCreate
+        - name: host-proc
+          hostPath:
+            path: /proc
+            type: Directory
+        - name: host-runtime
+          hostPath:
+            path: /run/drive9-csi
             type: DirectoryOrCreate
         - name: dev-fuse
           hostPath:

@@ -434,22 +434,24 @@ func TestValidateRemoteVolumeMarkerAllowsMatchingMarker(t *testing.T) {
 	}
 }
 
-func TestNodeUnstageVolumeIgnoresMismatchedStateWhenTargetAlreadyUnmounted(t *testing.T) {
-	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
-	volumeID := "vol"
-	if err := d.writeMountState(mountState{
-		VolumeID:      volumeID,
-		RemoteRoot:    "/k8s/pvc/demo",
-		StagingTarget: filepath.Join(t.TempDir(), "other-stage"),
-	}); err != nil {
+func TestNodeUnstageVolumeRejectsMismatchedStateWhenTargetAlreadyUnmounted(t *testing.T) {
+	d := &Driver{
+		cfg:         Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"},
+		nodeRuntime: &fakeHostRuntime{},
+	}
+	state := validStartingState(t)
+	volumeID := state.VolumeID
+	state.StagingTarget = "/var/lib/kubelet/plugins/kubernetes.io/csi/pv/other/globalmount"
+	state.MountArgs[len(state.MountArgs)-1] = state.StagingTarget
+	if err := d.writeMountState(state); err != nil {
 		t.Fatalf("writeMountState error = %v", err)
 	}
 	_, err := d.NodeUnstageVolume(context.Background(), &csi.NodeUnstageVolumeRequest{
 		VolumeId:          volumeID,
 		StagingTargetPath: filepath.Join(t.TempDir(), "requested-stage"),
 	})
-	if err != nil {
-		t.Fatalf("NodeUnstageVolume error = %v", err)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("NodeUnstageVolume status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
 	}
 	if _, statErr := os.Stat(d.mountStatePath(volumeID)); statErr != nil {
 		t.Fatalf("mismatched stage state should remain for the matching target cleanup, stat err = %v", statErr)
@@ -467,7 +469,10 @@ func TestNodeUnpublishVolumeRequiresVolumeID(t *testing.T) {
 }
 
 func TestNodeUnpublishVolumeMissingStateIsIdempotentWhenTargetAlreadyUnmounted(t *testing.T) {
-	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
+	d := &Driver{
+		cfg:         Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"},
+		nodeRuntime: &fakeHostRuntime{},
+	}
 	_, err := d.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{
 		VolumeId:   "vol",
 		TargetPath: t.TempDir(),
@@ -478,7 +483,10 @@ func TestNodeUnpublishVolumeMissingStateIsIdempotentWhenTargetAlreadyUnmounted(t
 }
 
 func TestNodeUnpublishVolumeIgnoresMismatchedStateWhenTargetAlreadyUnmounted(t *testing.T) {
-	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
+	d := &Driver{
+		cfg:         Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"},
+		nodeRuntime: &fakeHostRuntime{},
+	}
 	target := t.TempDir()
 	if err := d.writePublishState(publishState{
 		VolumeID:      "other-volume",
@@ -500,7 +508,10 @@ func TestNodeUnpublishVolumeIgnoresMismatchedStateWhenTargetAlreadyUnmounted(t *
 }
 
 func TestNodeUnpublishVolumeRemovesMatchingStateWhenTargetAlreadyUnmounted(t *testing.T) {
-	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
+	d := &Driver{
+		cfg:         Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"},
+		nodeRuntime: &fakeHostRuntime{},
+	}
 	target := t.TempDir()
 	if err := d.writePublishState(publishState{
 		VolumeID:      "vol",
@@ -523,17 +534,19 @@ func TestNodeUnpublishVolumeRemovesMatchingStateWhenTargetAlreadyUnmounted(t *te
 
 func TestStageAndPublishStateStatus(t *testing.T) {
 	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
-	stageTarget := filepath.Join(t.TempDir(), "stage")
+	mountState := validStartingState(t)
+	volumeID := mountState.VolumeID
+	stageTarget := mountState.StagingTarget
 	publishTarget := filepath.Join(t.TempDir(), "publish")
 
-	status, err := d.stageStateStatus("vol", stageTarget)
+	status, err := d.stageStateStatus(volumeID, stageTarget)
 	if err != nil {
 		t.Fatalf("stageStateStatus missing error = %v", err)
 	}
 	if status != stateMissing {
 		t.Fatalf("stageStateStatus missing = %v, want %v", status, stateMissing)
 	}
-	status, err = d.publishStateStatus("vol", publishTarget)
+	status, err = d.publishStateStatus(volumeID, publishTarget)
 	if err != nil {
 		t.Fatalf("publishStateStatus missing error = %v", err)
 	}
@@ -541,20 +554,20 @@ func TestStageAndPublishStateStatus(t *testing.T) {
 		t.Fatalf("publishStateStatus missing = %v, want %v", status, stateMissing)
 	}
 
-	if err := d.writeMountState(mountState{VolumeID: "vol", StagingTarget: stageTarget}); err != nil {
+	if err := d.writeMountState(mountState); err != nil {
 		t.Fatalf("writeMountState error = %v", err)
 	}
-	if err := d.writePublishState(publishState{VolumeID: "vol", Target: publishTarget}); err != nil {
+	if err := d.writePublishState(publishState{VolumeID: volumeID, Target: publishTarget}); err != nil {
 		t.Fatalf("writePublishState error = %v", err)
 	}
-	status, err = d.stageStateStatus("vol", stageTarget)
+	status, err = d.stageStateStatus(volumeID, stageTarget)
 	if err != nil {
 		t.Fatalf("stageStateStatus matching error = %v", err)
 	}
 	if status != stateMatching {
 		t.Fatalf("stageStateStatus matching = %v, want %v", status, stateMatching)
 	}
-	status, err = d.publishStateStatus("vol", publishTarget)
+	status, err = d.publishStateStatus(volumeID, publishTarget)
 	if err != nil {
 		t.Fatalf("publishStateStatus matching error = %v", err)
 	}
@@ -562,7 +575,7 @@ func TestStageAndPublishStateStatus(t *testing.T) {
 		t.Fatalf("publishStateStatus matching = %v, want %v", status, stateMatching)
 	}
 
-	status, err = d.stageStateStatus("vol", filepath.Join(t.TempDir(), "other-stage"))
+	status, err = d.stageStateStatus(volumeID, filepath.Join(t.TempDir(), "other-stage"))
 	if err != nil {
 		t.Fatalf("stageStateStatus mismatched error = %v", err)
 	}
@@ -617,13 +630,28 @@ func TestCredentialsFromSecretsValidatesServerURL(t *testing.T) {
 
 	creds, err := credentialsFromSecrets(map[string]string{
 		"server": "https://drive9.example.com/api/",
-		"apiKey": " test-key ",
+		"apiKey": "test-key",
 	})
 	if err != nil {
 		t.Fatalf("credentialsFromSecrets valid URL error = %v", err)
 	}
 	if creds.Server != "https://drive9.example.com/api" || creds.APIKey != "test-key" {
 		t.Fatalf("credentials = %+v", creds)
+	}
+
+	for name, secrets := range map[string]map[string]string{
+		"server whitespace":         {"server": " https://drive9.example.com", "apiKey": "test-key"},
+		"server Unicode whitespace": {"server": "\u00a0https://drive9.example.com\u00a0", "apiKey": "test-key"},
+		"api key whitespace":        {"server": "https://drive9.example.com", "apiKey": "test-key\n"},
+		"server NUL":                {"server": "https://drive9.example.com\x00", "apiKey": "test-key"},
+		"api key NUL":               {"server": "https://drive9.example.com", "apiKey": "test\x00key"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := credentialsFromSecrets(secrets)
+			if status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+			}
+		})
 	}
 }
 
@@ -2136,7 +2164,7 @@ func TestPublishStateLegacyDefaultsDoNotOverwrite(t *testing.T) {
 
 func TestHasActivePublishTargetsStaleCleanup(t *testing.T) {
 	stateDir := t.TempDir()
-	d := &Driver{cfg: Config{StateDir: stateDir}}
+	d := &Driver{cfg: Config{StateDir: stateDir}, nodeRuntime: &fakeHostRuntime{}}
 
 	// Write a publish state for a target that is NOT mounted (stale).
 	state := publishState{
@@ -2213,7 +2241,7 @@ func TestHasActivePublishTargetsMatchesStagingTarget(t *testing.T) {
 
 func TestHasActivePublishTargetsLegacyState(t *testing.T) {
 	stateDir := t.TempDir()
-	d := &Driver{cfg: Config{StateDir: stateDir}}
+	d := &Driver{cfg: Config{StateDir: stateDir}, nodeRuntime: &fakeHostRuntime{}}
 
 	// Write a legacy state (no Status, no AccessMode).
 	state := publishState{

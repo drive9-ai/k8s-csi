@@ -1,25 +1,39 @@
-# Drive9 CSI Lite
+---
+title: Drive9 CSI Lite
+---
 
-This repository provides a minimal Kubernetes integration for `github.com/mem9-ai/drive9`.
+This repository provides a minimal Kubernetes integration for
+`github.com/mem9-ai/drive9`.
 
 It intentionally ships a small stable surface first:
 
-- PVCs mount the Drive9 workspace root selected by the per-PVC API key by default.
+- PVCs mount the Drive9 workspace root selected by the per-PVC API key by
+  default.
 - Optional managed directory volumes backed by Drive9 remote paths.
-- `ReadWriteOnce` by default. `SINGLE_NODE_MULTI_WRITER` supported for same-node multi-pod access.
-- Credentials are resolved from PVC annotation `drive9.ai/secret-name` → Kubernetes Secret.
+- `ReadWriteOnce` by default. `SINGLE_NODE_MULTI_WRITER` supported for same-node
+  multi-pod access.
+- Credentials are resolved from PVC annotation `drive9.ai/secret-name` →
+  Kubernetes Secret.
 - Default workspace-root volumes do not create or delete Drive9 workspace data.
 - Managed directory volumes write a marker file.
-- `DeleteVolume` detaches CSI ownership only: it removes CSI metadata (marker, index, name index) but never deletes Drive9 workspace data.
-- `NodeStageVolume` runs `drive9 mount --mode=fuse`.
+- `DeleteVolume` detaches CSI ownership only: it removes CSI metadata (marker,
+  index, name index) but never deletes Drive9 workspace data.
+- `NodeStageVolume` runs `drive9 mount --mode=fuse --direct-mount-strict`
+  through a host systemd service.
 - `NodePublishVolume` bind-mounts the staged path into the pod.
 - No snapshots, expansion, RWX, or automatic tenant provisioning.
 
 ## Why CSI Lite
 
-Customers usually already run business workloads in Kubernetes pods and want normal PVCs. CSI Lite gives them that path without requiring application-level changes.
+Customers usually already run business workloads in Kubernetes pods and want
+normal PVCs. CSI Lite gives them that path without requiring application-level
+changes.
 
-The driver does not reimplement Drive9 FUSE. It uses the official `drive9` CLI inside the node plugin image and keeps CSI focused on Kubernetes lifecycle, idempotency, mount orchestration, and secret handling.
+The driver does not reimplement Drive9 FUSE. It installs the official `drive9`
+CLI from the node-plugin image to a content-addressed host path and keeps CSI
+focused on Kubernetes lifecycle, idempotency, mount orchestration, and secret
+handling. New mounts require Drive9's direct `mount(2)` path and never fall back
+to `fusermount3` or `fusermount`.
 
 ## Security Model
 
@@ -48,6 +62,7 @@ behavior.
 
 Credentials are never stored in StorageClass parameters, PV attributes, pod env,
 or volume parameters. The driver resolves them at runtime:
+
 - `CreateVolume`: reads PVC annotation → fetches Secret via K8s client
 - `NodeStageVolume`: reads Secret reference from PV volumeAttributes (fixated
   during CreateVolume, contains only Secret name/namespace — not the API key)
@@ -57,9 +72,13 @@ or volume parameters. The driver resolves them at runtime:
 If the required `drive9.ai/secret-name` annotation is missing, `CreateVolume`
 fails closed with `InvalidArgument` — there is no implicit fallback.
 
-The sidecar fallback necessarily injects the secret into the mounter sidecar environment. Use CSI for production when the customer can install a node plugin.
+The sidecar fallback necessarily injects the secret into the mounter sidecar
+environment. Use CSI for production when the customer can install a node plugin.
 
-The node plugin needs privileged FUSE access. Treat it like other node storage plugins: restrict who can modify its DaemonSet and workload namespace Secrets.
+The node plugin needs privileged FUSE access, `SYS_ADMIN`, `/dev/fuse`, the host
+mount namespace, and host systemd. Treat it like other node storage plugins:
+restrict who can modify its DaemonSet and workload namespace Secrets. The image
+does not install a FUSE mount helper on the node.
 
 Both the controller and node service accounts need `get` access to Secrets so
 the driver can resolve per-PVC credentials at provision and mount time. The
@@ -74,41 +93,55 @@ the volume prefix, for example `/k8s/pvc`, and the metadata index path
 
 ## Install
 
-The default manifests use the public customer image:
+The checked-in Kubernetes manifests are a fail-closed base. Their CSI image is
+`registry.invalid/drive9-csi:unpublished`, so applying the base cannot silently
+run an older, incompatible driver. The manually triggered validation-image
+workflow resolves the latest complete Drive9 CLI release, builds and pushes the
+image, then reports its trace tag, manifest-list digest, and immutable reference
+in the workflow summary. It does not generate deployment manifests. Each target
+architecture must execute `drive9 mount --direct-mount-strict --help`
+successfully during the image build; the runtime image contains no `fuse3`
+package or `/etc/fuse.conf` dependency. Non-production validation must inject
+that immutable reference through a local, environment-specific overlay.
 
-```text
-ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2
-```
-
-Release images are also published with a traceable tag:
+Validation images have a traceable tag:
 
 ```text
 ghcr.io/drive9-ai/drive9-csi:drive9-<drive9-short-sha>-csi-<csi-short-sha>
 ```
 
-For example, the current default image was built from Drive9 CLI commit
-`aff1023...` and CSI commit `ef5fab2...`:
-
-```text
-ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2
-```
-
 The publish workflow does not publish `:latest` or `0.1.0`. Use a traceable tag
 or a digest.
 
-To build and publish your own image instead:
+A manually published image is validation-only and is not release-admitted. Do
+not promote it to production until the N/N-1 bidirectional cache/writeback
+compatibility gate in the mount-survival design has landed and passed.
+
+To build a validation image with the latest published Drive9 CLI:
 
 ```sh
-make image IMAGE=ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2
-docker push ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2
+gh workflow run publish-image.yml \
+  -R drive9-ai/k8s-csi \
+  --ref <csi-branch>
 ```
 
-Install the CSI driver:
+To build a local image using the Dockerfile's public-release downloader:
 
 ```sh
-kubectl apply -f deploy/kubernetes/namespace.yaml
-kubectl apply -k deploy/kubernetes
+make image \
+  IMAGE=ghcr.io/drive9-ai/drive9-csi:local
 ```
+
+Install that preloaded local image with the local overlay:
+
+```sh
+kubectl apply -k deploy/overlays/local
+```
+
+For a published validation image, read the immutable reference from the workflow
+summary and use it only in a non-production validation overlay. The tag or
+digest is traceability evidence, not release-admission evidence. Do not apply
+the fail-closed base directly.
 
 Create a Drive9 Secret in the workload namespace before creating each PVC:
 
@@ -125,7 +158,8 @@ Create a PVC with the `drive9.ai/secret-name` annotation pointing to the Secret:
 kubectl apply -f deploy/examples/kubernetes/pvc.example.yaml
 ```
 
-Because the default `StorageClass` uses `WaitForFirstConsumer`, a PVC can remain `Pending` until the first Pod uses it.
+Because the default `StorageClass` uses `WaitForFirstConsumer`, a PVC can remain
+`Pending` until the first Pod uses it.
 
 Mount the PVC in a normal workload Pod:
 
@@ -165,7 +199,14 @@ The default example `StorageClass` uses `Retain`, so deleting the PVC keeps the
 PV and Drive9 workspace data for safety. Even with `reclaimPolicy: Delete`, the
 default workspace-root mode does not delete Drive9 workspace data.
 
-Example StorageClass, Secret, PVC, and smoke Pod manifests live under `deploy/examples/kubernetes/` so that applying `deploy/kubernetes/` does not create placeholder credentials or demo workloads in production clusters. Apply the example Secret with `kubectl -n <workload-namespace> apply -f deploy/examples/kubernetes/secret.example.yaml` after replacing the API key. Each PVC references its Secret via the `drive9.ai/secret-name` annotation — multiple PVCs can share a Secret or use different ones.
+Example StorageClass, Secret, PVC, and smoke Pod manifests live under
+`deploy/examples/kubernetes/` so that applying `deploy/kubernetes/` does not
+create placeholder credentials or demo workloads in production clusters. Apply
+the example Secret with
+`kubectl -n <workload-namespace> apply -f deploy/examples/kubernetes/secret.example.yaml`
+after replacing the API key. Each PVC references its Secret via the
+`drive9.ai/secret-name` annotation — multiple PVCs can share a Secret or use
+different ones.
 
 ## StorageClass
 
@@ -183,10 +224,10 @@ reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer
 ```
 
-The StorageClass does **not** contain any secret template parameters. Credentials
-are resolved from PVC annotations, not StorageClass templates. This avoids the
-implicit `drive9-csi-${pvc.name}` naming convention and makes the Secret binding
-explicit and auditable.
+The StorageClass does **not** contain any secret template parameters.
+Credentials are resolved from PVC annotations, not StorageClass templates. This
+avoids the implicit `drive9-csi-${pvc.name}` naming convention and makes the
+Secret binding explicit and auditable.
 
 `Retain` is the default example because this is customer data. If a customer
 wants a PVC to mount a CSI-managed subdirectory instead of the Drive9 workspace
@@ -221,13 +262,13 @@ the perf directory manually after collecting support data.
 The following optional tuning parameters have no CSI defaults. The driver passes
 only values explicitly set in the `StorageClass`:
 
-| StorageClass parameter | `drive9 mount` flag |
-| --- | --- |
-| `readdirPrefetch` | `--readdir-prefetch` |
-| `readdirPrefetchMaxFiles` | `--readdir-prefetch-max-files` |
+| StorageClass parameter        | `drive9 mount` flag                 |
+| ----------------------------- | ----------------------------------- |
+| `readdirPrefetch`             | `--readdir-prefetch`                |
+| `readdirPrefetchMaxFiles`     | `--readdir-prefetch-max-files`      |
 | `readdirPrefetchMaxFileBytes` | `--readdir-prefetch-max-file-bytes` |
-| `readdirPrefetchMaxBytes` | `--readdir-prefetch-max-bytes` |
-| `writebackBatchWindow` | `--writeback-batch-window` |
+| `readdirPrefetchMaxBytes`     | `--readdir-prefetch-max-bytes`      |
+| `writebackBatchWindow`        | `--writeback-batch-window`          |
 
 `readdirPrefetch` accepts `"true"` or `"false"`. The integer values must be
 positive. `writebackBatchWindow` uses Go duration syntax, for example `20ms`.
@@ -250,16 +291,29 @@ parameters:
   writebackBatchWindow: 20ms
 ```
 
-If you use `reclaimPolicy: Delete`, keep the per-PVC workload namespace Secret in
-place until Kubernetes has deleted the PV. If the Secret is removed first,
-`DeleteVolume` cannot resolve credentials and backend cleanup will require manual
-intervention.
+If you use `reclaimPolicy: Delete`, keep the per-PVC workload namespace Secret
+in place until Kubernetes has deleted the PV. If the Secret is removed first,
+`DeleteVolume` cannot resolve credentials and backend cleanup will require
+manual intervention.
 
 ## Sidecar Fallback
 
-If a customer cannot install a CSI driver yet, use `deploy/sidecar/deployment.yaml` as a fallback. It runs a privileged Drive9 mounter sidecar and exposes the mounted directory to the app container.
+If a customer cannot install a CSI driver yet, use
+`deploy/sidecar/deployment.yaml` as a fallback. The checked-in manifest uses the
+fail-closed `registry.invalid/drive9-csi:unpublished` image; override it with a
+strict-capable immutable image reference before applying it. It runs a
+privileged Drive9 mounter sidecar and exposes the mounted directory to the app
+container.
 
-This is less clean than CSI because it requires privileged pods and hostPath mount propagation. Use it for pilots or constrained clusters, not as the default production path. The fallback example also mounts the Drive9 workspace root by default; set `DRIVE9_REMOTE_ROOT` only when a subpath is intentional.
+This is less clean than CSI because it requires privileged pods and hostPath
+mount propagation. Use it for pilots or constrained clusters, not as the default
+production path. The fallback example also mounts the Drive9 workspace root by
+default; set `DRIVE9_REMOTE_ROOT` only when a subpath is intentional.
+
+The sidecar uses the same fixed `--direct-mount-strict --allow-other` contract.
+Its compiled supervisor owns the Drive9 child process and performs bounded
+drain, TERM/KILL escalation, and direct normal/lazy kernel unmount so deleting
+the Pod cannot leave a propagated host mount behind.
 
 The sidecar fallback exposes the same mount TTL behavior through
 `DRIVE9_ATTR_TTL`, `DRIVE9_ENTRY_TTL`, and `DRIVE9_DIR_TTL`. Each defaults to
@@ -273,13 +327,17 @@ choose where `/perf` is stored. The example manifest mounts it from
 The sidecar fallback also supports explicit mount tuning env vars with no
 defaults:
 
-| Environment variable | `drive9 mount` flag |
-| --- | --- |
-| `DRIVE9_READDIR_PREFETCH` | `--readdir-prefetch` |
-| `DRIVE9_READDIR_PREFETCH_MAX_FILES` | `--readdir-prefetch-max-files` |
+<!-- markdownlint-disable MD013 -->
+
+| Environment variable                     | `drive9 mount` flag                 |
+| ---------------------------------------- | ----------------------------------- |
+| `DRIVE9_READDIR_PREFETCH`                | `--readdir-prefetch`                |
+| `DRIVE9_READDIR_PREFETCH_MAX_FILES`      | `--readdir-prefetch-max-files`      |
 | `DRIVE9_READDIR_PREFETCH_MAX_FILE_BYTES` | `--readdir-prefetch-max-file-bytes` |
-| `DRIVE9_READDIR_PREFETCH_MAX_BYTES` | `--readdir-prefetch-max-bytes` |
-| `DRIVE9_WRITEBACK_BATCH_WINDOW` | `--writeback-batch-window` |
+| `DRIVE9_READDIR_PREFETCH_MAX_BYTES`      | `--readdir-prefetch-max-bytes`      |
+| `DRIVE9_WRITEBACK_BATCH_WINDOW`          | `--writeback-batch-window`          |
+
+<!-- markdownlint-enable MD013 -->
 
 Example:
 
@@ -299,7 +357,8 @@ env:
     value: 20ms
 ```
 
-Create the sidecar Secret in the target namespace before applying the fallback deployment:
+Create the sidecar Secret in the target namespace before applying the fallback
+deployment:
 
 ```sh
 kubectl create secret generic drive9-sidecar-secret \
@@ -309,7 +368,8 @@ kubectl create secret generic drive9-sidecar-secret \
 kubectl apply -k deploy/sidecar
 ```
 
-The sidecar Secret example lives under `deploy/examples/sidecar/` and is intentionally not part of the sidecar kustomization.
+The sidecar Secret example lives under `deploy/examples/sidecar/` and is
+intentionally not part of the sidecar kustomization.
 
 ## Perf Support Bundle Upload
 
@@ -388,9 +448,9 @@ kubectl -n drive9-csi exec <drive9-csi-node-pod> -c drive9-csi -- \
     drive9 fs stat :/support-inbox/<case-id>/<node-name>/<volume-id>.tgz
 ```
 
-For sidecar fallback, perf output is written to `/perf` in the mounter
-container when `DRIVE9_PERF_ENABLED` is `"true"`. Bundle and upload the mounted
-`/perf` directory with the same support upload token flow.
+For sidecar fallback, perf output is written to `/perf` in the mounter container
+when `DRIVE9_PERF_ENABLED` is `"true"`. Bundle and upload the mounted `/perf`
+directory with the same support upload token flow.
 
 After support confirms receipt, remove the local bundle and perf directory
 manually:
@@ -404,7 +464,8 @@ kubectl -n drive9-csi exec <drive9-csi-node-pod> -c drive9-csi -- \
 ## Limitations
 
 - Linux only.
-- `ReadWriteOnce` by default. `SINGLE_NODE_MULTI_WRITER` supported for same-node multi-pod access.
+- `ReadWriteOnce` by default. `SINGLE_NODE_MULTI_WRITER` supported for same-node
+  multi-pod access.
 - One Drive9 principal per mounted volume lifecycle.
 - No volume expansion or quota enforcement.
 - No cross-node cache-consistency guarantee.
@@ -413,7 +474,12 @@ kubectl -n drive9-csi exec <drive9-csi-node-pod> -c drive9-csi -- \
 ## Tests
 
 ```sh
-make test
+make test             # production Go unit tests
+make build-check      # binary/ELF acceptance
+make manifest-check   # deployment manifest contracts
+make script-check     # shell helper behavior
+make e2e-check        # non-mutating E2E safety checks
+make check            # complete local validation
 ```
 
 ## Real Kubernetes E2E Gate
@@ -423,36 +489,34 @@ production-safe, run a real Kubernetes cluster against a real Drive9 server and
 API key:
 
 ```sh
+export DRIVE9_CSI_E2E_CONTEXT=dev-dat9-eks-ap-southeast-1
+export DRIVE9_CSI_E2E_DRIVER_NAMESPACE=drive9-csi
+export DRIVE9_CSI_IMAGE='ghcr.io/drive9-ai/drive9-csi@sha256:<released-manifest-digest>'
+export DRIVE9_CSI_E2E_CONFIRM=1
+e2e/prepare.sh
+
 export DRIVE9_SERVER=https://api.drive9.ai
 export DRIVE9_API_KEY=drive9_api_key_redacted
-export DRIVE9_CSI_IMAGE=ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2
-export DRIVE9_CSI_E2E_CONFIRM=1
-hack/e2e-k8s.sh
+e2e/basic-lifecycle.sh
+e2e/mount-survival.sh
 ```
 
-The script intentionally requires `DRIVE9_CSI_E2E_CONFIRM=1` because it mutates
-the current Kubernetes context. It deploys the CSI driver into an isolated
-`drive9-csi-e2e-driver` namespace, creates a Secret in `drive9-csi-e2e`, creates
-PVC `drive9-workspace-e2e` with the `drive9.ai/secret-name` annotation, mounts
-it into one pod, writes and reads a file, deletes
-that pod, remounts the same PVC into a second pod, reads the same token again,
-then runs a multi-pod same-node concurrent test: keeps the second pod running,
-launches a third pod pinned to the same node, verifies cross-pod read, deletes
-the second pod, and confirms the third pod still works. After the multi-pod
-test, it runs a one-pod multi-PVC test: creates a second PVC with its own
-Secret, launches a single pod mounting both PVCs, and validates mode-specific
-behavior — in workspace-root mode (default) it writes through one mount and
-reads through the other to verify cross-PVC visibility; in managed-directory
-mode it asserts isolation (each PVC's files are not visible through the other
-mount). It then cleans up the second PVC. Finally it deletes the first PVC
-and PV, recreates the PVC, reads
-the same token from the Drive9 workspace root, removes the temporary token
-file, then deletes the pod and PVC.
-It fails closed if either e2e namespace or cluster-scoped CSI resources already
-exist, because the e2e should run on a clean validation cluster. Set
-`DRIVE9_REMOTE_ROOT_PREFIX=/k8s/pvc-e2e` only when explicitly testing managed
-directory mode. Do not use `:latest` for `DRIVE9_CSI_IMAGE`; use an immutable tag
-or digest for customer evidence.
+`prepare.sh` idempotently creates or updates the persistent Driver environment
+with the immutable image digest. Cases can then run repeatedly against that
+environment. They create and clean only their own workload namespace,
+StorageClass, VolumeAttributesClass, Secret, PVC, and Pod resources; they never
+delete the prepared Driver.
+
+All three scripts require explicit context and Driver namespace values. The
+current kubectl context is never used implicitly, and production-like context
+names are rejected.
+
+`basic-lifecycle.sh` covers provisioning, mount/write/read, workload Pod
+remount, same-node multi-Pod access, one-Pod multi-PVC behavior, unpublish,
+unstage, and deletion. `mount-survival.sh` keeps workload I/O active while
+replacing the matching CSI node Pod and verifies the host mount identity does
+not change. See `e2e/README.md` and `e2e/AGENTS.md` for the complete safety and
+execution contract.
 
 ## Multiple Workspaces per Namespace
 
@@ -530,7 +594,8 @@ volumes:
 
 ## Troubleshooting
 
-**PVC stuck in Pending with `failed to provision volume` or `missing required annotation`:**
+**PVC stuck in Pending with `failed to provision volume` or
+`missing required annotation`:**
 
 The driver reads the `drive9.ai/secret-name` annotation from the PVC. If your
 PVC does not have this annotation, `CreateVolume` will reject it. Add the
@@ -565,7 +630,6 @@ token. After the first successful publish, open:
 https://github.com/orgs/drive9-ai/packages/container/package/drive9-csi
 ```
 
-Then use package settings to change the package visibility to public. The image
-is anonymously pullable only after `docker manifest inspect
-ghcr.io/drive9-ai/drive9-csi:drive9-aff1023-csi-ef5fab2` works without
-`docker login`.
+Then use package settings to change the package visibility to public. Verify
+anonymous access against the published trace tag or digest before distributing
+the release manifests.

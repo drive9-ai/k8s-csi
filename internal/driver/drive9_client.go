@@ -28,13 +28,19 @@ type drive9Client struct {
 }
 
 func credentialsFromSecrets(secrets map[string]string) (drive9Credentials, error) {
-	server := strings.TrimSpace(firstNonEmpty(secrets["server"], secrets["DRIVE9_SERVER"]))
-	apiKey := strings.TrimSpace(firstNonEmpty(secrets["apiKey"], secrets["api_key"], secrets["DRIVE9_API_KEY"]))
+	server := firstNonEmpty(secrets["server"], secrets["DRIVE9_SERVER"])
+	apiKey := firstNonEmpty(secrets["apiKey"], secrets["api_key"], secrets["DRIVE9_API_KEY"])
 	if server == "" {
 		return drive9Credentials{}, status.Error(codes.InvalidArgument, "Drive9 server secret is required")
 	}
 	if apiKey == "" {
 		return drive9Credentials{}, status.Error(codes.InvalidArgument, "Drive9 apiKey secret is required")
+	}
+	if strings.ContainsRune(server, '\x00') || strings.ContainsRune(apiKey, '\x00') {
+		return drive9Credentials{}, status.Error(codes.InvalidArgument, "drive9-csi: secret value contains NUL byte, cannot pass to mount process")
+	}
+	if trimASCIIWhitespace(server) != server || trimASCIIWhitespace(apiKey) != apiKey {
+		return drive9Credentials{}, status.Error(codes.InvalidArgument, "Drive9 credential values must not have surrounding ASCII whitespace")
 	}
 	normalizedServer, err := normalizeDrive9ServerURL(server)
 	if err != nil {
@@ -53,7 +59,7 @@ func firstNonEmpty(values ...string) string {
 }
 
 func normalizeDrive9ServerURL(raw string) (string, error) {
-	u, err := url.Parse(strings.TrimSpace(raw))
+	u, err := url.Parse(raw)
 	if err != nil {
 		return "", err
 	}
