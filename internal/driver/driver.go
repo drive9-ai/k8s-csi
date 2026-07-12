@@ -1058,7 +1058,7 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 	switch publish.Status {
 	case publishStatusPending:
 		if mounted {
-			if err := d.validatePublishedMount(
+			if err := d.validatePublishStateIdentity(
 				volumeID,
 				stagingTarget,
 				target,
@@ -1084,7 +1084,7 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 			return nil, status.Error(codes.FailedPrecondition,
 				"published target is not mounted; workload Pod must be rebuilt")
 		}
-		if err := d.validatePublishedMount(
+		if err := d.validatePublishStateIdentity(
 			volumeID,
 			stagingTarget,
 			target,
@@ -1194,7 +1194,7 @@ func (d *Driver) validatedStagedMountState(volumeID string, remoteRoot string, s
 	return state, nil
 }
 
-func (d *Driver) validatePublishedMount(volumeID string, stagingTarget string, target string, readonly bool, accessMode string) error {
+func (d *Driver) validatePublishStateIdentity(volumeID string, stagingTarget string, target string, readonly bool, accessMode string) error {
 	state, err := d.readPublishState(target)
 	if err != nil {
 		return status.Errorf(codes.FailedPrecondition, "publish target is mounted but no matching Drive9 state exists: %v", err)
