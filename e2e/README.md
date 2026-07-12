@@ -14,7 +14,7 @@ image publishing and local unit-test acceptance.
 export DRIVE9_CSI_E2E_CONTEXT=dev-dat9-eks-ap-southeast-1
 export DRIVE9_CSI_E2E_DRIVER_NAMESPACE=drive9-csi
 export DRIVE9_CSI_E2E_CONFIRM=1
-export DRIVE9_CSI_IMAGE='ghcr.io/drive9-ai/drive9-csi@sha256:<manifest-digest>'
+export DRIVE9_CSI_IMAGE='ghcr.io/drive9-ai/drive9-csi:drive9-<cli-sha7>-csi-<csi-sha7>'
 
 e2e/prepare.sh
 ```
@@ -24,6 +24,10 @@ existing environment in place. It applies the current repository's namespace,
 CSIDriver, RBAC, controller, and node manifests, waits for rollout, and leaves
 the environment installed. Running it again is supported.
 
+`DRIVE9_CSI_IMAGE` accepts the trace tag emitted by the image publishing
+workflow and deploys it without local digest resolution. An immutable
+`@sha256:<digest>` reference remains supported.
+
 `DRIVE9_CSI_E2E_CONTEXT` and `DRIVE9_CSI_E2E_DRIVER_NAMESPACE` are mandatory.
 Every kubectl invocation receives the context explicitly, so the current
 kubectl context is ignored. Context names containing `prod` or `production`
@@ -31,12 +35,24 @@ are rejected.
 
 ## Cases
 
-After preparation, configure the case credentials:
+Before running a case, pre-provision a Secret containing `server` and `apiKey`
+in the case namespace, then configure only its non-sensitive name:
 
 ```sh
-export DRIVE9_SERVER=https://api.drive9.ai
-export DRIVE9_API_KEY=drive9_api_key_redacted
+export DRIVE9_CSI_E2E_SECRET_NAME=drive9-csi-secret-flags-test
 ```
+
+By default, the case namespace is
+`DRIVE9_CSI_E2E_DRIVER_NAMESPACE`. To keep workloads in a separate namespace,
+create that namespace and its Secret first, then set:
+
+```sh
+export DRIVE9_CSI_E2E_NAMESPACE=drive9-csi-cases
+```
+
+Cases never create, copy, render, or delete the namespace or Secret. The Secret
+must be in the case namespace because each PVC resolves its credentials from
+its own namespace.
 
 Run the standard CSI lifecycle case:
 
@@ -52,13 +68,13 @@ e2e/mount-survival.sh
 
 Cases verify that the prepared controller, node, RBAC bindings, and CSIDriver
 are ready. The controller, node, and host-binary installer must all use the
-same immutable image digest. A case never updates or deletes the prepared
-Driver.
+same accepted validation image reference. A case never updates or deletes the
+prepared Driver.
 
-Each case creates its own workload namespace, StorageClass, and
-VolumeAttributesClass with per-run ownership metadata. It cleans up only
-resources confirmed to belong to that run unless `DRIVE9_CSI_E2E_KEEP=1` is
-set. Prepare once, then run either case repeatedly or in any order.
+Each case creates labeled StorageClass, VolumeAttributesClass, PVC, and Pod
+resources. It cleans up only resources confirmed to belong to that run and
+never deletes the reusable namespace or Secret. Prepare once, then run either
+case repeatedly or in any order.
 
 The shared Kubernetes wrapper retries only recognized client and API transport
 failures, such as EOF, TLS handshake timeout, connection reset, and temporary
@@ -68,9 +84,9 @@ are idempotent, and an ambiguous top-level resource create is accepted only
 after its per-run ownership label is verified. Cleanup uses the same transport
 retry and ownership checks.
 
-`DRIVE9_CSI_E2E_KEEP=1` keeps the generated Secret and local temporary
-manifests containing the API key. Use it only for debugging, then remove both
-the cluster resources and the printed temporary directory.
+`DRIVE9_CSI_E2E_KEEP=1` keeps case-owned resources and generated non-secret
+manifests for debugging. The pre-provisioned Secret remains environment-owned
+regardless of this setting.
 
 `basic-lifecycle.sh` validates provisioning, write/read, workload Pod remount,
 same-node multi-Pod access, one-Pod multi-PVC behavior, unpublish, unstage, and

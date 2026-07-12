@@ -208,44 +208,19 @@ e2e_validate_case_manifests() {
 		count=$((count + 1))
 	done
 	((count == 2)) || e2e_fail "case manifest set is incomplete"
-	grep -Fq "drive9.ai/e2e-run: $case_run_id" \
-		"$tmp_dir/namespace.yaml" ||
-		e2e_fail "case namespace has no ownership label"
-}
-
-e2e_write_case_namespace() {
-	cat > "$tmp_dir/namespace.yaml" <<EOF
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: $test_namespace
-  labels:
-    drive9.ai/e2e-run: $case_run_id
-EOF
-	[[ "$?" == "0" ]] || e2e_fail "write case namespace"
 }
 
 e2e_write_primary_workload() {
 	cat > "$tmp_dir/workload.yaml" <<EOF
 apiVersion: v1
-kind: Secret
-metadata:
-  name: drive9-csi-drive9-workspace-e2e
-  namespace: $test_namespace
-type: Opaque
-stringData:
-  server: |-
-    $DRIVE9_SERVER
-  apiKey: |-
-    $DRIVE9_API_KEY
----
-apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: drive9-workspace-e2e
   namespace: $test_namespace
+  labels:
+    drive9.ai/e2e-run: $case_run_id
   annotations:
-    drive9.ai/secret-name: drive9-csi-drive9-workspace-e2e
+    drive9.ai/secret-name: $secret_name
 spec:
   accessModes:
     - ReadWriteOnce
@@ -268,6 +243,8 @@ kind: Pod
 metadata:
   name: $pod_name
   namespace: $test_namespace
+  labels:
+    drive9.ai/e2e-run: $case_run_id
 spec:
   restartPolicy: Never
   containers:
@@ -296,6 +273,8 @@ kind: Pod
 metadata:
   name: $pod_name
   namespace: $test_namespace
+  labels:
+    drive9.ai/e2e-run: $case_run_id
 spec:
   restartPolicy: Never
   nodeName: $node_name
@@ -317,24 +296,14 @@ EOF
 e2e_write_second_pvc() {
 	cat > "$tmp_dir/workload-b.yaml" <<EOF
 apiVersion: v1
-kind: Secret
-metadata:
-  name: drive9-csi-drive9-workspace-e2e-b
-  namespace: $test_namespace
-type: Opaque
-stringData:
-  server: |-
-    $DRIVE9_SERVER
-  apiKey: |-
-    $DRIVE9_API_KEY
----
-apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: drive9-workspace-e2e-b
   namespace: $test_namespace
+  labels:
+    drive9.ai/e2e-run: $case_run_id
   annotations:
-    drive9.ai/secret-name: drive9-csi-drive9-workspace-e2e-b
+    drive9.ai/secret-name: $secret_name
 spec:
   accessModes:
     - ReadWriteOnce
@@ -357,6 +326,8 @@ kind: Pod
 metadata:
   name: $pod_name
   namespace: $test_namespace
+  labels:
+    drive9.ai/e2e-run: $case_run_id
 spec:
   restartPolicy: Never
   containers:

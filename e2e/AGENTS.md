@@ -19,22 +19,27 @@ includes the non-mutating `e2e-check` static validation.
 1. Preparation and every case must require `DRIVE9_CSI_E2E_CONTEXT` and
    `DRIVE9_CSI_E2E_DRIVER_NAMESPACE`; never use the current kubectl context
    implicitly and never run `kubectl config use-context`.
+   Cases additionally require `DRIVE9_CSI_E2E_SECRET_NAME`; their optional
+   `DRIVE9_CSI_E2E_NAMESPACE` defaults to the Driver namespace.
 2. Every cluster operation in preparation or a case must call the shared
    `kube` wrapper. Only `lib/common.sh` may invoke `kubectl` directly.
 3. Reject context names containing `prod` or `production`.
 4. Require `DRIVE9_CSI_E2E_CONFIRM=1` before the first cluster mutation.
-5. `prepare.sh` must require the CSI image as an immutable `@sha256:<digest>`
-   reference. Cases must verify the prepared Driver remains digest-pinned but
-   must not require or deploy `DRIVE9_CSI_IMAGE`.
-6. Print the selected context and API server before mutation, but never print
-   `DRIVE9_API_KEY` or generated Secret contents.
+5. `prepare.sh` must require the CSI image as either the publishing workflow's
+   `drive9-<cli-sha7>-csi-<csi-sha7>` trace tag or an immutable
+   `@sha256:<digest>` reference. Cases must verify the prepared Driver keeps
+   one accepted image reference, but must not require or deploy
+   `DRIVE9_CSI_IMAGE`.
+6. Print the selected context and API server before mutation, but never print,
+   render, copy, or delete pre-provisioned Secret data.
 7. `prepare.sh` owns the persistent Driver resources and never deletes them.
    Cases must never render, apply, or delete Driver resources.
 8. Register case cleanup before the first mutation. Create case resources
    without replacement, track ownership, and delete only resources whose
    per-run ownership metadata still matches.
-9. Use a dedicated workload namespace per case, explicit timeouts, and unique
-   test filenames.
+9. Cases reuse an existing workload namespace and pre-provisioned Secret. The
+   workload namespace may equal the Driver namespace and must never be created
+   or deleted by a case. Use explicit timeouts and unique test filenames.
 10. Do not add preparation or E2E execution to
     `.github/workflows/publish-image.yml`.
 11. Do not run a real E2E as implementation acceptance. Use `make e2e-check`,
@@ -43,7 +48,7 @@ includes the non-mutating `e2e-check` static validation.
 ## Layout
 
 1. `prepare.sh`: idempotently create or update the persistent Driver
-   environment and requested immutable image.
+   environment and requested validation image.
 2. `basic-lifecycle.sh`: provisioning, mount, read/write, remount, multi-Pod,
    multi-PVC, unpublish, unstage, and delete behavior.
 3. `mount-survival.sh`: live mount identity and workload I/O across CSI node
@@ -57,8 +62,9 @@ includes the non-mutating `e2e-check` static validation.
 
 1. Preparation owns the Driver namespace, CSIDriver, RBAC, controller
    Deployment, and node DaemonSet. These resources persist across case runs.
-2. Each case owns its workload namespace, StorageClass,
-   VolumeAttributesClass, Secret, PVCs, and Pods.
+2. The environment owns the case namespace and pre-provisioned Secret. Each
+   case owns only its labeled StorageClass, VolumeAttributesClass, PVCs, and
+   Pods.
 3. `mount-survival.sh` may delete one node Pod as its explicit test action; the
    owning DaemonSet and all other Driver resources remain persistent.
 
@@ -70,8 +76,8 @@ includes the non-mutating `e2e-check` static validation.
    coordinator, and hidden reliance on the current working directory.
 3. Case scripts must be directly executable. Library scripts must reject direct
    execution.
-4. Keep credentials in mode-0600 temporary files and remove them during
-   cleanup.
+4. Do not accept credentials through environment variables or render them into
+   temporary files. Cases receive only the non-sensitive Secret name.
 
 ## Codex Execution
 
@@ -93,8 +99,8 @@ includes the non-mutating `e2e-check` static validation.
 4. The project rule removes repeated command-execution approval only for the
    three direct entrypoints. It does not waive the required environment,
    explicit real-cluster authorization, or any Hard Safety Rule above.
-5. Never place `DRIVE9_API_KEY` in a prompt, command line, approval rule, or
-   persisted Codex configuration.
+5. Never request Secret values or print or persist Secret data in a prompt,
+   command line, approval rule, log, or Codex configuration.
 
 ## Mount-Survival Evidence
 
