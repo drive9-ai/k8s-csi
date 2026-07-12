@@ -452,21 +452,6 @@ func TestRecoverActiveMissingCredentialsOrOwnershipPreservesState(t *testing.T) 
 	}
 }
 
-func TestRecoverActivePublishTargetFiltering(t *testing.T) {
-	volumeID := "drive9-" + strings.Repeat("a", 32)
-	stage := "/var/lib/kubelet/plugins/kubernetes.io/csi/pv/volume/globalmount"
-	states := []publishState{
-		{VolumeID: volumeID, StagingTarget: stage, Target: "/match", Status: publishStatusPublished},
-		{VolumeID: volumeID, StagingTarget: stage + "-other", Target: "/wrong-stage", Status: publishStatusPublished},
-		{VolumeID: "other", StagingTarget: stage, Target: "/wrong-volume", Status: publishStatusPublished},
-		{VolumeID: volumeID, StagingTarget: stage, Target: "/pending", Status: publishStatusPending},
-	}
-	got := publishStatesForActiveRecovery(states, volumeID, stage)
-	if len(got) != 2 || got[0].Target != "/match" || got[1].Target != "/pending" {
-		t.Fatalf("filtered publish states = %#v", got)
-	}
-}
-
 func TestDriverActiveRecoveryTreatsReusedRecordedPIDAsAbsent(t *testing.T) {
 	state := validActiveState(t)
 	runtime := &fakeHostRuntime{}

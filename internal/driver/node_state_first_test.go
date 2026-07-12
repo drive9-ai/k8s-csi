@@ -546,6 +546,10 @@ func TestNodeUnpublishStateFirstIgnoresSystemdDegradation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("writePublishState(): %v", err)
 	}
+	fixture.mountOps.unmountFn = func(target string) error {
+		fixture.runtimeMounted[target] = false
+		return nil
+	}
 
 	if _, err := fixture.driver.NodeUnpublishVolume(context.Background(), &csi.NodeUnpublishVolumeRequest{
 		VolumeId:   fixture.active.VolumeID,
@@ -771,27 +775,48 @@ type fakeNodeMountOperations struct {
 	bindCalls        int
 	unmountCalls     int
 	lazyUnmountCalls int
+	bindErr          error
+	unmountErr       error
+	lazyUnmountErr   error
+	bindFn           func(string, string, bool) error
+	unmountFn        func(string) error
+	lazyUnmountFn    func(string) error
 }
 
-func (f *fakeNodeMountOperations) Bind(string, string, bool) error {
+func (f *fakeNodeMountOperations) Bind(source string, target string, readonly bool) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.bindCalls++
-	return nil
+	bindFn := f.bindFn
+	bindErr := f.bindErr
+	f.mu.Unlock()
+	if bindFn != nil {
+		return bindFn(source, target, readonly)
+	}
+	return bindErr
 }
 
-func (f *fakeNodeMountOperations) Unmount(string) error {
+func (f *fakeNodeMountOperations) Unmount(target string) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.unmountCalls++
-	return nil
+	unmountFn := f.unmountFn
+	unmountErr := f.unmountErr
+	f.mu.Unlock()
+	if unmountFn != nil {
+		return unmountFn(target)
+	}
+	return unmountErr
 }
 
-func (f *fakeNodeMountOperations) LazyUnmount(string) error {
+func (f *fakeNodeMountOperations) LazyUnmount(target string) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.lazyUnmountCalls++
-	return nil
+	lazyUnmountFn := f.lazyUnmountFn
+	lazyUnmountErr := f.lazyUnmountErr
+	f.mu.Unlock()
+	if lazyUnmountFn != nil {
+		return lazyUnmountFn(target)
+	}
+	return lazyUnmountErr
 }
 
 func assertNoNodeStateFirstDestructiveCalls(t *testing.T, calls []fakeHostCall) {

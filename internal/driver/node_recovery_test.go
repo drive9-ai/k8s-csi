@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -172,6 +171,7 @@ func TestListMountStatesIgnoresPublishAndMalformedState(t *testing.T) {
 		VolumeID:      mountState.VolumeID,
 		StagingTarget: "/stage",
 		Target:        "/target",
+		Status:        publishStatusPublished,
 	}); err != nil {
 		t.Fatalf("writePublishState error = %v", err)
 	}
@@ -188,68 +188,64 @@ func TestListMountStatesIgnoresPublishAndMalformedState(t *testing.T) {
 	}
 }
 
-func TestRepairPublishTargetsUsesObservedMountState(t *testing.T) {
-	stateDir := t.TempDir()
-	volumeID := "drive9-" + strings.Repeat("a", 32)
-	stagingTarget := "/var/lib/kubelet/plugins/kubernetes.io/csi/pv/volume/globalmount"
-	targetRoot := "/var/lib/kubelet/pods/pod/volumes/kubernetes.io~csi/volume"
-	tests := []struct {
-		name       string
-		status     string
-		mounted    bool
-		wantStatus string
-	}{
-		{name: "published-mounted", status: publishStatusPublished, mounted: true, wantStatus: publishStatusPublished},
-		{name: "published-absent", status: publishStatusPublished},
-		{name: "pending-mounted", status: publishStatusPending, mounted: true, wantStatus: publishStatusPublished},
-		{name: "pending-absent", status: publishStatusPending},
-	}
-	mounted := make(map[string]bool, len(tests))
-	runtime := &fakeHostRuntime{
-		isMountPointFn: func(path string) (bool, error) {
-			return mounted[path], nil
-		},
-	}
-	mountOps := &fakeNodeMountOperations{}
-	driver := &Driver{
-		cfg:          Config{StateDir: stateDir},
-		nodeRuntime:  runtime,
-		nodeMountOps: mountOps,
-	}
-	for i, test := range tests {
-		target := filepath.Join(targetRoot, test.name)
-		mounted[target] = test.mounted
-		if err := driver.writePublishState(publishState{
-			VolumeID:      volumeID,
-			StagingTarget: stagingTarget,
-			Target:        target,
-			Status:        test.status,
-		}); err != nil {
-			t.Fatalf("write publish state %d: %v", i, err)
-		}
-	}
+func TestNodeRecoveryDoesNotMutatePublishTransactions(t *testing.T) {
+	for _, statusValue := range []string{
+		publishStatusPending,
+		publishStatusPublished,
+		publishStatusUnpublishing,
+	} {
+		t.Run(statusValue, func(t *testing.T) {
+			fixture := newStartingReconcileFixture(t)
+			fixture.mounted = true
+			fixture.process = "ready"
+			fixture.service = systemdUnitActive
+			fixture.installCallbacks()
 
-	driver.repairPublishTargets(volumeID, stagingTarget)
-
-	if mountOps.unmountCalls != 2 || mountOps.bindCalls != 2 || mountOps.lazyUnmountCalls != 0 {
-		t.Fatalf("repair calls = unmount:%d bind:%d lazy:%d, want 2/2/0",
-			mountOps.unmountCalls, mountOps.bindCalls, mountOps.lazyUnmountCalls)
-	}
-	for _, test := range tests {
-		target := filepath.Join(targetRoot, test.name)
-		state, err := driver.readPublishState(target)
-		if !test.mounted {
-			if !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("%s state error = %v, want not exist", test.name, err)
+			stateDir := t.TempDir()
+			store := newMountStateStore(stateDir, newHostRuntime())
+			if err := store.Write(fixture.state); err != nil {
+				t.Fatalf("write starting state: %v", err)
 			}
-			continue
-		}
-		if err != nil {
-			t.Fatalf("read %s state: %v", test.name, err)
-		}
-		if state.Status != test.wantStatus {
-			t.Fatalf("%s status = %q, want %q", test.name, state.Status, test.wantStatus)
-		}
+			mountOps := &fakeNodeMountOperations{}
+			driver := &Driver{
+				cfg: Config{
+					StateDir:   stateDir,
+					DriverName: "csi.drive9.ai",
+				},
+				nodeRuntime:      fixture.runtime,
+				nodeMountOps:     mountOps,
+				nodeCapabilities: availableNodeCapabilities(),
+				nodePreflightSet: true,
+			}
+			publish := publishState{
+				VolumeID:      fixture.state.VolumeID,
+				StagingTarget: fixture.state.StagingTarget,
+				Target:        filepath.Join(defaultKubeletRoot, "pods/pod/volumes/kubernetes.io~csi/volume", statusValue),
+				Status:        statusValue,
+			}
+			if err := driver.writePublishState(publish); err != nil {
+				t.Fatalf("write publish state: %v", err)
+			}
+			before, err := os.ReadFile(driver.publishStatePath(publish.Target))
+			if err != nil {
+				t.Fatalf("read publish state before recovery: %v", err)
+			}
+
+			driver.recoverOneNodeMount(context.Background(), fixture.state)
+
+			recovered, err := store.Read(fixture.state.VolumeID)
+			if err != nil || recovered.Phase != mountStatePhaseActive {
+				t.Fatalf("mount recovery = %#v, %v; want active", recovered, err)
+			}
+			after, err := os.ReadFile(driver.publishStatePath(publish.Target))
+			if err != nil || string(after) != string(before) {
+				t.Fatalf("publish state changed during recovery: before=%q after=%q err=%v", before, after, err)
+			}
+			if mountOps.bindCalls != 0 || mountOps.unmountCalls != 0 || mountOps.lazyUnmountCalls != 0 {
+				t.Fatalf("publish mount operations = bind:%d unmount:%d lazy:%d, want 0/0/0",
+					mountOps.bindCalls, mountOps.unmountCalls, mountOps.lazyUnmountCalls)
+			}
+		})
 	}
 }
 

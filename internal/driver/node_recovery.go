@@ -2,7 +2,6 @@ package driver
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -131,11 +130,7 @@ func (d *Driver) recoverOneNodeMount(ctx context.Context, state mountState) {
 			}
 			result, err = reconciler.Reconcile(ctx, state, nil, true)
 		}
-		if result == startingReconcilePromoted {
-			d.repairPublishTargets(state.VolumeID, state.StagingTarget)
-			return
-		}
-		if result == startingReconcileDeleted {
+		if result == startingReconcilePromoted || result == startingReconcileDeleted {
 			return
 		}
 		if err != nil && !errors.Is(err, errStartingCredentialsRequired) {
@@ -170,9 +165,6 @@ func (d *Driver) recoverOneNodeMount(ctx context.Context, state mountState) {
 		if err != nil {
 			log.Printf("drive9-csi: warning: resume starting mount for %s (%s): %v", state.VolumeID, result, err)
 			return
-		}
-		if result == startingReconcilePromoted {
-			d.repairPublishTargets(state.VolumeID, state.StagingTarget)
 		}
 		return
 
@@ -237,9 +229,6 @@ func (d *Driver) recoverOneNodeMount(ctx context.Context, state mountState) {
 		if err != nil {
 			log.Printf("drive9-csi: warning: active recovery for %s degraded (%s): %v", state.VolumeID, result, err)
 			return
-		}
-		if result == activeRecoveryRecovered || result == activeRecoveryHealthy {
-			d.repairPublishTargets(state.VolumeID, state.StagingTarget)
 		}
 		return
 
@@ -329,52 +318,6 @@ func validateRecoveredVolumeIdentity(volumeID string, remoteRoot string, attrs m
 	return nil
 }
 
-func (d *Driver) repairPublishTargets(volumeID string, stagingTarget string) {
-	for _, state := range publishStatesForActiveRecovery(d.listPublishStates(), volumeID, stagingTarget) {
-		if !pathUnderRoot(state.Target, defaultKubeletRoot) {
-			log.Printf("drive9-csi: warning: skipping publish repair for %s: target %q is outside %s",
-				volumeID, state.Target, defaultKubeletRoot)
-			continue
-		}
-		mounted, err := d.hostRuntime().IsMountPoint(state.Target)
-		if err != nil {
-			log.Printf("drive9-csi: warning: observe publish target %s for %s: %v", state.Target, volumeID, err)
-			continue
-		}
-		if !mounted {
-			if err := os.Remove(d.publishStatePath(state.Target)); err != nil && !errors.Is(err, os.ErrNotExist) {
-				log.Printf("drive9-csi: warning: remove stale publish state for %s: %v", state.Target, err)
-			}
-			continue
-		}
-		if err := d.repairPublishTarget(stagingTarget, state); err != nil {
-			log.Printf("drive9-csi: warning: repair publish target %s for %s: %v", state.Target, volumeID, err)
-		}
-	}
-}
-
-func (d *Driver) repairPublishTarget(stagingTarget string, state publishState) error {
-	mounts := d.mountOperations()
-	if err := mounts.Unmount(state.Target); err != nil {
-		if !isBusyUnmountError(err) {
-			return fmt.Errorf("unmount publish target: %w", err)
-		}
-		if err := mounts.LazyUnmount(state.Target); err != nil {
-			return fmt.Errorf("lazy unmount publish target: %w", err)
-		}
-	}
-	if err := mounts.Bind(stagingTarget, state.Target, state.Readonly); err != nil {
-		return fmt.Errorf("bind mount publish target: %w", err)
-	}
-	if state.Status == publishStatusPending {
-		state.Status = publishStatusPublished
-		if err := d.writePublishState(state); err != nil {
-			return fmt.Errorf("promote repaired publish state: %w", err)
-		}
-	}
-	return nil
-}
-
 func (d *Driver) listMountStates() []mountState {
 	entries, err := os.ReadDir(d.cfg.StateDir)
 	if err != nil {
@@ -400,37 +343,6 @@ func (d *Driver) listMountStates() []mountState {
 			log.Printf("drive9-csi: warning: malformed mount state %s: %v", entry.Name(), err)
 			continue
 		}
-		states = append(states, state)
-	}
-	return states
-}
-
-func (d *Driver) listPublishStates() []publishState {
-	entries, err := os.ReadDir(d.cfg.StateDir)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			log.Printf("drive9-csi: warning: read state dir for publish states: %v", err)
-		}
-		return nil
-	}
-	var states []publishState
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "published-") || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		body, err := os.ReadFile(filepath.Join(d.cfg.StateDir, entry.Name()))
-		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				log.Printf("drive9-csi: warning: unreadable publish state %s: %v", entry.Name(), err)
-			}
-			continue
-		}
-		var state publishState
-		if err := json.Unmarshal(body, &state); err != nil {
-			log.Printf("drive9-csi: warning: malformed publish state %s: %v", entry.Name(), err)
-			continue
-		}
-		state.applyLegacyDefaults()
 		states = append(states, state)
 	}
 	return states
