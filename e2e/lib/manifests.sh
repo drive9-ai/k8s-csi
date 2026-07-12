@@ -250,7 +250,7 @@ spec:
   containers:
     - name: app
       image: busybox:1.36
-      command: ["/bin/sh", "-c", "sleep 3600"]
+      command: ["/bin/sleep", "3600"]
       volumeMounts:
         - name: workspace
           mountPath: /workspace

@@ -486,26 +486,24 @@ make check            # complete local validation
 
 Static checks are not enough for customer distribution. Before calling a build
 production-safe, run a real Kubernetes cluster against a real Drive9 server and
-API key:
+a pre-provisioned Secret containing its API key:
 
 ```sh
 export DRIVE9_CSI_E2E_CONTEXT=dev-dat9-eks-ap-southeast-1
 export DRIVE9_CSI_E2E_DRIVER_NAMESPACE=drive9-csi
-export DRIVE9_CSI_IMAGE='ghcr.io/drive9-ai/drive9-csi@sha256:<released-manifest-digest>'
+export DRIVE9_CSI_E2E_SECRET_NAME=drive9-csi-secret-flags-test
 export DRIVE9_CSI_E2E_CONFIRM=1
-e2e/prepare.sh
+e2e/prepare.sh --image-tag drive9-a53e497-csi-d91bfe3
 
-export DRIVE9_SERVER=https://api.drive9.ai
-export DRIVE9_API_KEY=drive9_api_key_redacted
 e2e/basic-lifecycle.sh
 e2e/mount-survival.sh
 ```
 
 `prepare.sh` idempotently creates or updates the persistent Driver environment
-with the immutable image digest. Cases can then run repeatedly against that
-environment. They create and clean only their own workload namespace,
-StorageClass, VolumeAttributesClass, Secret, PVC, and Pod resources; they never
-delete the prepared Driver.
+with the completed publishing workflow's bare trace tag. Cases can then run
+repeatedly against that environment. They reuse a pre-provisioned namespace and
+Secret, create and clean only their own StorageClass, VolumeAttributesClass,
+PVC, and Pod resources, and never delete the prepared Driver.
 
 All three scripts require explicit context and Driver namespace values. The
 current kubectl context is never used implicitly, and production-like context

@@ -124,6 +124,35 @@ e2e_require_validation_image() {
 	fi
 }
 
+e2e_configure_prepare_image() {
+	local image_tag
+	local trace_tag_pattern
+
+	if (($# == 0)); then
+		e2e_need_env DRIVE9_CSI_IMAGE
+		e2e_require_validation_image \
+			"DRIVE9_CSI_IMAGE" "$DRIVE9_CSI_IMAGE"
+		return
+	fi
+	if (($# != 2)) || [[ "$1" != "--image-tag" ]]; then
+		e2e_fail \
+			"usage: e2e/prepare.sh [--image-tag <drive9-sha7-csi-sha7>]"
+	fi
+	if [[ -n "${DRIVE9_CSI_IMAGE:-}" ]]; then
+		e2e_fail \
+			"DRIVE9_CSI_IMAGE cannot be combined with --image-tag"
+	fi
+
+	image_tag="$2"
+	trace_tag_pattern='^drive9-[0-9a-f]{7}-csi-[0-9a-f]{7}$'
+	if [[ ! "$image_tag" =~ $trace_tag_pattern ]]; then
+		e2e_fail "--image-tag must match drive9-<sha7>-csi-<sha7>"
+	fi
+
+	DRIVE9_CSI_IMAGE="ghcr.io/drive9-ai/drive9-csi:$image_tag"
+	e2e_require_validation_image "--image-tag" "$DRIVE9_CSI_IMAGE"
+}
+
 e2e_require_single_line() {
 	local label="$1"
 	local value="$2"
