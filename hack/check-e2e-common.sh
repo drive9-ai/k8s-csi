@@ -142,7 +142,8 @@ fi
 
 digest_image='ghcr.io/drive9-ai/drive9-csi@sha256:'
 digest_image+='b4a60d483a236f4dfeca1ab1ed2a51422259551d9ce7ccf5aaf80a135ca35ef3'
-trace_image='ghcr.io/drive9-ai/drive9-csi:drive9-a53e497-csi-d91bfe3'
+trace_tag='drive9-a53e497-csi-d91bfe3'
+trace_image="ghcr.io/drive9-ai/drive9-csi:$trace_tag"
 e2e_require_validation_image "digest fixture" "$digest_image"
 e2e_require_validation_image "trace tag fixture" "$trace_image"
 for invalid_image in \
@@ -154,6 +155,37 @@ for invalid_image in \
 		fail "invalid validation image was accepted: $invalid_image"
 	fi
 done
+
+unset DRIVE9_CSI_IMAGE
+e2e_configure_prepare_image --image-tag "$trace_tag"
+[[ "$DRIVE9_CSI_IMAGE" == "$trace_image" ]] ||
+	fail "--image-tag did not configure the expected image"
+
+DRIVE9_CSI_IMAGE="$digest_image"
+e2e_configure_prepare_image
+[[ "$DRIVE9_CSI_IMAGE" == "$digest_image" ]] ||
+	fail "prepare image environment fallback changed the image"
+
+if (unset DRIVE9_CSI_IMAGE; e2e_configure_prepare_image \
+	--image-tag >/dev/null 2>&1); then
+	fail "--image-tag without a value was accepted"
+fi
+if (unset DRIVE9_CSI_IMAGE; e2e_configure_prepare_image \
+	--image-ref "$trace_image" >/dev/null 2>&1); then
+	fail "unknown prepare image argument was accepted"
+fi
+if (unset DRIVE9_CSI_IMAGE; e2e_configure_prepare_image \
+	--image-tag "$trace_tag" extra >/dev/null 2>&1); then
+	fail "extra prepare image argument was accepted"
+fi
+if (unset DRIVE9_CSI_IMAGE; e2e_configure_prepare_image \
+	--image-tag "$trace_image" >/dev/null 2>&1); then
+	fail "a full image reference was accepted as a raw image tag"
+fi
+if (DRIVE9_CSI_IMAGE="$digest_image"; e2e_configure_prepare_image \
+	--image-tag "$trace_tag" >/dev/null 2>&1); then
+	fail "conflicting prepare image sources were accepted"
+fi
 
 driver_manifest_dir="$tmp_dir/driver-manifests"
 mkdir -p "$driver_manifest_dir" || fail "create Driver manifest directory"
@@ -363,6 +395,12 @@ for file in workload.yaml workload-b.yaml pod.yaml pod-node.yaml \
 	grep -Fq "drive9.ai/e2e-run: $case_run_id" "$tmp_dir/$file" ||
 		fail "case manifest lacks ownership: $file"
 done
+grep -Fq 'command: ["/bin/sleep", "3600"]' "$tmp_dir/pod.yaml" ||
+	fail "test Pod does not run sleep directly"
+if grep -Fq 'command: ["/bin/sh", "-c", "sleep 3600"]' \
+	"$tmp_dir/pod.yaml"; then
+	fail "test Pod runs sleep through a shell"
+fi
 secret_refs=$(awk -v secret="$secret_name" '
 	$0 == "    drive9.ai/secret-name: " secret { count += 1 }
 	END { print count + 0 }
@@ -403,9 +441,16 @@ test_split_stop_io_loop() {
 			;;
 		2 | 3)
 			[[ "$remote_script" == *"drive9-survival-stopped"* &&
-				"$remote_script" == *"drive9-survival-failure"* ]] ||
+				"$remote_script" == *"drive9-survival-failure"* &&
+				"$remote_script" == *'printf "failed\n"'* &&
+				"$remote_script" == *'printf "stopped\n"'* &&
+				"$remote_script" == *'printf "running\n"'* ]] ||
 				return 83
-			((attempt == 2)) && return 1
+			if ((attempt == 2)); then
+				printf 'running\n'
+			else
+				printf 'stopped\n'
+			fi
 			;;
 		4)
 			[[ "$remote_script" == *'rm -f "/workspace/$1"'* &&
@@ -430,6 +475,25 @@ fi
 [[ "$(read_counter)" == "4" ]] ||
 	fail "stop_io_loop made an unexpected number of exec calls"
 
+test_stop_io_loop_exit_1() {
+	kube_retry() {
+		local attempt
+
+		attempt=$(increment_counter) || return 1
+		((attempt == 1)) && return 0
+		return 1
+	}
+
+	stop_io_loop drive9-csi-survival survival.txt
+}
+
+printf '0\n' > "$counter_file" || fail "reset retry counter"
+if (test_stop_io_loop_exit_1 > "$stdout_file" 2> "$stderr_file"); then
+	fail "stop_io_loop accepted an exec exit 1"
+fi
+[[ "$(read_counter)" == "2" ]] ||
+	fail "stop_io_loop did not fail immediately after exec exit 1"
+
 test_stop_io_loop_exit_137() {
 	kube_retry() {
 		local attempt
@@ -448,5 +512,29 @@ if (test_stop_io_loop_exit_137 > "$stdout_file" 2> "$stderr_file"); then
 fi
 [[ "$(read_counter)" == "2" ]] ||
 	fail "stop_io_loop retried or continued after a remote exit 137"
+
+test_stop_io_loop_rejected_state() {
+	local rejected_state="$1"
+
+	kube_retry() {
+		local attempt
+
+		attempt=$(increment_counter) || return 1
+		((attempt == 1)) && return 0
+		printf '%s\n' "$rejected_state"
+	}
+
+	stop_io_loop drive9-csi-survival survival.txt
+}
+
+for rejected_state in failed unknown; do
+	printf '0\n' > "$counter_file" || fail "reset retry counter"
+	if (test_stop_io_loop_rejected_state "$rejected_state" \
+		> "$stdout_file" 2> "$stderr_file"); then
+		fail "stop_io_loop accepted state: $rejected_state"
+	fi
+	[[ "$(read_counter)" == "2" ]] ||
+		fail "stop_io_loop continued after state: $rejected_state"
+done
 
 printf 'e2e common checks passed\n'

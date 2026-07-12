@@ -14,9 +14,8 @@ image publishing and local unit-test acceptance.
 export DRIVE9_CSI_E2E_CONTEXT=dev-dat9-eks-ap-southeast-1
 export DRIVE9_CSI_E2E_DRIVER_NAMESPACE=drive9-csi
 export DRIVE9_CSI_E2E_CONFIRM=1
-export DRIVE9_CSI_IMAGE='ghcr.io/drive9-ai/drive9-csi:drive9-<cli-sha7>-csi-<csi-sha7>'
 
-e2e/prepare.sh
+e2e/prepare.sh --image-tag drive9-a53e497-csi-d91bfe3
 ```
 
 Preparation creates the Driver namespace when absent and otherwise updates the
@@ -24,9 +23,15 @@ existing environment in place. It applies the current repository's namespace,
 CSIDriver, RBAC, controller, and node manifests, waits for rollout, and leaves
 the environment installed. Running it again is supported.
 
-`DRIVE9_CSI_IMAGE` accepts the trace tag emitted by the image publishing
-workflow and deploys it without local digest resolution. An immutable
-`@sha256:<digest>` reference remains supported.
+`--image-tag` accepts only the bare
+`drive9-<cli-sha7>-csi-<csi-sha7>` tag emitted by a completed image publishing
+workflow. Copy that tag literally into the command. Preparation maps it to
+`ghcr.io/drive9-ai/drive9-csi:<tag>` without local digest resolution.
+
+For a manual, non-Codex invocation, an immutable `@sha256:<digest>` image may
+still be supplied through `DRIVE9_CSI_IMAGE` while calling `prepare.sh` without
+arguments. Do not combine `DRIVE9_CSI_IMAGE` with `--image-tag`; preparation
+rejects conflicting image inputs before any cluster access.
 
 `DRIVE9_CSI_E2E_CONTEXT` and `DRIVE9_CSI_E2E_DRIVER_NAMESPACE` are mandatory.
 Every kubectl invocation receives the context explicitly, so the current

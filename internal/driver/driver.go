@@ -58,6 +58,7 @@ type Driver struct {
 	nodeMountOps     nodeMountOperations
 	nodeCapabilities nodeCapabilities
 	nodePreflightSet bool
+	publishRuntime   hostRuntime
 }
 
 // lockVolume serializes Node RPCs for the same volumeID.  The returned
@@ -799,7 +800,6 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 			return nil, status.Errorf(codes.FailedPrecondition, "active mount recovery degraded: %v", recoveryErr)
 		}
 		if result == activeRecoveryHealthy || result == activeRecoveryRecovered {
-			d.repairPublishTargets(volumeID, stagingTarget)
 			return &csi.NodeStageVolumeResponse{}, nil
 		}
 		return nil, status.Error(codes.FailedPrecondition, "active mount recovery is degraded")
@@ -1002,55 +1002,104 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 	}
 
 	requestedMode := req.GetVolumeCapability().GetAccessMode().GetMode()
+	publish, publishErr := d.readPublishState(target)
+	publishExists := true
+	if errors.Is(publishErr, os.ErrNotExist) {
+		publishExists = false
+	} else if publishErr != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "read publish state: %v", publishErr)
+	}
+	if publishExists && !publishStateMatches(
+		publish,
+		volumeID,
+		stagingTarget,
+		target,
+		req.GetReadonly(),
+		requestedMode.String(),
+	) {
+		return nil, status.Error(codes.FailedPrecondition,
+			"publish target state belongs to a different Drive9 volume or access mode")
+	}
 
-	// Idempotent: if target is already mounted, validate and return.
-	if mounted, err := d.hostRuntime().IsMountPoint(target); err != nil {
+	mounted, err := d.hostRuntime().IsMountPoint(target)
+	if err != nil {
 		return nil, status.Errorf(codes.Internal, "check target mount: %v", err)
-	} else if mounted {
-		if err := d.validatePublishedMount(volumeID, stagingTarget, target, req.GetReadonly(), requestedMode.String()); err != nil {
+	}
+
+	if !publishExists {
+		if mounted {
+			return nil, status.Error(codes.FailedPrecondition,
+				"publish target is mounted without durable Drive9 state")
+		}
+		active, scanErr := d.hasActivePublishTargets(volumeID, stagingTarget)
+		if scanErr != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "publish state scan: %v", scanErr)
+		}
+		if err := checkMultiTargetAccess(active, requestedMode); err != nil {
+			return nil, err
+		}
+		publish = publishState{
+			VolumeID:      volumeID,
+			StagingTarget: filepath.Clean(stagingTarget),
+			Target:        filepath.Clean(target),
+			Readonly:      req.GetReadonly(),
+			AccessMode:    requestedMode.String(),
+			Status:        publishStatusPending,
+			PublishedAt:   time.Now().UTC().Format(time.RFC3339),
+		}
+		if err := validatePublishStatusTransition("", publish.Status); err != nil {
+			return nil, status.Errorf(codes.Internal, "validate pending publish transition: %v", err)
+		}
+		if err := d.writePublishState(publish); err != nil {
+			return nil, status.Errorf(codes.Internal, "write pending publish state: %v", err)
+		}
+	}
+
+	switch publish.Status {
+	case publishStatusPending:
+		if mounted {
+			if err := d.validatePublishStateIdentity(
+				volumeID,
+				stagingTarget,
+				target,
+				req.GetReadonly(),
+				requestedMode.String(),
+			); err != nil {
+				return nil, err
+			}
+		} else if err := d.mountOperations().Bind(stagingTarget, target, req.GetReadonly()); err != nil {
+			return nil, status.Errorf(codes.Internal, "bind mount publish target: %v", err)
+		}
+		if err := validatePublishStatusTransition(publish.Status, publishStatusPublished); err != nil {
+			return nil, status.Errorf(codes.Internal, "validate publish promotion: %v", err)
+		}
+		publish.Status = publishStatusPublished
+		if err := d.writePublishState(publish); err != nil {
+			return nil, status.Errorf(codes.Internal, "write publish state: %v", err)
+		}
+		return &csi.NodePublishVolumeResponse{}, nil
+
+	case publishStatusPublished:
+		if !mounted {
+			return nil, status.Error(codes.FailedPrecondition,
+				"published target is not mounted; workload Pod must be rebuilt")
+		}
+		if err := d.validatePublishStateIdentity(
+			volumeID,
+			stagingTarget,
+			target,
+			req.GetReadonly(),
+			requestedMode.String(),
+		); err != nil {
 			return nil, err
 		}
 		return &csi.NodePublishVolumeResponse{}, nil
-	}
 
-	// Multi-target access mode check: only SINGLE_NODE_MULTI_WRITER
-	// allows publishing to a second target for the same volume.
-	active, scanErr := d.hasActivePublishTargets(volumeID, stagingTarget)
-	if scanErr != nil {
-		return nil, status.Errorf(codes.FailedPrecondition, "publish state scan: %v", scanErr)
+	case publishStatusUnpublishing:
+		return nil, status.Error(codes.FailedPrecondition,
+			"publish target cleanup is in progress")
 	}
-	if err := checkMultiTargetAccess(active, requestedMode); err != nil {
-		return nil, err
-	}
-
-	// Write-before-bind: write pending state first for crash safety.
-	pendingState := publishState{
-		VolumeID:      volumeID,
-		StagingTarget: filepath.Clean(stagingTarget),
-		Target:        filepath.Clean(target),
-		Readonly:      req.GetReadonly(),
-		AccessMode:    requestedMode.String(),
-		Status:        publishStatusPending,
-		PublishedAt:   time.Now().UTC().Format(time.RFC3339),
-	}
-	if err := d.writePublishState(pendingState); err != nil {
-		return nil, status.Errorf(codes.Internal, "write pending publish state: %v", err)
-	}
-
-	if err := d.mountOperations().Bind(stagingTarget, target, req.GetReadonly()); err != nil {
-		// Bind failed — clean up pending state.
-		_ = os.Remove(d.publishStatePath(target))
-		return nil, status.Errorf(codes.Internal, "bind mount publish target: %v", err)
-	}
-
-	// Promote to published.
-	pendingState.Status = publishStatusPublished
-	if err := d.writePublishState(pendingState); err != nil {
-		_ = d.mountOperations().Unmount(target)
-		_ = os.Remove(d.publishStatePath(target))
-		return nil, status.Errorf(codes.Internal, "write publish state: %v", err)
-	}
-	return &csi.NodePublishVolumeResponse{}, nil
+	return nil, status.Errorf(codes.FailedPrecondition, "unsupported publish status %q", publish.Status)
 }
 
 func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
@@ -1066,16 +1115,44 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 	if !filepath.IsAbs(target) {
 		return nil, status.Error(codes.InvalidArgument, "target path must be absolute")
 	}
-	publishStatus, err := d.publishStateStatus(volumeID, target)
-	if err != nil {
-		return nil, err
+	publish, err := d.readPublishState(target)
+	if errors.Is(err, os.ErrNotExist) {
+		mounted, mountErr := d.hostRuntime().IsMountPoint(target)
+		if mountErr != nil {
+			return nil, status.Errorf(codes.Internal, "check target mount: %v", mountErr)
+		}
+		if mounted {
+			return nil, status.Error(codes.FailedPrecondition,
+				"publish target is mounted without durable Drive9 state")
+		}
+		return &csi.NodeUnpublishVolumeResponse{}, nil
 	}
+	if err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "read publish state: %v", err)
+	}
+	if publish.VolumeID != volumeID || filepath.Clean(publish.Target) != filepath.Clean(target) {
+		return nil, status.Error(codes.FailedPrecondition,
+			"publish target state belongs to a different Drive9 volume or path")
+	}
+
+	switch publish.Status {
+	case publishStatusPending, publishStatusPublished:
+		if err := validatePublishStatusTransition(publish.Status, publishStatusUnpublishing); err != nil {
+			return nil, status.Errorf(codes.Internal, "validate unpublish transition: %v", err)
+		}
+		publish.Status = publishStatusUnpublishing
+		if err := d.writePublishState(publish); err != nil {
+			return nil, status.Errorf(codes.Internal, "write unpublishing state: %v", err)
+		}
+	case publishStatusUnpublishing:
+	default:
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"unsupported publish status %q", publish.Status)
+	}
+
 	mounted, err := d.hostRuntime().IsMountPoint(target)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "check target mount: %v", err)
-	}
-	if mounted && publishStatus == stateMismatched {
-		return nil, status.Error(codes.FailedPrecondition, "publish target state belongs to a different Drive9 volume")
 	}
 	if mounted {
 		if err := d.requireNodeCapabilities(nodeOperationUnpublish); err != nil {
@@ -1084,11 +1161,19 @@ func (d *Driver) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublish
 		if err := d.mountOperations().Unmount(target); err != nil {
 			return nil, status.Errorf(codes.Internal, "unpublish unmount: %v", err)
 		}
-	}
-	if publishStatus == stateMatching {
-		if err := os.Remove(d.publishStatePath(target)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, status.Errorf(codes.Internal, "remove publish state: %v", err)
+		mounted, err = d.hostRuntime().IsMountPoint(target)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "verify target unmounted: %v", err)
 		}
+		if mounted {
+			return nil, status.Error(codes.Internal, "publish target remains mounted after unmount")
+		}
+	}
+	if err := validatePublishStatusTransition(publish.Status, ""); err != nil {
+		return nil, status.Errorf(codes.Internal, "validate publish state removal: %v", err)
+	}
+	if err := d.removePublishState(target); err != nil {
+		return nil, status.Errorf(codes.Internal, "remove publish state: %v", err)
 	}
 	return &csi.NodeUnpublishVolumeResponse{}, nil
 }
@@ -1109,7 +1194,7 @@ func (d *Driver) validatedStagedMountState(volumeID string, remoteRoot string, s
 	return state, nil
 }
 
-func (d *Driver) validatePublishedMount(volumeID string, stagingTarget string, target string, readonly bool, accessMode string) error {
+func (d *Driver) validatePublishStateIdentity(volumeID string, stagingTarget string, target string, readonly bool, accessMode string) error {
 	state, err := d.readPublishState(target)
 	if err != nil {
 		return status.Errorf(codes.FailedPrecondition, "publish target is mounted but no matching Drive9 state exists: %v", err)
@@ -1314,20 +1399,6 @@ func (d *Driver) stageStateStatus(volumeID string, stagingTarget string) (stateS
 	return stateMatching, nil
 }
 
-func (d *Driver) publishStateStatus(volumeID string, target string) (stateStatus, error) {
-	state, err := d.readPublishState(target)
-	if errors.Is(err, os.ErrNotExist) {
-		return stateMissing, nil
-	}
-	if err != nil {
-		return stateMissing, status.Errorf(codes.FailedPrecondition, "read publish state: %v", err)
-	}
-	if state.VolumeID != volumeID || filepath.Clean(state.Target) != filepath.Clean(target) {
-		return stateMismatched, nil
-	}
-	return stateMatching, nil
-}
-
 func mountStateMatches(state mountState, volumeID string, remoteRoot string, stagingTarget string) bool {
 	if state.VolumeID != volumeID {
 		return false
@@ -1434,10 +1505,13 @@ func publishStateFilePath(stateDir string, target string) string {
 }
 
 func (d *Driver) writePublishState(state publishState) error {
-	return writePublishStateFile(newHostRuntime(), d.cfg.StateDir, state)
+	return writePublishStateFile(d.publishStateHostRuntime(), d.cfg.StateDir, state)
 }
 
 func writePublishStateFile(runtime hostRuntime, stateDir string, state publishState) error {
+	if err := validatePublishStatus(state.Status); err != nil {
+		return err
+	}
 	body, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
@@ -1459,13 +1533,48 @@ func (d *Driver) readPublishState(target string) (publishState, error) {
 		return publishState{}, err
 	}
 	state.applyLegacyDefaults()
+	if err := validatePublishStatus(state.Status); err != nil {
+		return publishState{}, err
+	}
 	return state, nil
 }
 
-// hasActivePublishTargets scans state files to determine whether any
-// pods still have bind-mounts from the given (volumeID, stagingTarget).
-// It returns the list of active publish states and an error if any
-// state is ambiguous (malformed file, isMountPoint error).
+func (d *Driver) removePublishState(target string) error {
+	return removePublishStateFile(d.publishStateHostRuntime(), d.cfg.StateDir, target)
+}
+
+func (d *Driver) publishStateHostRuntime() hostRuntime {
+	if d.publishRuntime != nil {
+		return d.publishRuntime
+	}
+	return newHostRuntime()
+}
+
+func removePublishStateFile(runtime hostRuntime, stateDir string, target string) error {
+	statePath := publishStateFilePath(stateDir, target)
+	unlock := lockStatePath(statePath)
+	defer unlock()
+
+	if err := runtime.Remove(statePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove publish state: %w", err)
+	}
+	directory, err := runtime.OpenFile(stateDir, os.O_RDONLY, 0)
+	if err != nil {
+		return fmt.Errorf("open publish state directory: %w", err)
+	}
+	if err := directory.Sync(); err != nil {
+		_ = directory.Close()
+		return fmt.Errorf("sync publish state directory: %w", err)
+	}
+	if err := directory.Close(); err != nil {
+		return fmt.Errorf("close publish state directory: %w", err)
+	}
+	return nil
+}
+
+// hasActivePublishTargets scans durable state files for publish consumers of
+// the given (volumeID, stagingTarget). Inventory is read-only: every valid
+// nonterminal state remains a consumer regardless of observed mount presence.
 func (d *Driver) hasActivePublishTargets(volumeID string, stagingTarget string) ([]publishState, error) {
 	entries, err := os.ReadDir(d.cfg.StateDir)
 	if err != nil {
@@ -1493,23 +1602,13 @@ func (d *Driver) hasActivePublishTargets(volumeID string, stagingTarget string) 
 			return nil, fmt.Errorf("malformed publish state %s: %w", entry.Name(), err)
 		}
 		state.applyLegacyDefaults()
+		if err := validatePublishStatus(state.Status); err != nil {
+			return nil, fmt.Errorf("invalid publish state %s: %w", entry.Name(), err)
+		}
 		if state.VolumeID != volumeID || filepath.Clean(state.StagingTarget) != stagingTarget {
 			continue
 		}
-		mounted, mountErr := d.hostRuntime().IsMountPoint(state.Target)
-		if mountErr != nil {
-			// Cannot determine mount status — conservative active.
-			log.Printf("drive9-csi: warning: cannot check mount for %s: %v", state.Target, mountErr)
-			active = append(active, state)
-			continue
-		}
-		if mounted {
-			active = append(active, state)
-		} else {
-			// Stale state: unmount succeeded but state removal crashed.
-			log.Printf("drive9-csi: cleaning stale publish state for %s (not mounted)", state.Target)
-			_ = os.Remove(filepath.Join(d.cfg.StateDir, entry.Name()))
-		}
+		active = append(active, state)
 	}
 	return active, nil
 }
@@ -1535,8 +1634,9 @@ func nameIndexPath(name string) string {
 }
 
 const (
-	publishStatusPending   = "pending"
-	publishStatusPublished = "published"
+	publishStatusPending      = "pending"
+	publishStatusPublished    = "published"
+	publishStatusUnpublishing = "unpublishing"
 )
 
 type publishState struct {
@@ -1545,8 +1645,29 @@ type publishState struct {
 	Target        string `json:"target"`
 	Readonly      bool   `json:"readonly"`
 	AccessMode    string `json:"accessMode,omitempty"` // e.g. "SINGLE_NODE_MULTI_WRITER"
-	Status        string `json:"status,omitempty"`     // "pending" or "published"
+	Status        string `json:"status"`
 	PublishedAt   string `json:"publishedAt"`
+}
+
+func validatePublishStatus(statusValue string) error {
+	switch statusValue {
+	case publishStatusPending, publishStatusPublished, publishStatusUnpublishing:
+		return nil
+	default:
+		return fmt.Errorf("unsupported publish status %q", statusValue)
+	}
+}
+
+func validatePublishStatusTransition(from string, to string) error {
+	legal := from == "" && to == publishStatusPending ||
+		from == publishStatusPending && to == publishStatusPublished ||
+		from == publishStatusPending && to == publishStatusUnpublishing ||
+		from == publishStatusPublished && to == publishStatusUnpublishing ||
+		from == publishStatusUnpublishing && to == ""
+	if !legal {
+		return fmt.Errorf("unsupported publish status transition %q -> %q", from, to)
+	}
+	return nil
 }
 
 // checkMultiTargetAccess decides whether a new publish target is allowed
@@ -1569,12 +1690,9 @@ func checkMultiTargetAccess(active []publishState, requestedMode csi.VolumeCapab
 	return nil
 }
 
-// applyLegacyDefaults fills in zero-value fields from pre-multi-pod
-// publish state files that lack Status and AccessMode.
+// applyLegacyDefaults fills in the AccessMode field from pre-multi-pod publish
+// state files. Missing Status is invalid after the clean rollout.
 func (s *publishState) applyLegacyDefaults() {
-	if s.Status == "" {
-		s.Status = publishStatusPublished
-	}
 	if s.AccessMode == "" {
 		s.AccessMode = csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER.String()
 	}

@@ -129,21 +129,20 @@ and publishes images.
 ```sh
 export DRIVE9_CSI_E2E_CONTEXT=dev-dat9-eks-ap-southeast-1
 export DRIVE9_CSI_E2E_DRIVER_NAMESPACE=drive9-csi
-export DRIVE9_CSI_IMAGE='ghcr.io/drive9-ai/drive9-csi@sha256:<manifest-digest>'
+export DRIVE9_CSI_E2E_SECRET_NAME=drive9-csi-secret-flags-test
 export DRIVE9_CSI_E2E_CONFIRM=1
-e2e/prepare.sh
+e2e/prepare.sh --image-tag drive9-a53e497-csi-d91bfe3
 
-export DRIVE9_SERVER=https://api.drive9.ai
-export DRIVE9_API_KEY=drive9_api_key_redacted
 e2e/basic-lifecycle.sh
 e2e/mount-survival.sh
 ```
 
 Run `prepare.sh` to create or update the persistent Driver environment, then run
-either case repeatedly against it. Preparation requires an immutable image
-digest. Cases create and clean only their own namespace, StorageClass, VAC,
-Secret, PVC, and Pod resources. Every command requires explicit context and
-Driver namespace values. Read `e2e/AGENTS.md` before modifying or running E2E.
+either case repeatedly against it. Pass the completed publishing workflow's
+bare trace tag literally through `--image-tag`. Cases reuse the pre-provisioned
+namespace and Secret and create and clean only their own StorageClass, VAC, PVC,
+and Pod resources. Every command requires explicit context and Driver namespace
+values. Read `e2e/AGENTS.md` before modifying or running E2E.
 
 ## Architecture
 
@@ -256,9 +255,10 @@ Key deploy details:
 Stored under `$DRIVE9_CSI_STATE_DIR` (default `/var/lib/drive9-csi`):
 
 - `{volumeID}.json` — mount state (PID, PIDStartTime, staging target)
-- `published-{sha256(target)}.json` — publish state with status field
-  (`pending`/`published`), supports legacy state files without
-  `status`/`accessMode` fields
+- `published-{sha256(target)}.json` — publish state with required status field
+  (`pending`/`published`/`unpublishing`); missing or unknown status fails
+  closed. Legacy files may omit only `accessMode`, which defaults to
+  `SINGLE_NODE_WRITER`.
 
 ## CI
 

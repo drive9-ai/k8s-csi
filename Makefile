@@ -105,6 +105,7 @@ e2e-check:
 	done
 	@rg -Fq 'e2e_render_driver_manifests' $(E2E_PREPARE)
 	@rg -Fq 'e2e_validate_driver_manifests' $(E2E_PREPARE)
+	@rg -Fq 'e2e_configure_prepare_image "$$@"' $(E2E_PREPARE)
 	@rg -Fq 'e2e_require_prepared_driver "$$DRIVE9_CSI_IMAGE"' $(E2E_PREPARE)
 	@rg -Fq 'DRIVE9_CSI_IMAGE' $(E2E_PREPARE)
 	@if rg -n 'e2e_render_case_manifests|DRIVE9_(SERVER|API_KEY)|kube delete' $(E2E_PREPARE); then \
