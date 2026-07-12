@@ -2,6 +2,16 @@
 title: CSI DaemonSet Rolling Upgrade — Mount Survival Design
 ---
 
+<!-- markdownlint-disable MD013 -->
+
+## Supersession
+
+The helper-specific image, installer, preflight, PATH, fallback, and cleanup
+requirements in this document are superseded by
+`docs/design/2026-07-12-csi-direct-mount-strict-helper-removal-design.md`.
+Mount-survival, ownership, state-machine, secret, and release-admission
+invariants here remain authoritative.
+
 ## Problem
 
 When the `drive9-csi-node` DaemonSet is updated (rolling update), the CSI Pod
@@ -20,9 +30,9 @@ points because:
 
 ## Root Cause
 
-`shutdownNodeMounts()` does not distinguish between "CSI Pod rolling upgrade"
-and "intentional volume cleanup." It unconditionally calls `drive9 umount` +
-`unmountPath` for every recorded mount, destroying the FUSE connection.
+The former `shutdownNodeMounts()` path did not distinguish between "CSI Pod
+rolling upgrade" and "intentional volume cleanup." It unconditionally stopped
+and unmounted every recorded mount, destroying the FUSE connection.
 
 ## Solution
 
@@ -48,8 +58,8 @@ V1 provides two separations:
 The CSI Node init container installs the packaged Drive9 CLI at a
 content-addressed path and atomically updates the node-local `drive9` symlink.
 New mounts resolve and use that desired path. Each existing mount remains pinned
-to the `binaryPath` recorded when it started, so multiple Drive9 CLI versions may
-legitimately run on one node after a CSI rollout.
+to the `binaryPath` recorded when it started, so multiple Drive9 CLI versions
+may legitimately run on one node after a CSI rollout.
 
 V1 intentionally does not rebuild a **healthy** existing mount merely because
 its active binary differs from the node-local desired binary. Applying the
@@ -59,13 +69,13 @@ desired binary to a healthy mount requires a future explicit
 publish target alive and therefore may never cause kubelet to issue
 `NodeUnstageVolume`.
 
-If an active FUSE process has already been lost and CSI must create a replacement
-process anyway, recovery uses **desired-first** semantics: it first tries the
-node-local desired binary, and falls back to the previously active binary only
-after the failed desired attempt has been fully cleaned. A successful desired
-attempt becomes the new active `binaryPath`. This piggybacks a CLI upgrade on an
-unavoidable process replacement without introducing a separate interruption for
-a healthy mount.
+If an active FUSE process has already been lost and CSI must create a
+replacement process anyway, recovery uses **desired-first** semantics: it first
+tries the node-local desired binary, and falls back to the previously active
+binary only after the failed desired attempt has been fully cleaned. A
+successful desired attempt becomes the new active `binaryPath`. This piggybacks
+a CLI upgrade on an unavoidable process replacement without introducing a
+separate interruption for a healthy mount.
 
 #### First-rollout and release-admission boundary
 
@@ -78,11 +88,11 @@ host systemd service.
 
 If V1 nevertheless finds a pre-V2 state record, it treats the record as invalid,
 preserves it for inspection, and refuses recovery, overwrite, or automatic
-cleanup. A live mount, process, or systemd unit without matching valid V2 durable
-state is likewise not adopted or stopped automatically. The affected node RPC
-fails closed and the operator must halt the rollout, reinstall a compatible old
-CSI Node if needed, drain the workload, and perform explicit cleanup before
-retrying V1.
+cleanup. A live mount, process, or systemd unit without matching valid V2
+durable state is likewise not adopted or stopped automatically. The affected
+node RPC fails closed and the operator must halt the rollout, reinstall a
+compatible old CSI Node if needed, drain the workload, and perform explicit
+cleanup before retrying V1.
 
 Fallback recovery has two delivery phases:
 
@@ -99,9 +109,9 @@ Drive9 FD handoff is not a V1 dependency. A future rebuild can use FD handoff
 when supported, or a disruptive stop-and-remount fallback. The latter can
 restore host staging state immediately, but transparent path recovery inside an
 already-running workload Pod depends on the subtree publish layout from
-[`drive9-ai/k8s-csi#24`](https://github.com/drive9-ai/k8s-csi/pull/24). That PR is
-planned as a follow-up after this lifecycle design is implemented. Until it is
-merged, a disruptive rebuild under the legacy root-publish layout may require
+[`drive9-ai/k8s-csi#24`](https://github.com/drive9-ai/k8s-csi/pull/24). That PR
+is planned as a follow-up after this lifecycle design is implemented. Until it
+is merged, a disruptive rebuild under the legacy root-publish layout may require
 recreating affected workload Pods. Even with subtree recovery, file and
 directory descriptors already opened against the dead FUSE connection do not
 move to the replacement connection and must be reopened.
@@ -123,16 +133,16 @@ move to the replacement connection and must be reopened.
 
 ### Why transient service, not scope
 
-`systemd-run --scope` executes the command synchronously — `systemd-run`
-itself blocks until the scoped process exits. With `drive9 mount --foreground`,
-this means the CSI `NodeStageVolume` goroutine would block forever.
+`systemd-run --scope` executes the command synchronously — `systemd-run` itself
+blocks until the scoped process exits. With `drive9 mount --foreground`, this
+means the CSI `NodeStageVolume` goroutine would block forever.
 
 `systemd-run` without `--scope` (default mode) creates a **transient service
-unit**. With `--service-type=exec`, `systemd-run` returns as soon as the
-service manager successfully execs the configured `ExecStart` binary. In this
-design that binary is `drive9-csi-launcher`, not yet `drive9`. This gives CSI a
-clear "launcher started" signal without blocking; the readiness check below
-detects a subsequent launcher or Drive9 failure.
+unit**. With `--service-type=exec`, `systemd-run` returns as soon as the service
+manager successfully execs the configured `ExecStart` binary. In this design
+that binary is `drive9-csi-launcher`, not yet `drive9`. This gives CSI a clear
+"launcher started" signal without blocking; the readiness check below detects a
+subsequent launcher or Drive9 failure.
 
 The unit type is `.service` (not `.scope`). All unit naming, cgroup
 verification, cleanup commands, and e2e expectations use `.service` throughout.
@@ -146,22 +156,20 @@ is feature-based, not inferred from a distribution name:
   transient `TimeoutStopSec`, and `systemd-run --collect`
 - `systemd-run`, `systemctl`, and `journalctl`
 - `/dev/fuse` readable and writable by the host service
-- CSI-installed `/var/lib/drive9-csi/bin/fusermount3`, executable in the host
-  root and mount namespace
 - writable `/var/lib/drive9-csi`
 - writable host runtime directory `/run/drive9-csi`
 
 Drive9 and the launcher must be static Linux binaries for the target
 architecture. The current Drive9 CLI build uses `CGO_ENABLED=0`; the CSI image
 build must verify both have the expected ELF machine and no ELF interpreter
-(`PT_INTERP`). The image-provided `fusermount3` may be dynamically linked, but
-the installer must validate its ELF machine and preflight must execute the
-installed helper in the host root before advertising mount capability.
+(`PT_INTERP`). The packaged and installed Drive9 CLI must accept
+`mount --direct-mount-strict --help`; the runtime image and host installer have
+no FUSE-helper contract.
 
 V1 does not set `User=` on the transient unit, so the host system manager runs
-the mount service as root. `user_allow_other` in `/etc/fuse.conf` is required
-for non-root FUSE mounts that request `allow_other`, not for this root-run V1
-service. It becomes a prerequisite only if a future revision drops privileges.
+the mount service as root. The strict direct-mount path applies `--allow-other`
+through `mount(2)` and does not depend on `/etc/fuse.conf`. Dropping privileges
+would require a separate design and runtime gate.
 
 Nodes missing any required capability fail during startup preflight with a
 specific error. A non-systemd node reports:
@@ -172,6 +180,7 @@ specific error. A non-systemd node reports:
 `/proc` access. This is node-root level capability, which is the standard
 security model for CSI FUSE drivers (same as JuiceFS CSI, s3-csi, etc.). Host
 `/proc` access paths used by this design:
+
 - `/host-proc/1/ns/mnt` — enter host mount namespace (nsenter)
 - `/host-proc/1/root` — select the host root and working directory
 - `/host-proc/<pid>/stat` — read PID start time for reuse detection
@@ -183,10 +192,10 @@ security model for CSI FUSE drivers (same as JuiceFS CSI, s3-csi, etc.). Host
 
 Host `/proc` access is limited to host PID 1 for mount-namespace/root entry and
 to mount PIDs obtained from Drive9 process state and verified by the four-way
-ownership check. No enumeration or scanning of arbitrary host PIDs is
-performed. Following `/host-proc/1/root` gives this already-privileged plugin
-access to the host filesystem; it is an explicit node-root trust boundary, not
-an additional sandbox.
+ownership check. No enumeration or scanning of arbitrary host PIDs is performed.
+Following `/host-proc/1/root` gives this already-privileged plugin access to the
+host filesystem; it is an explicit node-root trust boundary, not an additional
+sandbox.
 
 ### Design
 
@@ -196,7 +205,7 @@ On CSI **Node** startup (before accepting Node RPCs), run preflight checks. The
 controller deployment uses the same binary but does not manage host mounts and
 must not require host `/proc`, systemd, `/dev/fuse`, or installed host binaries.
 
-```
+```text
 1. Open /host-proc/1/ns/mnt and /host-proc/1/root
    Failure: "host /proc not mounted at /host-proc or PID 1 namespace/root inaccessible"
 
@@ -224,22 +233,21 @@ must not require host `/proc`, systemd, `/dev/fuse`, or installed host binaries.
 4. In the same host mount-namespace/root context, verify host FUSE/runtime
    prerequisites:
    - /dev/fuse is a readable/writable character device
-   - `/var/lib/drive9-csi/bin/fusermount3 --version` succeeds
    - systemctl and journalctl are executable
    - ensure `/run/drive9-csi` is the expected hostPath-backed directory, reject
      a symlink or other file type, normalize root ownership/mode 0700, and
      verify it is writable
 
-5. In that host context, verify drive9, drive9-csi-launcher, and fusermount3
-   exist and are executable:
+5. In that host context, verify drive9 and drive9-csi-launcher exist and are
+   executable:
    stat /var/lib/drive9-csi/bin/drive9
    stat /var/lib/drive9-csi/bin/drive9-csi-launcher
-   stat /var/lib/drive9-csi/bin/fusermount3
    Resolve the drive9 symlink and require basename drive9-[0-9a-f]{64}; verify
-   the target's SHA-256 equals the filename digest. Then run `drive9 version`
-   in a short-lived host transient service with a unique preflight unit name.
-   Check: all three files exist and are executable, the content-addressed target
-   is valid, and host systemd can execute Drive9 successfully
+   the target's SHA-256 equals the filename digest. Then run
+   `drive9 mount --direct-mount-strict --help` in a short-lived host transient
+   service with a unique preflight unit name. Check: both files exist and are
+   executable, the content-addressed target is valid, and host systemd can
+   execute a strict-capable Drive9 successfully
    Failure classification:
      - missing file: "host Drive9 binaries missing — init container may have failed"
      - bad link/hash: "host Drive9 content-addressed binary validation failed"
@@ -247,21 +255,21 @@ must not require host `/proc`, systemd, `/dev/fuse`, or installed host binaries.
 ```
 
 Each command in steps 2-5 is executed through the same
-`nsenter --mount=/host-proc/1/ns/mnt --root=/host-proc/1/root
---wd=/host-proc/1/root` prefix. Step 1 is the container-side prerequisite that
-opens the namespace and root handles used by those commands.
+`nsenter --mount=/host-proc/1/ns/mnt --root=/host-proc/1/root --wd=/host-proc/1/root`
+prefix. Step 1 is the container-side prerequisite that opens the namespace and
+root handles used by those commands.
 
 If any check fails, log the specific failure classification and retain it as a
 named unavailable capability. The Node service still starts in degraded mode;
-preflight failure is not a global RPC rejection switch. RPCs apply the
-following state-first policy:
+preflight failure is not a global RPC rejection switch. RPCs apply the following
+state-first policy:
 
 1. **Healthy `NodeStageVolume`**: after request identity and the local four-way
    ownership, mount, process-state, and control-socket checks pass, return
    success. Do not resolve a Secret, call the Kubernetes or Drive9 API, or
    require the desired binary/systemd launch path. If local verification needs
-   an unavailable capability, return its actionable `FAILED_PRECONDITION` and
-   do not claim that the mount is healthy.
+   an unavailable capability, return its actionable `FAILED_PRECONDITION` and do
+   not claim that the mount is healthy.
 2. **Creating or recovering in `NodeStageVolume`**: require the complete launch
    capability set before resolving credentials. A missing launch capability
    returns its actionable `FAILED_PRECONDITION` before startup-file creation,
@@ -274,20 +282,20 @@ following state-first policy:
    availability.
 4. **`NodeUnpublishVolume` / `NodeUnstageVolume`**: never reject solely because
    create-path preflight is degraded. Enter normal cleanup with its own
-   capability and ownership checks. If safe cleanup cannot proceed, preserve
-   the current durable state, or preserve `phase=stopping` after committing its
+   capability and ownership checks. If safe cleanup cannot proceed, preserve the
+   current durable state, or preserve `phase=stopping` after committing its
    intent, and return the specific error.
 
 This distinction lets an already-running healthy mount remain usable during a
-temporary Secret, Kubernetes API, desired-binary, or systemd launch-path
-outage, without weakening the fail-closed rules for new side effects.
+temporary Secret, Kubernetes API, desired-binary, or systemd launch-path outage,
+without weakening the fail-closed rules for new side effects.
 
 #### 2. Host-namespace + host-cgroup mount process
 
 Change `startDrive9Mount` to launch `drive9 mount` via `nsenter` + `systemd-run`
 (transient service):
 
-```
+```text
 nsenter --mount=/host-proc/1/ns/mnt \
     --root=/host-proc/1/root --wd=/host-proc/1/root -- \
     systemd-run --service-type=exec --collect \
@@ -300,15 +308,18 @@ nsenter --mount=/host-proc/1/ns/mnt \
 ```
 
 `systemd-run` returns after systemd has successfully exec'd
-`drive9-csi-launcher`. It does not prove that the launcher's second `execve`
-of Drive9 succeeded. CSI therefore treats this only as a "launcher started"
-signal and then runs the combined mount-point and Drive9 process-state
-readiness check described below.
+`drive9-csi-launcher`. It does not prove that the launcher's second `execve` of
+Drive9 succeeded. CSI therefore treats this only as a "launcher started" signal
+and then runs the combined mount-point and Drive9 process-state readiness check
+described below.
 
 The mount process:
+
 - Runs in the host's mount namespace (FUSE mount directly on host)
-- Lives in a host systemd service cgroup (`system.slice/drive9-mount-<vol>.service`)
-- Survives CSI Pod restart — kubelet cleans Pod cgroup, not host systemd services
+- Lives in a host systemd service cgroup
+  (`system.slice/drive9-mount-<vol>.service`)
+- Survives CSI Pod restart — kubelet cleans Pod cgroup, not host systemd
+  services
 
 ##### Host PID discovery and identity
 
@@ -316,75 +327,73 @@ After `systemd-run` returns, CSI cannot use `cmd.Process.Pid` — that is the
 `nsenter`/`systemd-run` wrapper PID, not the long-running `drive9 mount` PID.
 
 **Source of truth**: after the FUSE mount and control socket are ready,
-`drive9 mount --foreground` writes a root-only **process-state JSON file**.
-The file contains the mount PID, canonical mount point, and resolved control
-socket path. It is a readiness and recovery artifact, not a configurable plain
-PID file.
+`drive9 mount --foreground` writes a root-only **process-state JSON file**. The
+file contains the mount PID, canonical mount point, and resolved control socket
+path. It is a readiness and recovery artifact, not a configurable plain PID
+file.
 
 **Path encoding and ownership**:
-- CSI-owned artifacts encode volume IDs using a **bounded,
-  collision-resistant** scheme:
-  `sha256(volumeID)[:16]` (first 16 hex chars). This produces a fixed-length
-  identifier safe for the systemd unit name and CSI startup filenames. The
-  full volume ID is stored in CSI mount state JSON for audit. See section 3
-  for collision analysis and failure-on-collision behavior.
-- Drive9-owned artifacts use a separate hash derived from the canonical
-  staging target. With `TMPDIR=/run/drive9-csi`, the process-state file
-  is `/run/drive9-csi/drive9-mount-<mount-hash>.pid`, where
-  `<mount-hash>` is the first 16 hex characters of
-  `sha256(canonicalStagingTarget)`. The file contains JSON and is mode `0600`.
-  Drive9 does not expose a `--pid-file` flag.
+
+- CSI-owned artifacts encode volume IDs using a **bounded, collision-resistant**
+  scheme: `sha256(volumeID)[:16]` (first 16 hex chars). This produces a
+  fixed-length identifier safe for the systemd unit name and CSI startup
+  filenames. The full volume ID is stored in CSI mount state JSON for audit. See
+  section 3 for collision analysis and failure-on-collision behavior.
+- Drive9-owned artifacts use a separate hash derived from the canonical staging
+  target. With `TMPDIR=/run/drive9-csi`, the process-state file is
+  `/run/drive9-csi/drive9-mount-<mount-hash>.pid`, where `<mount-hash>` is the
+  first 16 hex characters of `sha256(canonicalStagingTarget)`. The file contains
+  JSON and is mode `0600`. Drive9 does not expose a `--pid-file` flag.
 - With `XDG_RUNTIME_DIR=/run/drive9-csi`, Drive9 creates the control socket at
-  `/run/drive9-csi/drive9-mount-<socket-hash>.sock`.
-  `<socket-hash>` is the first 16 hex characters of
+  `/run/drive9-csi/drive9-mount-<socket-hash>.sock`. `<socket-hash>` is the
+  first 16 hex characters of
   `sha256(effectiveUID + "\0" + canonicalStagingTarget)` and is not necessarily
   equal to `<mount-hash>`. CSI reads the exact socket path from the
-  process-state JSON. Drive9 does not create a socket inside the staging
-  target.
+  process-state JSON. Drive9 does not create a socket inside the staging target.
 - Run dir: host `/run/drive9-csi/` (mode `0700`, mounted into the CSI Node Pod
   through a dedicated hostPath). It is runtime state rather than CSI durable
   state: it survives a CSI Pod restart, while a node reboot removes it together
   with the transient systemd service and FUSE process. The launcher supplies
   this directory through both `TMPDIR` and `XDG_RUNTIME_DIR`.
 - **Stale file handling**: before starting a new mount, CSI checks for existing
-  process-state/socket files at the expected paths. If the recorded PID is
-  dead, remove the stale files only after confirming that the expected mount is
+  process-state/socket files at the expected paths. If the recorded PID is dead,
+  remove the stale files only after confirming that the expected mount is
   absent. If the PID is alive but the full ownership check does not match the
   requested staging target and unit, return an explicit collision/ownership
   error; never delete another live mount's artifacts or stop its process.
 - **Cross-volume safety**: kubelet gives each staged volume a distinct staging
   target, so Drive9's mount-point-derived paths are distinct except for a hash
-  collision. Before trusting a process-state file, CSI
-  performs a four-way ownership check:
+  collision. Before trusting a process-state file, CSI performs a four-way
+  ownership check:
 
-  1. Parse `/host-proc/<pid>/cmdline` (NUL-separated argv) and verify the
-     exact staging target path appears as the final positional argument
-     (not a substring match — exact argv element comparison)
+  1. Parse `/host-proc/<pid>/cmdline` (NUL-separated argv) and verify the exact
+     staging target path appears as the final positional argument (not a
+     substring match — exact argv element comparison)
   2. Verify PID belongs to the expected systemd service by checking
      `/host-proc/<pid>/cgroup` contains the expected unit name
-  3. Verify PID identity. For `active`/`stopping` state, require
-     `PIDStartTime` to match the recorded value. For a new `starting` candidate,
-     read the start time before and after the remaining checks, require it to
-     remain unchanged, and record it only during successful promotion
+  3. Verify PID identity. For `active`/`stopping` state, require `PIDStartTime`
+     to match the recorded value. For a new `starting` candidate, read the start
+     time before and after the remaining checks, require it to remain unchanged,
+     and record it only during successful promotion
   4. Resolve `/host-proc/<pid>/exe` and require the canonical host path to equal
-     the attempt or active state's recorded content-addressed `binaryPath`.
-     A missing executable, the kernel's `(deleted)` suffix, or any other path
-     is an ownership failure, not permission to stop or adopt the process
+     the attempt or active state's recorded content-addressed `binaryPath`. A
+     missing executable, the kernel's `(deleted)` suffix, or any other path is
+     an ownership failure, not permission to stop or adopt the process
 
 **PID resolution sequence** (as part of readiness detection):
 
 1. Derive the Drive9 process-state path from the canonical staging target and
    read its JSON content
 2. Read PID startTime from `/host-proc/<pid>/stat` (field 22)
-3. Parse `/host-proc/<pid>/cmdline` (NUL-separated), verify the exact
-   staging target path as the final argv element
+3. Parse `/host-proc/<pid>/cmdline` (NUL-separated), verify the exact staging
+   target path as the final argv element
 4. Verify `/host-proc/<pid>/cgroup` contains expected systemd unit name
 5. Resolve `/host-proc/<pid>/exe` and verify it exactly matches the recorded
    candidate `binaryPath`
 6. Verify the process-state mount point and control socket match the expected
    staging target and run directory
-7. Read PID startTime again and require the same PID/start-time pair observed
-   in step 2
+7. Read PID startTime again and require the same PID/start-time pair observed in
+   step 2
 8. Record `PID`, `PIDStartTime`, `systemdUnit`, `binaryPath`,
    `controlSocketPath` in CSI mount state
 
@@ -402,8 +411,8 @@ PID file.
 
 ##### Environment and secret propagation
 
-`drive9 mount` receives the API key through `DRIVE9_API_KEY`. The server is
-also present in `DRIVE9_SERVER`, but CSI additionally passes the non-secret
+`drive9 mount` receives the API key through `DRIVE9_API_KEY`. The server is also
+present in `DRIVE9_SERVER`, but CSI additionally passes the non-secret
 `--server <server>` flag so a host-local active Drive9 context cannot override
 the requested server.
 
@@ -411,15 +420,14 @@ the requested server.
 
 Using `systemd-run --setenv=DRIVE9_API_KEY=...` puts the secret in the
 `systemd-run` process argv, visible to any node-root process via
-`/proc/<pid>/cmdline` during launch. While the CSI node plugin already
-runs as node-root (privileged container), minimizing secret surface is
-preferred.
+`/proc/<pid>/cmdline` during launch. While the CSI node plugin already runs as
+node-root (privileged container), minimizing secret surface is preferred.
 
-Instead, use a compiled Go launcher binary (`drive9-csi-launcher`) that
-reads env from a root-only file and calls `execve` directly — no shell
-in the secret/arg parsing path.
+Instead, use a compiled Go launcher binary (`drive9-csi-launcher`) that reads
+env from a root-only file and calls `execve` directly — no shell in the
+secret/arg parsing path.
 
-```
+```text
 1. Atomically write `/run/drive9-csi/<vol-hash>-<attempt-id>.env` (mode 0600,
    root:root) through a same-directory temporary file created with
    `O_CREATE|O_EXCL`, followed by fsync, close, `linkat` to publish the final
@@ -429,7 +437,7 @@ in the secret/arg parsing path.
      DRIVE9_SERVER=<server>\0DRIVE9_API_KEY=<key>\0
      TMPDIR=/run/drive9-csi\0
      XDG_RUNTIME_DIR=/run/drive9-csi\0
-     PATH=/var/lib/drive9-csi/bin:/usr/sbin:/usr/bin:/sbin:/bin\0
+     PATH=/usr/sbin:/usr/bin:/sbin:/bin\0
    The launcher preserves bytes exactly and applies no shell parsing, quoting,
    or escaping. Drive9's credential resolver subsequently trims leading and
    trailing ASCII whitespace from `DRIVE9_SERVER` and `DRIVE9_API_KEY`; the
@@ -438,7 +446,7 @@ in the secret/arg parsing path.
 2. Atomically write `/run/drive9-csi/<vol-hash>-<attempt-id>.args` using the
    same 0600 temporary-file procedure. Format: NUL-separated argv elements.
      /var/lib/drive9-csi/bin/drive9-<sha256>\0mount\0--foreground\0
-     --mode=fuse\0--server\0<server>\0--allow-other\0
+     --mode=fuse\0--direct-mount-strict\0--server\0<server>\0--allow-other\0
      <all existing cache, TTL, profile, perf, and tuning flags>\0
      :<remote-root>\0<staging-target>\0
    Same binary-safe encoding — no shell interpretation.
@@ -487,13 +495,14 @@ in the secret/arg parsing path.
 `execve` env array is binary-safe and never passes through `/bin/sh`, command
 substitution, or word splitting. Values cannot contain NUL bytes because NUL
 cannot be represented in `execve(2)` env strings. In addition, the current
-Drive9 credential resolver normalizes leading and trailing ASCII whitespace;
-CSI validates and rejects credentials containing such whitespace rather than
+Drive9 credential resolver normalizes leading and trailing ASCII whitespace; CSI
+validates and rejects credentials containing such whitespace rather than
 claiming byte-for-byte preservation through Drive9 itself.
 
-**NUL byte validation**: Before writing `.env` or `.args` files, CSI
-validates that every env key, env value, and argv element contains no NUL
-bytes (`strings.IndexByte(value, 0) >= 0`). If any value contains NUL:
+**NUL byte validation**: Before writing `.env` or `.args` files, CSI validates
+that every env key, env value, and argv element contains no NUL bytes
+(`strings.IndexByte(value, 0) >= 0`). If any value contains NUL:
+
 - `NodeStageVolume` returns `INVALID_ARGUMENT` with error:
   `"drive9-csi: secret value contains NUL byte, cannot pass to mount process"`
 - `.env` and `.args` files are NOT written (validation runs before file I/O)
@@ -507,21 +516,22 @@ whitespace. This makes Drive9's existing normalization explicit instead of
 silently changing the value after CSI validation.
 
 A launcher integration test uses a probe executable and synthetic values with
-embedded `$`, backticks, spaces, quotes, newlines, and semicolons to verify
-that the launcher introduces no shell interpretation. A real Drive9 mount e2e
-uses a valid credential and does not assume that arbitrary bytes are accepted
-by the Drive9 server. Leading and trailing ASCII whitespace is tested as an
-explicitly rejected input.
+embedded `$`, backticks, spaces, quotes, newlines, and semicolons to verify that
+the launcher introduces no shell interpretation. A real Drive9 mount e2e uses a
+valid credential and does not assume that arbitrary bytes are accepted by the
+Drive9 server. Leading and trailing ASCII whitespace is tested as an explicitly
+rejected input.
 
 **Exposure constraints under node-root threat model**:
-- On normal startup paths, the env file exists only during mount startup and
-  is mode 0600 under host `/run`. Abrupt CSI termination before launcher start
-  can leave it until `phase=starting` reconciliation removes it
+
+- On normal startup paths, the env file exists only during mount startup and is
+  mode 0600 under host `/run`. Abrupt CSI termination before launcher start can
+  leave it until `phase=starting` reconciliation removes it
 - Drive9 removes the credential variables from its logical process environment
-  after resolution, but Linux `/proc/<pid>/environ` exposes the initial
-  `execve` environment and is not guaranteed to reflect `unsetenv`. This design
-  accepts that node-root can inspect the initial environment and process memory;
-  a future credential-FD transport may reduce this exposure but is not a V1
+  after resolution, but Linux `/proc/<pid>/environ` exposes the initial `execve`
+  environment and is not guaranteed to reflect `unsetenv`. This design accepts
+  that node-root can inspect the initial environment and process memory; a
+  future credential-FD transport may reduce this exposure but is not a V1
   blocker
 - Drive9's root-only process-state JSON may contain `api_key` or `token`. This
   is accepted as **runtime credential state** under `/run/drive9-csi`, not CSI
@@ -538,8 +548,8 @@ explicitly rejected input.
   state contains no credential, and `systemctl show`, argv, and logs do not
   contain the API key
 
-**Secret rotation**: if the K8s Secret changes, an existing mount continues
-with its old credential until either normal `NodeUnstageVolume` followed by
+**Secret rotation**: if the K8s Secret changes, an existing mount continues with
+its old credential until either normal `NodeUnstageVolume` followed by
 `NodeStageVolume`, or a future explicit `kubectl drive9 mount rebuild`, creates
 a new process from the current Secret.
 
@@ -548,8 +558,8 @@ a new process from the current Secret.
 The transient service explicitly uses `Restart=no`. This revision has no
 continuous CSI watcher that restarts a FUSE process after it crashes. Mount
 recovery runs when the CSI driver starts; a crash while CSI remains running is
-not automatically recovered by V1. systemd must not restart Drive9 directly:
-it cannot clean a disconnected staging mount, reconstruct Kubernetes-derived
+not automatically recovered by V1. systemd must not restart Drive9 directly: it
+cannot clean a disconnected staging mount, reconstruct Kubernetes-derived
 configuration safely, or repair publish targets. A CSI-owned watcher is a
 follow-up after subtree publish recovery is merged, as described below.
 
@@ -569,8 +579,8 @@ follow-up after subtree publish recovery is merged, as described below.
    mount state from `starting` to `active` and return success.
 4. If the combined readiness check times out → check service status via
    `systemctl is-active drive9-mount-<vol-hash>.service`:
-   - Service inactive/failed: `drive9 mount` crashed before mounting.
-     Read logs via `journalctl --unit=drive9-mount-<vol-hash>.service --no-pager -n 50`
+   - Service inactive/failed: `drive9 mount` crashed before mounting. Read logs
+     via `journalctl --unit=drive9-mount-<vol-hash>.service --no-pager -n 50`
      for error attribution. Clean up .env/.args files, return error.
    - Service `not-found`/unknown because the transient unit was already garbage
      collected: if this CSI invocation observed `systemd-run` return success for
@@ -587,9 +597,9 @@ unit status and exit metadata may disappear before CSI observes them. Journal
 retrieval is therefore best-effort and must not be required for cleanup or
 retry. A D-Bus/query error is different from a definitive `not-found`: preserve
 the transaction and report the status capability error unless PID, mount, and
-ownership observations independently establish a safe action. Outside a
-recorded `starting` attempt, `not-found` retains its ordinary meaning of "no
-service exists"; the failure attribution above is context-specific.
+ownership observations independently establish a safe action. Outside a recorded
+`starting` attempt, `not-found` retains its ordinary meaning of "no service
+exists"; the failure attribution above is context-specific.
 
 ##### Crash-safe mount lifecycle transactions
 
@@ -635,22 +645,21 @@ normal staging, `binaryPath` is the resolved desired binary and
 `fallbackBinaryPath` is empty. For recovery of a lost active process,
 `binaryPath` is the desired candidate and `fallbackBinaryPath` is the previously
 active content-addressed path. `mountArgs` contains the candidate's exact argv
-excluding `argv[0]`; `fallbackMountArgs` preserves the previous active argv so
-a newer CSI does not pass newly introduced flags to an older fallback binary.
+excluding `argv[0]`; `fallbackMountArgs` preserves the previous active argv so a
+newer CSI does not pass newly introduced flags to an older fallback binary.
 Neither array may contain credentials. The state is committed through a
 same-directory temporary file, file fsync, atomic rename, and directory fsync.
 No external side effect is allowed unless this write succeeds.
 
 `createdAt` and `startupDeadline` are computed once for each candidate attempt
-before that write, with `startupDeadline = createdAt + maxStartupTimeout`.
-V1 uses a 90-second `maxStartupTimeout`, matching the current mount-readiness
+before that write, with `startupDeadline = createdAt + maxStartupTimeout`. V1
+uses a 90-second `maxStartupTimeout`, matching the current mount-readiness
 bound. If this becomes configurable later, the resolved value is sampled only
 when the attempt is created; an in-flight attempt still uses its persisted
-deadline.
-They are immutable for that `attemptID`: a CSI restart, RPC retry, or reread
-must not reset the deadline or recompute it from the new CSI binary's timeout
-configuration. Reconciliation first promotes an already-ready, fully verified
-attempt without waiting. Otherwise it computes
+deadline. They are immutable for that `attemptID`: a CSI restart, RPC retry, or
+reread must not reset the deadline or recompute it from the new CSI binary's
+timeout configuration. Reconciliation first promotes an already-ready, fully
+verified attempt without waiting. Otherwise it computes
 `remainingTimeout = max(0, startupDeadline - now)`; zero means run the timeout
 classification and cleanup immediately. A desired-to-fallback switch creates a
 new candidate attempt, with a new ID and its own bounded deadline, only after
@@ -672,32 +681,31 @@ CSI reconciles that attempt under the normal per-volume lock:
 
 Reconciliation first performs all non-blocking observations. A fully verified
 ready attempt is promoted even if its deadline has just passed. The persisted
-deadline gates every action that would launch the recorded candidate or wait
-for additional readiness.
+deadline gates every action that would launch the recorded candidate or wait for
+additional readiness.
 
-| Starting state observation | Action |
-|---|---|
-| `reason=stage`, no service and no mount | Remove attempt-scoped startup files, then delete state; kubelet may retry `NodeStageVolume` |
-| Recovery; no service/mount; time remains | Resume within remaining time |
-| Recovery; no service/mount; expired | Fail candidate and apply fallback rule |
-| Service still starting and `remainingTimeout > 0` | Continue readiness polling for at most the persisted remaining timeout |
-| Deadline expired and service not ready | Fail and clean the current attempt immediately |
-| Service, PID, mount, and control socket all verify | Promote the same attempt to `active` |
-| `reason=stage`, service failed and no mount exists | Remove startup files and failed unit, then delete state |
-| `reason=recovery`, desired service failed and no mount exists | Remove startup files and failed unit, verify the desired attempt is fully absent, then atomically switch to the recorded fallback attempt |
-| `reason=recovery`, fallback service failed and no mount exists | Remove startup files and failed unit, preserve recovery state, and report Degraded |
-| Verified dead service left a disconnected mount | Clean the mount and artifacts, then retry from a new attempt |
-| Any live ownership mismatch | Preserve state, perform no destructive action, and report an ownership error |
+| Starting state observation                                     | Action                                                                                                                                    |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `reason=stage`, no service and no mount                        | Remove attempt-scoped startup files, then delete state; kubelet may retry `NodeStageVolume`                                               |
+| Recovery; no service/mount; time remains                       | Resume within remaining time                                                                                                              |
+| Recovery; no service/mount; expired                            | Fail candidate and apply fallback rule                                                                                                    |
+| Service still starting and `remainingTimeout > 0`              | Continue readiness polling for at most the persisted remaining timeout                                                                    |
+| Deadline expired and service not ready                         | Fail and clean the current attempt immediately                                                                                            |
+| Service, PID, mount, and control socket all verify             | Promote the same attempt to `active`                                                                                                      |
+| `reason=stage`, service failed and no mount exists             | Remove startup files and failed unit, then delete state                                                                                   |
+| `reason=recovery`, desired service failed and no mount exists  | Remove startup files and failed unit, verify the desired attempt is fully absent, then atomically switch to the recorded fallback attempt |
+| `reason=recovery`, fallback service failed and no mount exists | Remove startup files and failed unit, preserve recovery state, and report Degraded                                                        |
+| Verified dead service left a disconnected mount                | Clean the mount and artifacts, then retry from a new attempt                                                                              |
+| Any live ownership mismatch                                    | Preserve state, perform no destructive action, and report an ownership error                                                              |
 
 For `reason=recovery`, a desired candidate failure does not immediately launch
-the fallback. CSI must first verify that the desired service, PID, mount, socket,
-and attempt-scoped files are absent. It then atomically records a new attempt
-whose `binaryPath` is the previous `fallbackBinaryPath`, moves
+the fallback. CSI must first verify that the desired service, PID, mount,
+socket, and attempt-scoped files are absent. It then atomically records a new
+attempt whose `binaryPath` is the previous `fallbackBinaryPath`, moves
 `fallbackMountArgs` into `mountArgs`, clears both fallback fields, and launches
-that exact attempt. If both candidates fail, state is
-preserved and the mount is reported Degraded. A CSI crash before the candidate
-switch may retry the desired candidate, but it can never run desired and
-fallback processes concurrently.
+that exact attempt. If both candidates fail, state is preserved and the mount is
+reported Degraded. A CSI crash before the candidate switch may retry the desired
+candidate, but it can never run desired and fallback processes concurrently.
 
 Before `NodeUnstageVolume` performs its first destructive side effect, it
 atomically replaces the current state with `phase=stopping`. The stopping state
@@ -708,12 +716,12 @@ it also retains the exact attempt-scoped startup paths needed for cleanup. It
 contains no credential. This write is the durable intent that distinguishes an
 intentional unstage from a crash or node reboot.
 
-| Stopping state observation | Action |
-|---|---|
-| Service, verified PID, or mount still exists | Continue the fixed cleanup sequence in section 7 |
-| Service, PID, and mount are all absent | Remove verified stale runtime artifacts, then delete state |
-| Cleanup is incomplete | Preserve `phase=stopping` and return/report the cleanup error |
-| Any live ownership mismatch | Preserve state, perform no destructive action, and report an ownership error |
+| Stopping state observation                   | Action                                                                       |
+| -------------------------------------------- | ---------------------------------------------------------------------------- |
+| Service, verified PID, or mount still exists | Continue the fixed cleanup sequence in section 7                             |
+| Service, PID, and mount are all absent       | Remove verified stale runtime artifacts, then delete state                   |
+| Cleanup is incomplete                        | Preserve `phase=stopping` and return/report the cleanup error                |
+| Any live ownership mismatch                  | Preserve state, perform no destructive action, and report an ownership error |
 
 `NodeUnstageVolume` retries resume the same stopping transaction.
 `NodeStageVolume` encountering `phase=stopping` must finish that cleanup before
@@ -725,35 +733,36 @@ process.
 Starting- and stopping-state reconciliation may run in parallel across volumes,
 but every `NodeStageVolume`, `NodeUnstageVolume`, `NodePublishVolume`, and
 administrative operation for a given volume must first acquire the same
-per-volume lock. A
-state file is deleted only when a cancelled `starting` attempt or a `stopping`
-transaction has no remaining external resources. A successful startup is
-atomically promoted to `active` rather than deleted.
+per-volume lock. A state file is deleted only when a cancelled `starting`
+attempt or a `stopping` transaction has no remaining external resources. A
+successful startup is atomically promoted to `active` rather than deleted.
 
 Cleanup via `NodeUnstageVolume` first drains through the recorded active
-`binaryPath`, then stops the systemd service. The same binary's `drive9 umount`
-is an OS unmount-helper fallback; it does not use the control socket.
+`binaryPath`, then stops the systemd service and performs normal/lazy kernel
+unmount through the validated launcher.
 
 #### 3. Systemd unit naming and idempotency
 
 **Canonical volume ID encoding**: `sha256(volumeID)[:16]` — the first 16 hex
-characters (8 bytes) of the SHA-256 hash. This produces a fixed-length,
-bounded, systemd-safe identifier (`[0-9a-f]`, always 16 chars) regardless of
-volume ID length. The full original volume ID is stored in mount state JSON
-for audit/debug and reverse lookup.
+characters (8 bytes) of the SHA-256 hash. This produces a fixed-length, bounded,
+systemd-safe identifier (`[0-9a-f]`, always 16 chars) regardless of volume ID
+length. The full original volume ID is stored in mount state JSON for
+audit/debug and reverse lookup.
 
 This encoding is used for CSI-owned per-volume artifacts:
-- Systemd unit: `drive9-mount-<vol-hash>.service` (37 chars total, well under 255)
+
+- Systemd unit: `drive9-mount-<vol-hash>.service` (37 chars total, well
+  under 255)
 - Env file: `/run/drive9-csi/<vol-hash>-<attempt-id>.env`
 - Args file: `/run/drive9-csi/<vol-hash>-<attempt-id>.args`
 
 The current driver does not accept arbitrary volume IDs. `NodeStageVolume`
-requires the ID to equal `volumeIDForRemoteRoot(remoteRoot)`
-(`drive9-<32hex>`) or `volumeIDForWorkspaceRoot(name, remoteRoot)`
-(`drive9-root-<32hex>`). Both are short and already match the characters
-preserved by `safeFileName()`. Existing CSI mount-state/cache/local/perf paths
-therefore remain unambiguous for every valid Drive9 volume ID; this design does
-not claim support for synthetic 200-character IDs.
+requires the ID to equal `volumeIDForRemoteRoot(remoteRoot)` (`drive9-<32hex>`)
+or `volumeIDForWorkspaceRoot(name, remoteRoot)` (`drive9-root-<32hex>`). Both
+are short and already match the characters preserved by `safeFileName()`.
+Existing CSI mount-state/cache/local/perf paths therefore remain unambiguous for
+every valid Drive9 volume ID; this design does not claim support for synthetic
+200-character IDs.
 
 Drive9-owned process-state and socket paths use hashes of the canonical staging
 target as described in section 2. They are deliberately not named with
@@ -762,8 +771,8 @@ flags.
 
 **Collision resistance**: 8 bytes (64 bits) of SHA-256 gives a collision
 probability of 1/2^64 for a fixed pair. With 1000 volumes on one node, the
-birthday-bound probability is approximately 2.7e-14, or 1 in 37 trillion. If
-a collision were to occur (same hash for two different volume IDs), the second
+birthday-bound probability is approximately 2.7e-14, or 1 in 37 trillion. If a
+collision were to occur (same hash for two different volume IDs), the second
 `NodeStageVolume` would find an existing service unit with a mismatched
 PID/staging-target and fail with an explicit error, never silently stomping the
 first mount.
@@ -777,13 +786,13 @@ lookup, validation, and audit.
   per-volume lock and evaluate CSI durable state plus local runtime ownership
   before resolving any Secret or making any Kubernetes/Drive9 API call
 - If `phase=active` has a verified service, PID/start time, exact argv target,
-  exact executable path, mount point, process-state, and control socket →
-  return success using local state only. Temporary Secret/PV/API unavailability
-  must not turn this healthy idempotent call into an error
+  exact executable path, mount point, process-state, and control socket → return
+  success using local state only. Temporary Secret/PV/API unavailability must
+  not turn this healthy idempotent call into an error
 - If state is `starting` → reconcile that exact attempt before creating any new
   startup file or unit
-- If state is `stopping` → finish the stopping transaction before creating a
-  new startup file or unit
+- If state is `stopping` → finish the stopping transaction before creating a new
+  startup file or unit
 - If the unit name exists but its recorded full volume ID or staging target
   differs → return an explicit hash-collision/ownership error; never stop the
   other unit
@@ -804,26 +813,24 @@ effect only on a later stage/recovery/rebuild transaction.
 The matrix below applies only to `phase=active`, after `starting` and `stopping`
 transactions have been reconciled. It is evaluated only after the recorded full
 volume ID, staging target, and unit name match. For each live PID discovered
-from CSI state,
-Drive9 process state, or the systemd unit's `MainPID`, CSI independently
-verifies PID start time where recorded, exact argv target, exact executable
-`binaryPath`, and cgroup/unit ownership. Any live ownership mismatch or
-unverifiable live PID is a
-collision/ownership error and is never a cleanup instruction. In the table,
-"PID matches" means the recorded PID identity agrees with the verified current
-mount process; it is not permission to skip verification when the answer is
-"no".
+from CSI state, Drive9 process state, or the systemd unit's `MainPID`, CSI
+independently verifies PID start time where recorded, exact argv target, exact
+executable `binaryPath`, and cgroup/unit ownership. Any live ownership mismatch
+or unverifiable live PID is a collision/ownership error and is never a cleanup
+instruction. In the table, "PID matches" means the recorded PID identity agrees
+with the verified current mount process; it is not permission to skip
+verification when the answer is "no".
 
-| Service exists | PID matches | Mount exists | Control socket | Action |
-|---|---|---|---|---|
-| yes | yes | yes | yes | Skip (healthy) |
-| yes | yes | yes | no | Stop service, unmount, then desired-first recovery |
-| yes | yes | no | - | Stop service, then desired-first recovery |
-| yes | no | - | - | Stop verified owned service, clean runtime artifacts, then desired-first recovery |
-| no | yes | yes | yes | Drain through `drive9 mount drain`, send SIGTERM to the verified PID, kernel-unmount if needed, then use desired-first recovery with a new service. Adopting an orphan PID into a new systemd service is unreliable. |
-| no | yes | no | - | Kill verified PID, clean runtime artifacts, then desired-first recovery |
-| no | no | yes | - | Kernel-unmount the verified disconnected mount, clean runtime artifacts, then desired-first recovery |
-| no | no | no | - | Desired-first recovery; this is the normal node-reboot observation for durable `phase=active` state |
+| Service exists | PID matches | Mount exists | Control socket | Action                                                                                                                                                                                                               |
+| -------------- | ----------- | ------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| yes            | yes         | yes          | yes            | Skip (healthy)                                                                                                                                                                                                       |
+| yes            | yes         | yes          | no             | Stop service, unmount, then desired-first recovery                                                                                                                                                                   |
+| yes            | yes         | no           | -              | Stop service, then desired-first recovery                                                                                                                                                                            |
+| yes            | no          | -            | -              | Stop verified owned service, clean runtime artifacts, then desired-first recovery                                                                                                                                    |
+| no             | yes         | yes          | yes            | Drain through `drive9 mount drain`, send SIGTERM to the verified PID, kernel-unmount if needed, then use desired-first recovery with a new service. Adopting an orphan PID into a new systemd service is unreliable. |
+| no             | yes         | no           | -              | Kill verified PID, clean runtime artifacts, then desired-first recovery                                                                                                                                              |
+| no             | no          | yes          | -              | Kernel-unmount the verified disconnected mount, clean runtime artifacts, then desired-first recovery                                                                                                                 |
+| no             | no          | no           | -              | Desired-first recovery; this is the normal node-reboot observation for durable `phase=active` state                                                                                                                  |
 
 Desired-first recovery snapshots the resolved desired content-addressed path at
 transaction start and records the previous active path as fallback. It obtains
@@ -863,8 +870,8 @@ The CSI image build must consume a pinned Drive9 release artifact for each
 architecture. The metadata/tagging job and image build jobs must use the same
 resolved release version and expected SHA-256 values (or the same uploaded
 artifacts); build jobs must not independently fetch a mutable "latest" URL and
-assume it still matches the tag. The host-side content hash below identifies
-the installed file but is not a substitute for build-time checksum pinning.
+assume it still matches the tag. The host-side content hash below identifies the
+installed file but is not a substitute for build-time checksum pinning.
 
 ```yaml
 initContainers:
@@ -876,52 +883,47 @@ initContainers:
       - --host-state-dir=/host-state
       - --drive9-source=/usr/local/bin/drive9
       - --launcher-source=/usr/local/bin/drive9-csi-launcher
-      - --fusermount-source=/usr/bin/fusermount3
     volumeMounts:
       - name: state-dir
         mountPath: /host-state
 ```
 
-`install-host-binaries` is a filesystem-only subcommand. `cmd/drive9-csi/main.go`
-must dispatch it before parsing server flags or creating an in-cluster
-Kubernetes client, so the init container does not depend on service-account
-credentials or a CSI endpoint.
+`install-host-binaries` is a filesystem-only subcommand.
+`cmd/drive9-csi/main.go` must dispatch it before parsing server flags or
+creating an in-cluster Kubernetes client, so the init container does not depend
+on service-account credentials or a CSI endpoint.
 
 The subcommand owns the complete installation contract:
 
 1. Create `<host-state-dir>/bin` with mode `0755`.
 2. Validate Drive9 and the launcher as regular executable static Linux ELF
    binaries for the current target architecture with no `PT_INTERP` segment.
-   Validate fusermount3 as a regular executable Linux ELF for that architecture;
-   dynamic linkage is allowed because preflight executes it against the host ABI.
 3. Compute SHA-256 from the Drive9 source content and install it as
    `drive9-<sha256>` using a same-directory temporary file, file fsync, atomic
    rename, and directory fsync. An existing destination must be a regular file
    with the same digest; symlinks and unexpected file types are rejected.
-4. Install `drive9-csi-launcher` and `fusermount3` through the same atomic
-   replacement procedure.
-5. Only after all three files validate, atomically replace the `drive9` symlink with
+4. Install `drive9-csi-launcher` through the same atomic replacement procedure.
+5. Only after both files validate, atomically replace the `drive9` symlink with
    a relative link to `drive9-<sha256>`. Any failure leaves the previous desired
    symlink intact.
 6. Print only the installed digest/path; never print file contents or
    credentials.
 
-The logic is implemented and unit-tested in Go rather than duplicated as
-inline shell in the DaemonSet manifest.
+The logic is implemented and unit-tested in Go rather than duplicated as inline
+shell in the DaemonSet manifest.
 
 Binary layout on host (`/var/lib/drive9-csi/bin/`):
+
 - `drive9-<sha256>` — content-addressed binary (never overwritten by the
   installer)
 - `drive9` — symlink to the node-local desired version (atomically replaced on
   each CSI Pod start)
 - `drive9-csi-launcher` — env/arg loader, calls execve. Compatibility-stable
   (its contract is: read NUL-separated .env + .args, exec argv[0]). Installed
-  atomically (temp + rename) on every init container run, independent of
-  drive9 version. Not versioned because its interface is stable; if the
-  interface ever changes, it will be versioned alongside drive9.
-- `fusermount3` — image-provided FUSE mount helper used through the host mount
-  service `PATH`; installed atomically on every init container run
-- Binary, symlink, launcher, and helper replacement use temp paths plus rename to
+  atomically (temp + rename) on every init container run, independent of drive9
+  version. Not versioned because its interface is stable; if the interface ever
+  changes, it will be versioned alongside drive9.
+- Binary, symlink, and launcher replacement use temp paths plus rename to
   prevent partial installation
 - Versioned filename is derived from the binary content SHA-256; it does not
   depend on parsing the multi-line output of `drive9 version`
@@ -929,49 +931,49 @@ Binary layout on host (`/var/lib/drive9-csi/bin/`):
 CSI resolves the `drive9` symlink before launch and records the resolved
 versioned `binaryPath` for auditability and GC. A running process retains a
 kernel reference to its executable inode, so replacing the symlink does not
-change the executable used by that process. A CSI rollout therefore changes
-the desired binary for new mounts without rebuilding existing mounts.
+change the executable used by that process. A CSI rollout therefore changes the
+desired binary for new mounts without rebuilding existing mounts.
 
-**Binary GC**: Runs **after** the full recovery scan completes (not
-interleaved with mount recovery). The keep set is the union of the current
-desired `drive9` symlink target, resolved `binaryPath` values in `starting`,
-`active`, and `stopping` CSI state, every non-empty
-`fallbackBinaryPath` in an in-flight recovery, and `/host-proc/<pid>/exe`
-targets for every verified live `drive9-mount-*.service` or Drive9 process-state
-artifact. If any candidate unit or process-state artifact cannot be safely
-correlated, skip binary GC for that startup rather than assuming the inventory
-is complete. GC considers only regular files whose basename exactly matches
-`drive9-[0-9a-f]{64}`; it never matches the `drive9` symlink or
-`drive9-csi-launcher` or `fusermount3`. Remove a matching file only when it is
-outside the keep set. This preserves binaries used by live, stopping, or partially recovered
-mounts and preserves the current binary when no volume is mounted.
+**Binary GC**: Runs **after** the full recovery scan completes (not interleaved
+with mount recovery). The keep set is the union of the current desired `drive9`
+symlink target, resolved `binaryPath` values in `starting`, `active`, and
+`stopping` CSI state, every non-empty `fallbackBinaryPath` in an in-flight
+recovery, and `/host-proc/<pid>/exe` targets for every verified live
+`drive9-mount-*.service` or Drive9 process-state artifact. If any candidate unit
+or process-state artifact cannot be safely correlated, skip binary GC for that
+startup rather than assuming the inventory is complete. GC considers only
+regular files whose basename exactly matches `drive9-[0-9a-f]{64}`; it never
+matches the `drive9` symlink, `drive9-csi-launcher`, or an inert legacy helper
+file. Remove a matching file only when it is outside the keep set. This
+preserves binaries used by live, stopping, or partially recovered mounts and
+preserves the current binary when no volume is mounted.
 
 #### 6. Remove shutdown unmount on SIGTERM
 
-Remove `shutdownNodeMounts()` from the SIGTERM/exit path. The CSI driver
-process exits cleanly by stopping its gRPC server and closing its endpoint
-socket without touching mount processes. Kubelet registration is managed by
-the separate `node-driver-registrar` sidecar, not by the driver process.
+Remove `shutdownNodeMounts()` from the SIGTERM/exit path. The CSI driver process
+exits cleanly by stopping its gRPC server and closing its endpoint socket
+without touching mount processes. Kubelet registration is managed by the
+separate `node-driver-registrar` sidecar, not by the driver process.
 
-SIGTERM is sent on: rolling update, `kubectl delete pod`, Pod eviction,
-preStop hook timeout. In all cases, mount processes should survive.
+SIGTERM is sent on: rolling update, `kubectl delete pod`, Pod eviction, preStop
+hook timeout. In all cases, mount processes should survive.
 
 #### 7. Cleanup sequence (NodeUnstageVolume)
 
 First validate the recorded full volume ID and staging target. For every live
 PID or service, also apply the unit, PID-start-time, argv, executable-path, and
 cgroup ownership gate. On any live ownership mismatch, return an error without
-performing destructive cleanup. After confirming that no active publish target remains,
-atomically persist `phase=stopping`, `stopAttemptID`, and `stoppingAt` before
-the first drain, stop, unmount, signal, or state-deletion side effect. If this
-write fails, return an error and leave the active mount untouched.
+performing destructive cleanup. After confirming that no active publish target
+remains, atomically persist `phase=stopping`, `stopAttemptID`, and `stoppingAt`
+before the first drain, stop, unmount, signal, or state-deletion side effect. If
+this write fails, return an error and leave the active mount untouched.
 
-After the stopping-state write succeeds, use the fixed ordering below; each
-step runs regardless of the previous step's result:
-`drive9`, `systemctl`, and unmount helpers are invoked through the same
-host-mount-namespace plus host-root `nsenter` prefix used during launch.
+After the stopping-state write succeeds, use the fixed ordering below; each step
+runs regardless of the previous step's result: `drive9`, `systemctl`, and the
+kernel-unmount launcher are invoked through the same host-mount-namespace plus
+host-root `nsenter` prefix used during launch.
 
-```
+```text
 1. <active-binaryPath> mount drain --timeout 30s <staging-target>
    This reads Drive9 process state and requests a drain through the control
    socket. Run it with the same `TMPDIR` and `XDG_RUNTIME_DIR` used by the
@@ -985,13 +987,9 @@ host-mount-namespace plus host-root `nsenter` prefix used during launch.
    If the service does not exit before TimeoutStopSec, systemd sends SIGKILL;
    it does not send a second SIGTERM. This runs regardless of step 1.
 3. Verify: isMountPoint(stagingTarget) == false
-   If still mounted: <active-binaryPath> umount --timeout 10s --no-auto-pack
-   <staging-target>. `drive9 umount` resolves the CSI-installed fusermount3 from
-   the host binary directory first; its internal legacy fallbacks remain. This
-   is not a control-socket command. Execute this fallback in the host mount
-   namespace with the same runtime-directory environment.
+   If still mounted: invoke `drive9-csi-launcher host-unmount` for a normal
+   kernel unmount (`unix.Unmount`).
 4. Verify again: isMountPoint(stagingTarget) == false
-   If still mounted: kernel unmount (unix.Unmount)
    If busy: lazy unmount (MNT_DETACH). This detaches the mount and defers final
    cleanup while references remain; it does not guarantee that existing FUSE
    file descriptors continue without EIO or ENOTCONN after daemon termination
@@ -1006,6 +1004,7 @@ and stale Drive9 process-state/socket artifacts gone.
 
 **CSI state deletion rule**: CSI mount state is deleted ONLY after all of the
 following are confirmed:
+
 - `isMountPoint(stagingTarget)` returns false
 - PID is dead (`pidMatchesState` returns false)
 - Service is inactive or doesn't exist
@@ -1022,6 +1021,7 @@ unresolvable orphan — that makes it permanently unmanageable.
 #### 8. Recovery
 
 `recoverNodeMounts()` enhanced with systemd service awareness:
+
 - Reconcile `phase=stopping` first by continuing cleanup; never re-mount it
 - Reconcile `phase=starting`, including an in-flight desired/fallback candidate
 - For `phase=active`, check `pidMatchesState(state)` AND service active → skip
@@ -1049,9 +1049,9 @@ kubectl drive9 mount rebuild <PVC/PV selector> [--node <node> | --all-nodes]
 
 The plugin owns discovery, plan display, confirmation, and progress reporting.
 It never reads or transports the Drive9 API key. The running CSI Node owns all
-state validation, Secret resolution, systemd operations, and publish repair.
-An independently exec'd helper must not modify mounts directly because it does
-not share the CSI process's per-volume lock.
+state validation, Secret resolution, systemd operations, and publish repair. An
+independently exec'd helper must not modify mounts directly because it does not
+share the CSI process's per-volume lock.
 
 The command has **rebuild** rather than **upgrade** semantics. The target binary
 is the content-addressed path obtained by resolving that node's desired
@@ -1082,13 +1082,13 @@ systemd unit state changes, with periodic reconciliation as a fallback. On a
 verified unit failure or dead PID it acquires the per-volume lock, reconstructs
 the request from PV/Secret state, clears the disconnected staging mount, and
 runs the same **desired-first recovery** transaction used during CSI startup. A
-successful desired candidate becomes active; a failed desired candidate is
-fully cleaned before the recorded previous active binary is attempted. It then
-repairs subtree publish targets. A healthy process is never rebuilt merely to
-resolve an active/desired mismatch.
+successful desired candidate becomes active; a failed desired candidate is fully
+cleaned before the recorded previous active binary is attempted. It then repairs
+subtree publish targets. A healthy process is never rebuilt merely to resolve an
+active/desired mismatch.
 
-Recovery uses per-volume exponential backoff and stops after a bounded number
-of failures, leaving the mount `Degraded` for inspection or explicit rebuild.
+Recovery uses per-volume exponential backoff and stops after a bounded number of
+failures, leaving the mount `Degraded` for inspection or explicit rebuild.
 Detecting a process that is alive but internally hung requires a future
 lightweight control-socket `ping/status` operation; filesystem probes such as
 `stat` or `readdir` are not used because a hung FUSE request may block them.
@@ -1100,8 +1100,8 @@ Drive9 FD/state handoff.
 
 #### 11. Permanent CSI uninstall
 
-Loss of the CSI Node heartbeat never automatically stops host FUSE services:
-the service cannot distinguish a rolling update or prolonged outage from an
+Loss of the CSI Node heartbeat never automatically stops host FUSE services: the
+service cannot distinguish a rolling update or prolonged outage from an
 intentional permanent uninstall. A timeout-based reaper would reintroduce the
 business interruption this design removes.
 
@@ -1118,9 +1118,9 @@ delete CSI controller and node resources only after the inventory is empty
 ```
 
 Cleanup refuses a mount with active publish consumers unless a separate,
-explicit force path is designed later. If CSI has already been removed, the
-safe recovery is to reinstall a compatible CSI Node temporarily so it can adopt
-and clean the host state; raw `systemctl`/`umount` commands remain break-glass
+explicit force path is designed later. If CSI has already been removed, the safe
+recovery is to reinstall a compatible CSI Node temporarily so it can adopt and
+clean the host state; raw `systemctl`/`umount` commands remain break-glass
 operations, not the supported uninstall workflow.
 
 #### 12. Priority class for node-pressure resilience
@@ -1132,8 +1132,8 @@ spec:
       priorityClassName: system-node-critical
 ```
 
-This high priority reduces the chance that kubelet selects the CSI DaemonSet
-Pod during node-pressure eviction and helps it preempt lower-priority Pods when
+This high priority reduces the chance that kubelet selects the CSI DaemonSet Pod
+during node-pressure eviction and helps it preempt lower-priority Pods when
 being scheduled. It does not define `kubectl drain` ordering.
 `kubectl drain --ignore-daemonsets` leaves DaemonSet-managed Pods running while
 it evicts consumer Pods.
@@ -1141,6 +1141,7 @@ it evicts consumer Pods.
 ### Mount propagation
 
 With nsenter, the FUSE mount originates in the host mount namespace:
+
 - Staging target: `/var/lib/kubelet/plugins/kubernetes.io/csi/...` — host path
 - CSI `NodePublishVolume` issues the staging-target → publish-target bind mount
   inside the CSI container; `Bidirectional` propagation makes that mount appear
@@ -1150,15 +1151,15 @@ With nsenter, the FUSE mount originates in the host mount namespace:
   unless the workload explicitly requests another mode
 
 The CSI Pod still needs `mountPropagation: Bidirectional` on the kubelet-dir
-volume mount because the current `NodePublishVolume`, `NodeUnpublishVolume`,
-and publish-target repair paths execute bind mount and unmount syscalls inside
-the CSI container and must propagate those changes back to the host.
+volume mount because the current `NodePublishVolume`, `NodeUnpublishVolume`, and
+publish-target repair paths execute bind mount and unmount syscalls inside the
+CSI container and must propagate those changes back to the host.
 `HostToContainer` alone would be sufficient only for observing host mount
 changes, not for these container-to-host operations.
 
-This section describes the V1 legacy root-publish layout. Follow-up subtree PR
-#24 retains the FUSE mount at the same staging target but changes the publish
-layer to a stable shared root plus a replaceable child mount, and requires the
+This section describes the V1 legacy root-publish layout. The follow-up subtree
+change in PR #24 retains the FUSE mount at the same staging target but changes
+the publish layer to a stable shared root plus a replaceable child mount, and requires the
 workload volume mount to use `HostToContainer`. That follow-up is what allows a
 new child mount to propagate into an already-running workload Pod after a
 disruptive FUSE rebuild.
@@ -1171,8 +1172,8 @@ but V1 intentionally sets no `MemoryMax`, `CPUQuota`, `CPUWeight`, `IOWeight`,
 or OOM-score override.
 
 V1: Drive9 controls in-memory read cache with `--cache-size`. `--cache-dir`
-selects the disk cache location; disk read and write-back cache limits use
-their corresponding size flags.
+selects the disk cache location; disk read and write-back cache limits use their
+corresponding size flags.
 
 Future per-mount limits may be exposed through allowlisted
 `VolumeAttributesClass` fields and translated into specific systemd properties.
@@ -1185,22 +1186,22 @@ do not make a CSI rollout rebuild an existing mount.
 The current `drive9 mount` implementation in `mem9-ai/drive9` provides the
 following contract:
 
-| Capability | Current status | Required for this design |
-|---|---|---|
-| `--foreground` flag | Exists | Keep mount process in foreground (no double-fork) |
-| Mount target syntax | Exists as final positional argument; optional remote source precedes it | Reuse the complete current CSI mount argv; do not use nonexistent `--staging-target` |
-| Process-state JSON | Exists at `${TMPDIR}/drive9-mount-<mount-hash>.pid`; parent directory follows `TMPDIR`, but there is no explicit path flag | Set `TMPDIR=/run/drive9-csi`, derive the filename from the canonical staging target, and accept its root-only API key/token fields as runtime credential state rather than CSI durable state |
-| Control socket | Exists at `XDG_RUNTIME_DIR`, or under `TMPDIR/drive9-<uid>` as fallback | Set `XDG_RUNTIME_DIR` to the host run directory and read the exact socket path from process state |
-| Control socket drain | Exists through `drive9 mount drain` | Drain pending writes before service shutdown |
-| Graceful foreground shutdown | Exists on SIGTERM/SIGINT | `systemctl stop` drives normal process shutdown |
-| `drive9 umount` | Exists, using `fusermount3`, `fusermount`, or `umount` | OS-helper fallback only; it is not a control-socket RPC |
-| `drive9 version` | Exists and prints multi-line build information; no `--short-sha` flag | Installer uses binary SHA-256 instead of parsing CLI output |
-| Version query through control socket | **Not implemented** | Not required for V1; audit through CSI `binaryPath` and `/host-proc/<pid>/exe` |
-| Persistent cache/writeback rollback compatibility | Required release contract and release-admission gate | Every pair of Drive9 CLI versions carried by adjacent release-admitted CSI images must pass N/N-1 bidirectional on-disk cache/writeback compatibility tests; manual workflow dispatch may publish a traceable validation image without claiming release admission |
-| FD/state handoff | Not implemented; current reexec work is a clean-state prototype and does not cover active CSI workloads | Not required for V1; future `mount rebuild` may use it to preserve open descriptors, otherwise use the explicit stop-and-remount fallback |
+| Capability                                        | Current status                                                                                                             | Required for this design                                                                                                                                                                                                                                          |
+| ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--foreground` flag                               | Exists                                                                                                                     | Keep mount process in foreground (no double-fork)                                                                                                                                                                                                                 |
+| Mount target syntax                               | Exists as final positional argument; optional remote source precedes it                                                    | Reuse the complete current CSI mount argv; do not use nonexistent `--staging-target`                                                                                                                                                                              |
+| Process-state JSON                                | Exists at `${TMPDIR}/drive9-mount-<mount-hash>.pid`; parent directory follows `TMPDIR`, but there is no explicit path flag | Set `TMPDIR=/run/drive9-csi`, derive the filename from the canonical staging target, and accept its root-only API key/token fields as runtime credential state rather than CSI durable state                                                                      |
+| Control socket                                    | Exists at `XDG_RUNTIME_DIR`, or under `TMPDIR/drive9-<uid>` as fallback                                                    | Set `XDG_RUNTIME_DIR` to the host run directory and read the exact socket path from process state                                                                                                                                                                 |
+| Control socket drain                              | Exists through `drive9 mount drain`                                                                                        | Drain pending writes before service shutdown                                                                                                                                                                                                                      |
+| Graceful foreground shutdown                      | Exists on SIGTERM/SIGINT                                                                                                   | `systemctl stop` drives normal process shutdown                                                                                                                                                                                                                   |
+| `--direct-mount-strict`                           | Exists                                                                                                                     | Required for every new mount; direct `mount(2)` failure must not fall back to a helper                                                                                                                                                                            |
+| `drive9 version`                                  | Exists and prints multi-line build information; no `--short-sha` flag                                                      | Installer uses binary SHA-256 instead of parsing CLI output                                                                                                                                                                                                       |
+| Version query through control socket              | **Not implemented**                                                                                                        | Not required for V1; audit through CSI `binaryPath` and `/host-proc/<pid>/exe`                                                                                                                                                                                    |
+| Persistent cache/writeback rollback compatibility | Required release contract and release-admission gate                                                                       | Every pair of Drive9 CLI versions carried by adjacent release-admitted CSI images must pass N/N-1 bidirectional on-disk cache/writeback compatibility tests; manual workflow dispatch may publish a traceable validation image without claiming release admission |
+| FD/state handoff                                  | Not implemented; current reexec work is a clean-state prototype and does not cover active CSI workloads                    | Not required for V1; future `mount rebuild` may use it to preserve open descriptors, otherwise use the explicit stop-and-remount fallback                                                                                                                         |
 
-The current control protocol is drain-only and has no operation discriminator
-or protocol envelope. A future version/status/shutdown/handoff extension must
+The current control protocol is drain-only and has no operation discriminator or
+protocol envelope. A future version/status/shutdown/handoff extension must
 introduce an explicitly versioned operation protocol; it must not send a new
 request shape to an old drain-only server and assume that unknown fields are
 rejected.
@@ -1212,26 +1213,26 @@ negotiation performed by CSI. Release validation must cover N-1 state opened by
 N and then reopened by N-1 after an injected desired-start failure. The newer
 CSI image must not be release-admitted if that gate fails. A manual dispatch may
 publish an immutable validation tag while the gate is unverified. For artifacts
-admitted by this gate, CSI may attempt the previous active binary after fully cleaning a
-post-`execve` desired failure. If both candidates fail, it preserves recovery
-state and reports Degraded.
+admitted by this gate, CSI may attempt the previous active binary after fully
+cleaning a post-`execve` desired failure. If both candidates fail, it preserves
+recovery state and reports Degraded.
 
 ### Changes required
 
-| File | Change |
-|---|---|
-| `internal/driver/mount_linux.go` | `startDrive9Mount`: persist `phase=starting` and immutable `startupDeadline` before side effects; create attempt-scoped startup files under `/run/drive9-csi`; nsenter + systemd-run transient service with `--collect`, `Restart=no`, and explicit `TimeoutStopSec`; classify collected `not-found` units in the recorded-attempt context; SHA-256 unit naming; PID discovery from Drive9 process-state JSON; complete mount argv via NUL-separated files + drive9-csi-launcher; promote verified state to `active`; desired-first recovery with a recorded previous-active fallback |
-| `cmd/drive9-csi-launcher/main.go` | New ~50-line binary: reads NUL-separated .env and .args files, immediately unlinks both files, then calls syscall.Exec |
-| `cmd/drive9-csi/main.go`, installer helper | Dispatch `install-host-binaries` before CSI server flag parsing and Kubernetes client creation; implement/test ELF validation, content hashing, atomic Drive9/launcher/fusermount3 installation, and desired-symlink replacement in Go |
-| `Dockerfile`, `Makefile` | Build the launcher with `CGO_ENABLED=0` for the target architecture; validate the launcher and Drive9 ELF machine and absence of `PT_INTERP`; copy the launcher into the CSI image at `/usr/local/bin/drive9-csi-launcher`; include it in local builds |
-| `.github/workflows/publish-image.yml` | Resolve one pinned Drive9 release plus per-architecture SHA-256 values/artifacts and pass that same immutable input to tagging and every image build job |
-| `mem9-ai/drive9` release workflow and FUSE tests | Add a mandatory N/N-1 bidirectional cache/writeback compatibility gate: create pending state with N-1, open it with N, inject desired-start failure, reopen with N-1, and verify data, metadata, queue state, and final upload results before allowing the adjacent CSI image to publish |
-| `internal/driver/mount_linux.go` | Cleanup: persist `phase=stopping` before side effects; drain through the active Drive9 binary, stop systemd service, use `drive9 umount` and kernel unmount as fallbacks; delete state only after verified terminal cleanup |
-| `internal/driver/mount_linux.go` | `pidStartTime`, `pidMatchesState`, `pidAlive`: read from `/host-proc/<pid>/...` instead of `/proc/<pid>/...`; make canonical `/host-proc/<pid>/exe == binaryPath` part of the ownership gate |
-| `internal/driver/driver.go` | Node-only startup preflight with named capability failures and operation-specific degraded behavior; evaluate healthy local idempotency before Secret/API resolution; remove `shutdownNodeMounts()` from the CSI Node SIGTERM handler while leaving the controller path free of host-systemd prerequisites |
-| `internal/driver/node_recovery.go` | Reconcile `stopping` without remount; reconcile `starting` desired/fallback attempts; active split-state matrix handling; systemd service liveness check; run binary GC only after complete inventory |
-| `deploy/kubernetes/node.yaml` | Init container (content-addressed binary, launcher, and fusermount3), host-proc volume, `/run/drive9-csi` hostPath, node-pressure priorityClassName |
-| Mount state JSON | Durable atomic writes; add `schemaVersion`, `phase`, start/stop attempt IDs, immutable per-attempt `createdAt`/`startupDeadline`, startup artifact paths, resolved `binaryPath`, non-secret active/fallback argv, `fallbackBinaryPath`, `systemdUnit`, `controlSocketPath`, and stopping timestamp; never store API key/token |
+| File                                             | Change                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `internal/driver/mount_linux.go`                 | `startDrive9Mount`: persist `phase=starting` and immutable `startupDeadline` before side effects; create attempt-scoped startup files under `/run/drive9-csi`; nsenter + systemd-run transient service with `--collect`, `Restart=no`, and explicit `TimeoutStopSec`; classify collected `not-found` units in the recorded-attempt context; SHA-256 unit naming; PID discovery from Drive9 process-state JSON; complete mount argv via NUL-separated files + drive9-csi-launcher; promote verified state to `active`; desired-first recovery with a recorded previous-active fallback |
+| `cmd/drive9-csi-launcher/main.go`                | New ~50-line binary: reads NUL-separated .env and .args files, immediately unlinks both files, then calls syscall.Exec                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `cmd/drive9-csi/main.go`, installer helper       | Dispatch `install-host-binaries` before CSI server flag parsing and Kubernetes client creation; implement/test ELF validation, content hashing, atomic Drive9/launcher installation, and desired-symlink replacement in Go                                                                                                                                                                                                                                                                                                                                                            |
+| `Dockerfile`, `Makefile`                         | Build the launcher with `CGO_ENABLED=0` for the target architecture; validate the launcher and Drive9 ELF machine and absence of `PT_INTERP`; copy the launcher into the CSI image at `/usr/local/bin/drive9-csi-launcher`; include it in local builds                                                                                                                                                                                                                                                                                                                                |
+| `.github/workflows/publish-image.yml`            | Resolve one pinned Drive9 release plus per-architecture SHA-256 values/artifacts and pass that same immutable input to tagging and every image build job                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `mem9-ai/drive9` release workflow and FUSE tests | Add a mandatory N/N-1 bidirectional cache/writeback compatibility gate: create pending state with N-1, open it with N, inject desired-start failure, reopen with N-1, and verify data, metadata, queue state, and final upload results before allowing the adjacent CSI image to publish                                                                                                                                                                                                                                                                                              |
+| `internal/driver/mount_linux.go`                 | Cleanup: persist `phase=stopping` before side effects; drain through the active Drive9 binary, stop systemd service, use normal/lazy launcher kernel unmount; delete state only after verified terminal cleanup                                                                                                                                                                                                                                                                                                                                                                       |
+| `internal/driver/mount_linux.go`                 | `pidStartTime`, `pidMatchesState`, `pidAlive`: read from `/host-proc/<pid>/...` instead of `/proc/<pid>/...`; make canonical `/host-proc/<pid>/exe == binaryPath` part of the ownership gate                                                                                                                                                                                                                                                                                                                                                                                          |
+| `internal/driver/driver.go`                      | Node-only startup preflight with named capability failures and operation-specific degraded behavior; evaluate healthy local idempotency before Secret/API resolution; remove `shutdownNodeMounts()` from the CSI Node SIGTERM handler while leaving the controller path free of host-systemd prerequisites                                                                                                                                                                                                                                                                            |
+| `internal/driver/node_recovery.go`               | Reconcile `stopping` without remount; reconcile `starting` desired/fallback attempts; active split-state matrix handling; systemd service liveness check; run binary GC only after complete inventory                                                                                                                                                                                                                                                                                                                                                                                 |
+| `deploy/kubernetes/node.yaml`                    | Init container (content-addressed binary and launcher), host-proc volume, `/run/drive9-csi` hostPath, node-pressure priorityClassName                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Mount state JSON                                 | Durable atomic writes; add `schemaVersion`, `phase`, start/stop attempt IDs, immutable per-attempt `createdAt`/`startupDeadline`, startup artifact paths, resolved `binaryPath`, non-secret active/fallback argv, `fallbackBinaryPath`, `systemdUnit`, `controlSocketPath`, and stopping timestamp; never store API key/token                                                                                                                                                                                                                                                         |
 
 ### Verification plan (e2e)
 
@@ -1241,11 +1242,11 @@ state and reports Degraded.
    side effects, while a locally verifiable healthy `NodeStageVolume` remains
    idempotent, `NodePublishVolume` does not require systemd launch capability,
    and unpublish/unstage enter their normal safe cleanup paths
-2. **Mount + cgroup**: `NodeStageVolume` creates mount via systemd service; verify
-   `/host-proc/<pid>/cgroup` shows `system.slice/drive9-mount-*.service`, NOT
-   `kubepods/` (all `/proc/<pid>` checks in e2e run against `/host-proc/<pid>`
-   since mount process is in host PID namespace); verify process-state and
-   control socket are under host `/run/drive9-csi`; verify
+2. **Mount + cgroup**: `NodeStageVolume` creates mount via systemd service;
+   verify `/host-proc/<pid>/cgroup` shows `system.slice/drive9-mount-*.service`,
+   NOT `kubepods/` (all `/proc/<pid>` checks in e2e run against
+   `/host-proc/<pid>` since mount process is in host PID namespace); verify
+   process-state and control socket are under host `/run/drive9-csi`; verify
    `/host-proc/<pid>/exe` resolves exactly to the active state's `binaryPath`,
    and inject an executable mismatch to verify it fails closed without stopping
    the foreign process
@@ -1257,8 +1258,8 @@ state and reports Degraded.
    as rolling update
 5. **New Pod mount**: create new PVC + Pod after upgrade, confirm new binary
    version by checking: (a) mount state `binaryPath` points to new versioned
-   path, (b) `/host-proc/<pid>/exe` of the new mount process resolves to the
-   new binary. V1 does not require a control-socket version RPC
+   path, (b) `/host-proc/<pid>/exe` of the new mount process resolves to the new
+   binary. V1 does not require a control-socket version RPC
 6. **No implicit rebuild**: leave an old mount active after CSI rollout and
    verify desired/active mismatch is preserved without stopping its service
 7. **NodeUnstageVolume + stopping failpoints**: delete all consumer Pods and
@@ -1281,24 +1282,24 @@ state and reports Degraded.
    succeeds without a Kubernetes or Drive9 API call; then lose the process and
    verify recovery preserves state and reports the credential error
 10. **Mount crash boundary + desired-first recovery**: start with active binary
-   A, install desired binary B, then `kill -9` the mount PID and verify systemd
-   does not restart it automatically. Restart the CSI Pod and verify recovery
-   removes the disconnected host mount, starts B, and records B as active. Inject
-   a B startup failure after B has opened A's persistent cache/writeback state;
-   verify B is fully absent before A is attempted, and verify A recovers pending
-   data, metadata, queue state, and final upload results. If A succeeds it remains
-   active. This N/N-1 bidirectional case is a mandatory image-publishing gate. An
-   already-running business Pod under the V1 legacy root-publish layout is
-   expected to retain the broken old reference and must not be reported as
-   transparently healed before subtree PR #24 is merged
+    A, install desired binary B, then `kill -9` the mount PID and verify systemd
+    does not restart it automatically. Restart the CSI Pod and verify recovery
+    removes the disconnected host mount, starts B, and records B as active.
+    Inject a B startup failure after B has opened A's persistent cache/writeback
+    state; verify B is fully absent before A is attempted, and verify A recovers
+    pending data, metadata, queue state, and final upload results. If A succeeds
+    it remains active. This N/N-1 bidirectional case is a mandatory
+    image-publishing gate. An already-running business Pod under the V1 legacy
+    root-publish layout is expected to retain the broken old reference and must
+    not be reported as transparently healed before subtree PR #24 is merged
 11. **Idempotency**: call `NodeStageVolume` twice for same volume → second call
-   returns success without creating duplicate mount
+    returns success without creating duplicate mount
 12. **Binary GC**: after all old mounts are cleaned, verify unreferenced old
-   version files are removed while the current symlink target and
-   `drive9-csi-launcher` remain. Inject an uncorrelated candidate mount unit or
-   process-state artifact and verify that startup skips GC; verify binaries in
-   `starting`, `active`, and `stopping` state, plus both candidates of an
-   in-flight desired/fallback recovery, are retained
+    version files are removed while the current symlink target and
+    `drive9-csi-launcher` remain. Inject an uncorrelated candidate mount unit or
+    process-state artifact and verify that startup skips GC; verify binaries in
+    `starting`, `active`, and `stopping` state, plus both candidates of an
+    in-flight desired/fallback recovery, are retained
 13. **Node drain**: run `kubectl drain --ignore-daemonsets`; verify consumer
     Pods are evicted and their volumes are unpublished/unstaged while the CSI
     DaemonSet Pod remains on the node
@@ -1314,26 +1315,25 @@ state and reports Degraded.
     unit before observation; verify `not-found` is attributed to the recorded
     failed attempt, cleanup succeeds without unit exit metadata, and journal
     retrieval is best-effort
-16. **Launcher byte preservation**: invoke the launcher with a probe
-    executable and synthetic values containing embedded `$`, backticks,
-    spaces, single/double quotes, newlines, and semicolons. Verify the probe
-    receives the exact values without shell interpretation
+16. **Launcher byte preservation**: invoke the launcher with a probe executable
+    and synthetic values containing embedded `$`, backticks, spaces,
+    single/double quotes, newlines, and semicolons. Verify the probe receives
+    the exact values without shell interpretation
 17. **Volume ID contract**: verify valid managed-directory and workspace-root
     IDs produce bounded unit names. Submit an arbitrary ID longer than 200
-    characters and verify existing volume-context identity validation rejects
-    it before creating startup files or a systemd unit
-18. **NUL byte rejection**: attempt mount with a K8s Secret value
-    containing a NUL byte. Verify `NodeStageVolume` returns
-    `INVALID_ARGUMENT`, no .env/.args files are created, and no
-    service unit is started
+    characters and verify existing volume-context identity validation rejects it
+    before creating startup files or a systemd unit
+18. **NUL byte rejection**: attempt mount with a K8s Secret value containing a
+    NUL byte. Verify `NodeStageVolume` returns `INVALID_ARGUMENT`, no .env/.args
+    files are created, and no service unit is started
 19. **Surrounding whitespace rejection**: attempt mount with a credential
-    containing leading or trailing ASCII whitespace. Verify
-    `NodeStageVolume` returns `INVALID_ARGUMENT` before writing startup files
+    containing leading or trailing ASCII whitespace. Verify `NodeStageVolume`
+    returns `INVALID_ARGUMENT` before writing startup files
 20. **Runtime-directory lifecycle**: restart only the CSI Pod and verify live
     process-state/socket files remain; reboot a test node and verify stale
     runtime files disappear while durable `phase=active` state drives
-    desired-first remount. Repeat with `phase=stopping` and verify reboot cleanup
-    never remounts
+    desired-first remount. Repeat with `phase=stopping` and verify reboot
+    cleanup never remounts
 
 ### Follow-up verification gates
 

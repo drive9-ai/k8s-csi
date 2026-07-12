@@ -107,6 +107,9 @@ func newActiveRecoveryCandidate(
 	if active.Phase != mountStatePhaseActive {
 		return mountState{}, fmt.Errorf("active recovery requires active state")
 	}
+	if !mountArgsUseDirectMountStrict(desiredArgs) {
+		return mountState{}, fmt.Errorf("desired recovery argv must contain exactly one %s", directMountStrictFlag)
+	}
 	names, err := newVolumeHostNames(active.VolumeID, attemptID)
 	if err != nil {
 		return mountState{}, err
@@ -143,6 +146,9 @@ func newFallbackRecoveryCandidate(
 		desired.Reason != mountStartReasonRecovery ||
 		desired.FallbackBinaryPath == "" {
 		return mountState{}, fmt.Errorf("fallback switch requires desired recovery candidate")
+	}
+	if err := validateRecoveryFallbackEligibility(desired.FallbackMountArgs); err != nil {
+		return mountState{}, err
 	}
 	names, err := newVolumeHostNames(desired.VolumeID, attemptID)
 	if err != nil {
@@ -388,11 +394,21 @@ func (e *driverActiveRecoveryExecutor) NewDesired(active mountState, desiredBina
 }
 
 func (e *driverActiveRecoveryExecutor) NewFallback(desired mountState) (mountState, error) {
+	if err := validateRecoveryFallbackEligibility(desired.FallbackMountArgs); err != nil {
+		return mountState{}, err
+	}
 	attemptID, err := e.driver.hostRuntime().NewAttemptID()
 	if err != nil {
 		return mountState{}, err
 	}
 	return newFallbackRecoveryCandidate(desired, attemptID, e.driver.hostRuntime().Now())
+}
+
+func validateRecoveryFallbackEligibility(args []string) error {
+	if !mountArgsUseDirectMountStrict(args) {
+		return fmt.Errorf("recorded recovery fallback predates %s and is ineligible", directMountStrictFlag)
+	}
+	return nil
 }
 
 func (e *driverActiveRecoveryExecutor) Cleanup(
@@ -593,9 +609,6 @@ func (e *driverActiveRecoveryExecutor) terminateOrphan(state mountState) error {
 func (e *driverActiveRecoveryExecutor) unmountActive(state mountState) error {
 	stopper := newMountStopper(e.driver.hostRuntime(), e.repository)
 	var errs []error
-	if err := stopper.runDrive9Umount(e.ctx, state); err != nil {
-		errs = append(errs, err)
-	}
 	mounted, err := e.driver.hostRuntime().IsMountPoint(state.StagingTarget)
 	if err != nil {
 		return errors.Join(append(errs, err)...)

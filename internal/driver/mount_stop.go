@@ -10,9 +10,8 @@ import (
 )
 
 const (
-	mountDrainTimeout  = 30 * time.Second
-	mountUmountTimeout = 10 * time.Second
-	mountPIDKillWait   = 5 * time.Second
+	mountDrainTimeout = 30 * time.Second
+	mountPIDKillWait  = 5 * time.Second
 )
 
 type mountStopResult string
@@ -266,16 +265,6 @@ func (s mountStopper) Reconcile(ctx context.Context, state mountState) (mountSto
 		cleanupErrors = append(cleanupErrors, mountErr)
 	}
 	if mountErr == nil && mounted {
-		if err := s.runDrive9Umount(ctx, owned); err != nil {
-			cleanupErrors = append(cleanupErrors, err)
-		}
-	}
-
-	mounted, mountErr = s.runtime.IsMountPoint(state.StagingTarget)
-	if mountErr != nil {
-		cleanupErrors = append(cleanupErrors, mountErr)
-	}
-	if mountErr == nil && mounted {
 		if err := s.runKernelUnmount(ctx, owned, false); err != nil {
 			cleanupErrors = append(cleanupErrors, err)
 		}
@@ -367,23 +356,6 @@ func (s mountStopper) resetFailedUnit(ctx context.Context, state mountState) err
 	return nil
 }
 
-func (s mountStopper) runDrive9Umount(ctx context.Context, state mountState) error {
-	command := hostNamespaceCommand(
-		state.BinaryPath,
-		"umount",
-		"--timeout",
-		mountUmountTimeout.String(),
-		"--no-auto-pack",
-		state.StagingTarget,
-	)
-	command.Env = hostMountRuntimeEnvironment()
-	result, err := s.runtime.Exec(ctx, command)
-	if err != nil || result.ExitCode != 0 {
-		return fmt.Errorf("Drive9 umount fallback failed")
-	}
-	return nil
-}
-
 func (s mountStopper) runKernelUnmount(ctx context.Context, state mountState, lazy bool) error {
 	args := []string{"host-unmount"}
 	if lazy {
@@ -404,7 +376,7 @@ func hostMountRuntimeEnvironment() []string {
 	return []string{
 		"TMPDIR=" + hostRuntimeDir,
 		"XDG_RUNTIME_DIR=" + hostRuntimeDir,
-		"PATH=" + hostBinaryDir + ":/usr/sbin:/usr/bin:/sbin:/bin",
+		"PATH=/usr/sbin:/usr/bin:/sbin:/bin",
 	}
 }
 

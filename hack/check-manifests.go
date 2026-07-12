@@ -78,6 +78,10 @@ func checkTextContracts() {
 		{
 			path: "deploy/sidecar/deployment.yaml",
 			required: []string{
+				"terminationGracePeriodSeconds: 60",
+				"registry.invalid/drive9-csi:unpublished",
+				"exec /usr/local/bin/drive9-csi supervise-sidecar-mount --",
+				"/usr/local/bin/drive9 mount", "--direct-mount-strict",
 				"DRIVE9_ATTR_TTL", "DRIVE9_ENTRY_TTL", "DRIVE9_DIR_TTL",
 				"--attr-ttl", "--entry-ttl", "--dir-ttl", "value: 30s",
 				"--foreground", "DRIVE9_PERF_ENABLED",
@@ -93,6 +97,7 @@ func checkTextContracts() {
 				"--readdir-prefetch-max-bytes", "--writeback-batch-window",
 			},
 			forbidden: []string{
+				"ghcr.io/drive9-ai/drive9-csi:", "exec drive9 mount",
 				"DRIVE9_PERF_DIR", "- name: DRIVE9_READDIR_PREFETCH",
 				"- name: DRIVE9_READDIR_PREFETCH_MAX_FILES",
 				"- name: DRIVE9_READDIR_PREFETCH_MAX_FILE_BYTES",
@@ -108,14 +113,18 @@ func checkTextContracts() {
 				"--recover-node-mounts=enabled",
 				"terminationGracePeriodSeconds: 120",
 			},
+			forbidden: []string{"--fusermount-source"},
 		},
 		{
 			path: "Dockerfile",
 			required: []string{
+				"FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS runtime",
+				"/usr/local/bin/drive9 mount --direct-mount-strict --help",
 				"COPY hack/drive9-csi-upload-perf.sh ",
 				"/usr/local/bin/drive9-csi-upload-perf",
 				"chmod +x /usr/local/bin/drive9-csi-upload-perf",
 			},
+			forbidden: []string{"fuse3", "/etc/fuse.conf", "user_allow_other"},
 		},
 		{
 			path: "deploy/kubernetes/rbac.yaml",
@@ -193,7 +202,6 @@ func checkNodeManifest() {
 		"--host-state-dir=/var/lib/drive9-csi",
 		"--drive9-source=/usr/local/bin/drive9",
 		"--launcher-source=/usr/local/bin/drive9-csi-launcher",
-		"--fusermount-source=/usr/bin/fusermount3",
 	}
 	if !slices.Equal(installer.Args, wantInstallerArgs) {
 		failf("installer args = %v", installer.Args)

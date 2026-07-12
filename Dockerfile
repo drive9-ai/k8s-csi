@@ -52,16 +52,16 @@ RUN expected_version="${DRIVE9_CLI_VERSION}" \
  && /usr/local/bin/drive9-csi-build verify-host-binary --path=/out/drive9 --target-arch="${target_arch}" \
  && echo "Downloaded published drive9 CLI ${published_version} for linux/${target_arch}"
 
-FROM debian:bookworm-slim
+FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS runtime
 LABEL org.opencontainers.image.source=https://github.com/drive9-ai/k8s-csi
 LABEL org.opencontainers.image.description="Drive9 Kubernetes CSI driver"
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates fuse3 tar tini util-linux \
- && rm -rf /var/lib/apt/lists/* \
- && sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf
+ && apt-get install -y --no-install-recommends ca-certificates tar tini util-linux \
+ && rm -rf /var/lib/apt/lists/*
 COPY --from=csi-builder /out/drive9-csi /usr/local/bin/drive9-csi
 COPY --from=csi-builder /out/drive9-csi-launcher /usr/local/bin/drive9-csi-launcher
 COPY --from=drive9-downloader /out/drive9 /usr/local/bin/drive9
 COPY hack/drive9-csi-upload-perf.sh /usr/local/bin/drive9-csi-upload-perf
-RUN chmod +x /usr/local/bin/drive9-csi-upload-perf
+RUN chmod +x /usr/local/bin/drive9-csi-upload-perf \
+ && /usr/local/bin/drive9 mount --direct-mount-strict --help >/dev/null
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/drive9-csi"]

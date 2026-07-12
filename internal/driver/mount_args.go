@@ -2,6 +2,8 @@ package driver
 
 import "path/filepath"
 
+const directMountStrictFlag = "--direct-mount-strict"
+
 type drive9MountRequest struct {
 	VolumeID      string
 	Server        string
@@ -22,6 +24,7 @@ func (d *Driver) drive9MountArgs(req drive9MountRequest, cacheDir string) []stri
 		"mount",
 		"--foreground",
 		"--mode=fuse",
+		directMountStrictFlag,
 	}
 	if req.Server != "" {
 		args = append(args, "--server", req.Server)
@@ -44,6 +47,16 @@ func (d *Driver) drive9MountArgs(req drive9MountRequest, cacheDir string) []stri
 	}
 	args = appendMountTuningArgs(args, req.Tuning)
 	return append(args, ":"+req.RemoteRoot, req.StagingTarget)
+}
+
+func mountArgsUseDirectMountStrict(args []string) bool {
+	count := 0
+	for _, arg := range args {
+		if arg == directMountStrictFlag {
+			count++
+		}
+	}
+	return count == 1
 }
 
 func appendMountTuningArgs(args []string, tuning mountTuning) []string {

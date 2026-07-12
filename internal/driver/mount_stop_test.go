@@ -27,7 +27,6 @@ func TestMountStopUsesFixedCleanupOrderAndRecordedBinary(t *testing.T) {
 		"state:stopping",
 		"drain",
 		"systemctl-stop",
-		"drive9-umount",
 		"kernel-unmount",
 		"lazy-unmount",
 		"pid-kill",
@@ -125,7 +124,6 @@ func TestMountStopContinuesAfterEachCleanupFailure(t *testing.T) {
 	for _, failure := range []string{
 		"drain",
 		"systemctl-stop",
-		"drive9-umount",
 		"kernel-unmount",
 		"lazy-unmount",
 		"pid-kill",
@@ -635,10 +633,8 @@ func (f *mountStopFixture) installCallbacks() {
 		case inner[0] == "systemctl" && len(inner) > 1 && inner[1] == "reset-failed":
 			f.service = systemdUnitNotFound
 		case inner[0] == current.BinaryPath && len(inner) > 1 && inner[1] == "umount":
-			f.events.add("drive9-umount")
-			if f.failure == "drive9-umount" {
-				return hostCommandResult{ExitCode: 1}, errors.New("Drive9 umount failed")
-			}
+			f.events.add("forbidden-drive9-umount")
+			return hostCommandResult{ExitCode: 1}, errors.New("Drive9 umount is forbidden")
 		case inner[0] == hostLauncherPath && containsArgument(inner, "host-unmount") && !containsArgument(inner, "--lazy"):
 			f.events.add("kernel-unmount")
 			if f.failure == "kernel-unmount" {

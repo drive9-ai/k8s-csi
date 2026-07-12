@@ -18,7 +18,6 @@ const (
 	hostProcRootPath           = "/host-proc/1/root"
 	hostDrive9DesiredPath      = "/var/lib/drive9-csi/bin/drive9"
 	hostLauncherPath           = "/var/lib/drive9-csi/bin/drive9-csi-launcher"
-	hostFusermountPath         = "/var/lib/drive9-csi/bin/fusermount3"
 )
 
 type nodeCapabilityName string
@@ -29,7 +28,6 @@ const (
 	nodeCapabilityHostPIDSignal     nodeCapabilityName = "host-pid-signal"
 	nodeCapabilityTransientSystemd  nodeCapabilityName = "transient-systemd"
 	nodeCapabilityFUSEDevice        nodeCapabilityName = "fuse-device"
-	nodeCapabilityFUSEHelper        nodeCapabilityName = "fuse-helper"
 	nodeCapabilitySystemctl         nodeCapabilityName = "systemctl"
 	nodeCapabilityJournalctl        nodeCapabilityName = "journalctl"
 	nodeCapabilityRuntimeDirectory  nodeCapabilityName = "runtime-directory"
@@ -44,7 +42,6 @@ var orderedNodeCapabilityNames = [...]nodeCapabilityName{
 	nodeCapabilityHostPIDSignal,
 	nodeCapabilityTransientSystemd,
 	nodeCapabilityFUSEDevice,
-	nodeCapabilityFUSEHelper,
 	nodeCapabilitySystemctl,
 	nodeCapabilityJournalctl,
 	nodeCapabilityRuntimeDirectory,
@@ -57,7 +54,6 @@ const (
 	hostProcUnavailableReason  = "host /proc not mounted at /host-proc or PID 1 namespace/root inaccessible"
 	hostPIDSignalUnavailable   = "host systemd PID signal execution unavailable"
 	fuseUnavailableReason      = "host /dev/fuse is not a readable/writable character device"
-	fuseHelperUnavailable      = "installed host fusermount3 helper unavailable"
 	systemctlUnavailable       = "host systemctl executable unavailable"
 	journalctlUnavailable      = "host journalctl executable unavailable"
 	runtimeDirUnavailable      = "host /run/drive9-csi runtime directory unavailable or unsafe"
@@ -189,9 +185,6 @@ func runNodePreflight(ctx context.Context, runtime hostRuntime) nodeCapabilities
 	if !checkHostFUSEDevice(ctx, runtime) {
 		capabilities = capabilities.withUnavailable(nodeCapabilityFUSEDevice, fuseUnavailableReason)
 	}
-	if !checkHostFUSEHelper(ctx, runtime) {
-		capabilities = capabilities.withUnavailable(nodeCapabilityFUSEHelper, fuseHelperUnavailable)
-	}
 	if !checkHostSystemctl(ctx, runtime) {
 		capabilities = capabilities.withUnavailable(nodeCapabilitySystemctl, systemctlUnavailable)
 	}
@@ -284,11 +277,6 @@ func checkHostFUSEDevice(ctx context.Context, runtime hostRuntime) bool {
 	return true
 }
 
-func checkHostFUSEHelper(ctx context.Context, runtime hostRuntime) bool {
-	result, err := runtime.Exec(ctx, hostNamespaceCommand(hostFusermountPath, "--version"))
-	return err == nil && result.ExitCode == 0
-}
-
 func checkHostExecutable(ctx context.Context, runtime hostRuntime, path string) bool {
 	return runHostTest(ctx, runtime, "-x", path)
 }
@@ -345,10 +333,6 @@ func checkInstalledHostBinaries(runtime hostRuntime) bool {
 	if err != nil || !launcher.Mode().IsRegular() || launcher.Mode().Perm()&0o111 == 0 {
 		return false
 	}
-	fusermount, err := runtime.Lstat(hostFusermountPath)
-	if err != nil || !fusermount.Mode().IsRegular() || fusermount.Mode().Perm()&0o111 == 0 {
-		return false
-	}
 	return true
 }
 
@@ -385,7 +369,14 @@ func checkHostDrive9Execution(ctx context.Context, runtime hostRuntime, drive9Pa
 	if err != nil || !attemptIDPattern.MatchString(attemptID) {
 		return false
 	}
-	command, err := systemdRunHostCommand("drive9-preflight-"+attemptID, true, drive9Path, "version")
+	command, err := systemdRunHostCommand(
+		"drive9-preflight-"+attemptID,
+		true,
+		drive9Path,
+		"mount",
+		directMountStrictFlag,
+		"--help",
+	)
 	if err != nil {
 		return false
 	}

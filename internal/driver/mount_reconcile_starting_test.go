@@ -222,6 +222,119 @@ func TestReconcileStartingReadyCandidateRequiresMatchingSystemdMainPID(t *testin
 	assertNoStartingReconcileDestructiveCalls(t, fixture.runtime.Calls())
 }
 
+func TestReconcileStartingPromotesReadyLegacyNonStrictCandidate(t *testing.T) {
+	fixture := newStartingReconcileFixture(t)
+	fixture.state.MountArgs = withoutMountArg(fixture.state.MountArgs, directMountStrictFlag)
+	fixture.states.states = []mountState{fixture.state}
+	fixture.mounted = true
+	fixture.process = "ready"
+	fixture.service = systemdUnitActive
+	fixture.installCallbacks()
+
+	result, err := fixture.reconciler.Reconcile(context.Background(), fixture.state, nil, true)
+	if err != nil || result != startingReconcilePromoted {
+		t.Fatalf("Reconcile() = %q, %v, want legacy candidate promoted", result, err)
+	}
+	states := fixture.states.snapshot()
+	if len(states) != 2 || mountArgsUseDirectMountStrict(states[1].MountArgs) {
+		t.Fatalf("legacy promotion changed mount argv: %#v", states)
+	}
+}
+
+func TestReconcileStartingNeverRelaunchesNonReadyLegacyCandidate(t *testing.T) {
+	fixture := newStartingReconcileFixture(t)
+	fixture.useRecoveryFallback()
+	fixture.state.MountArgs = withoutMountArg(fixture.state.MountArgs, directMountStrictFlag)
+	fixture.states.states = []mountState{fixture.state}
+	fixture.service = systemdUnitActive
+	fixture.installCallbacks()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	result, err := fixture.reconciler.Reconcile(
+		ctx,
+		fixture.state,
+		&mountLaunchCredentials{Server: "https://api.drive9.ai", APIKey: "test-key"},
+		true,
+	)
+	if result != startingReconcileDegraded || err == nil || !strings.Contains(err.Error(), "predates") {
+		t.Fatalf("Reconcile() = %q, %v, want cleaned legacy degraded state", result, err)
+	}
+	if countMountSystemdRuns(fixture.runtime.Calls()) != 0 {
+		t.Fatal("legacy starting reconciliation relaunched a mount")
+	}
+	if !hasSystemdMutation(fixture.runtime.Calls(), "stop") {
+		t.Fatal("legacy starting reconciliation did not clean its active service")
+	}
+}
+
+func TestReconcileStartingRejectsLegacyFallbackWithoutReplacingDesiredState(t *testing.T) {
+	fixture := newStartingReconcileFixture(t)
+	fixture.useRecoveryDesired()
+	fixture.state.FallbackMountArgs = withoutMountArg(fixture.state.FallbackMountArgs, directMountStrictFlag)
+	fixture.states.states = []mountState{fixture.state}
+	fixture.service = systemdUnitFailed
+	fixture.installCallbacks()
+	original := fixture.state
+	originalAttemptNumber := fixture.attemptNumber
+
+	result, err := fixture.reconciler.Reconcile(
+		context.Background(),
+		fixture.state,
+		&mountLaunchCredentials{Server: "https://api.drive9.ai", APIKey: "test-key"},
+		true,
+	)
+	if result != startingReconcileDegraded || err == nil || !strings.Contains(err.Error(), "predates") {
+		t.Fatalf("Reconcile() = %q, %v, want ineligible fallback", result, err)
+	}
+	states := fixture.states.snapshot()
+	if len(states) != 1 || !reflectMountStatesEqual(states[0], original) {
+		t.Fatalf("ineligible fallback replaced desired state: %#v", states)
+	}
+	if fixture.attemptNumber != originalAttemptNumber || countMountSystemdRuns(fixture.runtime.Calls()) != 0 {
+		t.Fatalf("ineligible fallback created or launched an attempt: number=%d calls=%#v",
+			fixture.attemptNumber, fixture.runtime.Calls())
+	}
+
+	fixture.readyAfterLaunch = true
+	result, err = fixture.reconciler.Reconcile(
+		context.Background(),
+		fixture.state,
+		&mountLaunchCredentials{Server: "https://api.drive9.ai", APIKey: "test-key"},
+		true,
+	)
+	if err != nil || result != startingReconcilePromoted {
+		t.Fatalf("desired retry before deadline = %q, %v, want promoted", result, err)
+	}
+}
+
+func TestReconcileStartingExpiredLegacyFallbackConvergesWithoutAttempts(t *testing.T) {
+	fixture := newStartingReconcileFixture(t)
+	fixture.useRecoveryDesired()
+	fixture.state.FallbackMountArgs = withoutMountArg(fixture.state.FallbackMountArgs, directMountStrictFlag)
+	fixture.states.states = []mountState{fixture.state}
+	fixture.service = systemdUnitNotFound
+	fixture.now = fixture.deadline()
+	fixture.installCallbacks()
+	originalAttemptNumber := fixture.attemptNumber
+
+	for range 2 {
+		result, err := fixture.reconciler.Reconcile(
+			context.Background(),
+			fixture.state,
+			&mountLaunchCredentials{Server: "https://api.drive9.ai", APIKey: "test-key"},
+			true,
+		)
+		if result != startingReconcileDegraded || err == nil || !strings.Contains(err.Error(), "predates") {
+			t.Fatalf("expired Reconcile() = %q, %v, want stable ineligible fallback", result, err)
+		}
+	}
+	if fixture.attemptNumber != originalAttemptNumber || countMountSystemdRuns(fixture.runtime.Calls()) != 0 {
+		t.Fatalf("expired fallback generated attempts: number=%d calls=%#v",
+			fixture.attemptNumber, fixture.runtime.Calls())
+	}
+}
+
 func TestReconcileStartingExpiredServiceHandlesLauncherAndZeroMainPID(t *testing.T) {
 	tests := []struct {
 		name            string

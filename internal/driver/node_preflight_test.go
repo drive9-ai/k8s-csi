@@ -88,12 +88,6 @@ func TestNodePreflightClassifiesEveryFailure(t *testing.T) {
 			reason:     "host /dev/fuse is not a readable/writable character device",
 		},
 		{
-			name:       "fuse helper",
-			failure:    "fuse-helper",
-			capability: nodeCapabilityFUSEHelper,
-			reason:     "installed host fusermount3 helper unavailable",
-		},
-		{
 			name:       "systemctl",
 			failure:    "systemctl",
 			capability: nodeCapabilitySystemctl,
@@ -120,12 +114,6 @@ func TestNodePreflightClassifiesEveryFailure(t *testing.T) {
 		{
 			name:       "missing launcher",
 			failure:    "launcher-missing",
-			capability: nodeCapabilityInstalledBinaries,
-			reason:     "host Drive9 binaries missing — init container may have failed",
-		},
-		{
-			name:       "missing fusermount",
-			failure:    "fusermount-missing",
 			capability: nodeCapabilityInstalledBinaries,
 			reason:     "host Drive9 binaries missing — init container may have failed",
 		},
@@ -187,9 +175,14 @@ func TestNodePreflightUsesOnlyCanonicalHostCommands(t *testing.T) {
 	}
 }
 
-func TestNodePreflightExecutesOnlyInstalledFusermountHelper(t *testing.T) {
+func TestNodePreflightIgnoresHelpersAndProbesStrictCapability(t *testing.T) {
 	fixture := newNodePreflightFixture("")
-	runNodePreflight(context.Background(), fixture.runtime)
+	capabilities := runNodePreflight(context.Background(), fixture.runtime)
+	for _, name := range allNodeCapabilityNames() {
+		if status := capabilities.Status(name); !status.Available {
+			t.Fatalf("capability %q unavailable without helper: %#v", name, status)
+		}
+	}
 
 	found := false
 	for _, call := range fixture.runtime.Calls() {
@@ -197,24 +190,18 @@ func TestNodePreflightExecutesOnlyInstalledFusermountHelper(t *testing.T) {
 			continue
 		}
 		inner := hostInnerCommand(call.Command)
-		if reflect.DeepEqual(inner, []string{hostFusermountPath, "--version"}) {
+		want := []string{fixture.drive9Path, "mount", directMountStrictFlag, "--help"}
+		if len(inner) >= len(want) && reflect.DeepEqual(inner[len(inner)-len(want):], want) {
 			found = true
 		}
-		for _, legacy := range []string{
-			"/usr/bin/fusermount3",
-			"/bin/fusermount3",
-			"/usr/bin/fusermount",
-			"/bin/fusermount",
-			"/usr/bin/umount",
-			"/bin/umount",
-		} {
-			if containsArgument(inner, legacy) {
-				t.Fatalf("preflight accepted legacy host helper %q: %#v", legacy, call.Command)
+		for _, arg := range inner {
+			if strings.Contains(arg, "fusermount") {
+				t.Fatalf("preflight observed a FUSE helper: %#v", call.Command)
 			}
 		}
 	}
 	if !found {
-		t.Fatalf("preflight did not execute %s --version", hostFusermountPath)
+		t.Fatalf("preflight did not execute strict capability probe through host systemd")
 	}
 }
 
@@ -333,11 +320,6 @@ func (f *nodePreflightFixture) installCallbacks() {
 				return nil, os.ErrNotExist
 			}
 			return fakeHostFileInfo{name: "drive9-csi-launcher", mode: 0o755}, nil
-		case filepath.Join(hostBinaryDir, "fusermount3"):
-			if f.failure == "fusermount-missing" {
-				return nil, os.ErrNotExist
-			}
-			return fakeHostFileInfo{name: "fusermount3", mode: 0o755}, nil
 		case f.drive9Path:
 			return fakeHostFileInfo{name: f.drive9Name, mode: 0o755}, nil
 		default:
@@ -395,10 +377,6 @@ func (f *nodePreflightFixture) installCallbacks() {
 				return hostCommandResult{ExitCode: 1, Stderr: []byte("systemctl failed")}, errors.New("exit status 1")
 			}
 			return systemdShowResult(systemdUnitNotFound), nil
-		case filepath.Join(hostBinaryDir, "fusermount3"):
-			if f.failure == "fuse-helper" {
-				return hostCommandResult{ExitCode: 1, Stderr: []byte("fusermount3 failed")}, errors.New("exit status 1")
-			}
 		case "/bin/test":
 			path := inner[len(inner)-1]
 			switch {

@@ -51,6 +51,9 @@ func (l mountLifecycle) Launch(ctx context.Context, request mountLaunchRequest) 
 	if err := validateMountLaunchRequest(request); err != nil {
 		return mountState{}, err
 	}
+	if !mountArgsUseDirectMountStrict(request.MountArgs) {
+		return mountState{}, fmt.Errorf("new mount argv must contain exactly one %s", directMountStrictFlag)
+	}
 
 	binaryPath, err := validateDesiredDrive9Content(l.runtime)
 	if err != nil {
