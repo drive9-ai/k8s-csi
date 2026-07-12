@@ -267,6 +267,38 @@ func TestRecoverActiveDesiredSuccessDoesNotStartFallback(t *testing.T) {
 	}
 }
 
+func TestRecoverActiveCleanupFailureBlocksCandidate(t *testing.T) {
+	active := validActiveState(t)
+	persistCalls := 0
+	startCalls := 0
+	executor := activeRecoveryExecutorFuncs{
+		cleanup: func(context.Context, mountState, []activeRecoveryAction) error {
+			return errors.New("Drive9 mount drain failed")
+		},
+		persist: func(mountState) error {
+			persistCalls++
+			return nil
+		},
+		start: func(context.Context, mountState) error {
+			startCalls++
+			return nil
+		},
+	}
+
+	result, err := coordinateActiveRecovery(
+		active,
+		"/var/lib/drive9-csi/bin/drive9-"+strings.Repeat("b", 64),
+		activeRecoveryObservation{PIDVerified: true, MountExists: true, SocketExists: true},
+		executor,
+	)
+	if err == nil || result != activeRecoveryDegraded {
+		t.Fatalf("coordinateActiveRecovery() = %q, %v, want degraded cleanup error", result, err)
+	}
+	if persistCalls != 0 || startCalls != 0 {
+		t.Fatalf("cleanup failure persisted/started candidate: persist=%d start=%d", persistCalls, startCalls)
+	}
+}
+
 func TestRecoverActiveDesiredFailureCleansBeforeFallback(t *testing.T) {
 	active := validActiveState(t)
 	desiredBinary := "/var/lib/drive9-csi/bin/drive9-" + strings.Repeat("b", 64)
@@ -576,6 +608,64 @@ func TestDriverActiveRecoveryCleanupTracksVerifiedSystemdMainPID(t *testing.T) {
 	}
 }
 
+func TestDriverActiveRecoveryCleanupPreservesDrainFailureAfterTerminalAbsence(t *testing.T) {
+	fixture := newNodeStateFirstFixture(t, true)
+	pidAlive := true
+	originalRead := fixture.runtime.readFileFn
+	fixture.runtime.readFileFn = func(path string) ([]byte, error) {
+		if path == hostProcPIDPath(fixture.active.PID, "stat") && !pidAlive {
+			return nil, os.ErrNotExist
+		}
+		return originalRead(path)
+	}
+	fixture.runtime.execFn = func(_ context.Context, command hostCommand) (hostCommandResult, error) {
+		inner := hostInnerCommand(command)
+		switch {
+		case len(inner) > 1 && inner[0] == "systemctl" && inner[1] == "show":
+			return systemdShowResult(systemdUnitNotFound), nil
+		case len(inner) > 2 && inner[0] == fixture.active.BinaryPath && inner[1] == "mount" && inner[2] == "drain":
+			return hostCommandResult{ExitCode: 1}, nil
+		case len(inner) > 0 && inner[0] == "systemd-run" && containsArgument(inner, "/bin/kill"):
+			pidAlive = false
+			return hostCommandResult{}, nil
+		case len(inner) > 1 && inner[0] == hostLauncherPath && inner[1] == "host-unmount":
+			fixture.runtimeMounted[fixture.active.StagingTarget] = false
+			return hostCommandResult{}, nil
+		default:
+			return hostCommandResult{}, fmt.Errorf("unexpected command %#v", command)
+		}
+	}
+	fixture.runtime.attemptIDFn = func() (string, error) { return strings.Repeat("d", 32), nil }
+	executor := &driverActiveRecoveryExecutor{
+		driver:     fixture.driver,
+		ctx:        context.Background(),
+		repository: fixture.driver.stateRepository(),
+	}
+
+	err := executor.Cleanup(context.Background(), fixture.active, []activeRecoveryAction{
+		activeRecoveryDrainOrphan,
+		activeRecoveryKillPID,
+		activeRecoveryUnmount,
+		activeRecoveryStartDesired,
+	})
+	if err == nil || !strings.Contains(err.Error(), "drain failed") {
+		t.Fatalf("Cleanup() error = %v, want preserved drain failure", err)
+	}
+	if fixture.runtimeMounted[fixture.active.StagingTarget] || pidAlive {
+		t.Fatalf("cleanup did not remove old mount/PID: mounted=%t pid=%t",
+			fixture.runtimeMounted[fixture.active.StagingTarget], pidAlive)
+	}
+	removed := map[string]bool{}
+	for _, call := range fixture.runtime.Calls() {
+		if call.Operation == "remove" {
+			removed[call.Path] = true
+		}
+	}
+	if !removed[fixture.active.ProcessStatePath] || !removed[fixture.active.ControlSocketPath] {
+		t.Fatalf("cleanup did not remove runtime artifacts: %#v", removed)
+	}
+}
+
 func TestDriverActiveRecoveryCleanupRevalidatesPIDInventoryBeforeStop(t *testing.T) {
 	fixture := newNodeStateFirstFixture(t, true)
 	const processStatePID = 5252
@@ -703,6 +793,30 @@ func TestDriverActiveRecoveryCleanupCandidateHandlesStartingServiceIdentity(t *t
 				t.Fatal("candidate cleanup did not stop attributed starting service")
 			}
 		})
+	}
+}
+
+func TestDriverActiveRecoveryCleanupCandidatePreservesStartupFileRemovalError(t *testing.T) {
+	fixture := newStartingReconcileFixture(t)
+	fixture.useRecoveryDesired()
+	fixture.startupBoundary = "environment-published"
+	fixture.installCallbacks()
+	removeErr := errors.New("injected startup environment removal failure")
+	fixture.runtime.removeFn = func(path string) error {
+		if path == fixture.state.EnvPath {
+			return removeErr
+		}
+		return nil
+	}
+	executor := &driverActiveRecoveryExecutor{
+		driver:     &Driver{nodeRuntime: fixture.runtime},
+		ctx:        context.Background(),
+		repository: newMountStateStore(t.TempDir(), newHostRuntime()),
+	}
+
+	err := executor.CleanupCandidate(context.Background(), fixture.state)
+	if !errors.Is(err, removeErr) {
+		t.Fatalf("CleanupCandidate() error = %v, want startup file removal failure", err)
 	}
 }
 
