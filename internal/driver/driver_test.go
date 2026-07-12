@@ -2164,7 +2164,7 @@ func TestPublishStateLegacyDefaultsDoNotOverwrite(t *testing.T) {
 
 func TestHasActivePublishTargetsStaleCleanup(t *testing.T) {
 	stateDir := t.TempDir()
-	d := &Driver{cfg: Config{StateDir: stateDir}}
+	d := &Driver{cfg: Config{StateDir: stateDir}, nodeRuntime: &fakeHostRuntime{}}
 
 	// Write a publish state for a target that is NOT mounted (stale).
 	state := publishState{
@@ -2241,7 +2241,7 @@ func TestHasActivePublishTargetsMatchesStagingTarget(t *testing.T) {
 
 func TestHasActivePublishTargetsLegacyState(t *testing.T) {
 	stateDir := t.TempDir()
-	d := &Driver{cfg: Config{StateDir: stateDir}}
+	d := &Driver{cfg: Config{StateDir: stateDir}, nodeRuntime: &fakeHostRuntime{}}
 
 	// Write a legacy state (no Status, no AccessMode).
 	state := publishState{

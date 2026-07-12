@@ -374,5 +374,6 @@ func verifyStartingLauncherPID(
 		PIDStartTime:      startTime,
 		ControlSocketPath: controlSocketPath,
 		ProcessStatePath:  processStatePath,
+		IsLauncher:        true,
 	}, nil
 }
