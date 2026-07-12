@@ -482,7 +482,7 @@ func TestNodeUnpublishVolumeMissingStateIsIdempotentWhenTargetAlreadyUnmounted(t
 	}
 }
 
-func TestNodeUnpublishVolumeIgnoresMismatchedStateWhenTargetAlreadyUnmounted(t *testing.T) {
+func TestNodeUnpublishVolumeRejectsMismatchedStateWhenTargetAlreadyUnmounted(t *testing.T) {
 	d := &Driver{
 		cfg:         Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"},
 		nodeRuntime: &fakeHostRuntime{},
@@ -492,6 +492,7 @@ func TestNodeUnpublishVolumeIgnoresMismatchedStateWhenTargetAlreadyUnmounted(t *
 		VolumeID:      "other-volume",
 		StagingTarget: "/stage",
 		Target:        target,
+		Status:        publishStatusPublished,
 	}); err != nil {
 		t.Fatalf("writePublishState error = %v", err)
 	}
@@ -499,8 +500,8 @@ func TestNodeUnpublishVolumeIgnoresMismatchedStateWhenTargetAlreadyUnmounted(t *
 		VolumeId:   "requested-volume",
 		TargetPath: target,
 	})
-	if err != nil {
-		t.Fatalf("NodeUnpublishVolume error = %v", err)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("NodeUnpublishVolume status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
 	}
 	if _, statErr := os.Stat(d.publishStatePath(target)); statErr != nil {
 		t.Fatalf("mismatched publish state should remain for the matching volume cleanup, stat err = %v", statErr)
@@ -517,6 +518,7 @@ func TestNodeUnpublishVolumeRemovesMatchingStateWhenTargetAlreadyUnmounted(t *te
 		VolumeID:      "vol",
 		StagingTarget: "/stage",
 		Target:        target,
+		Status:        publishStatusPublished,
 	}); err != nil {
 		t.Fatalf("writePublishState error = %v", err)
 	}
@@ -532,12 +534,11 @@ func TestNodeUnpublishVolumeRemovesMatchingStateWhenTargetAlreadyUnmounted(t *te
 	}
 }
 
-func TestStageAndPublishStateStatus(t *testing.T) {
+func TestStageStateStatus(t *testing.T) {
 	d := &Driver{cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"}}
 	mountState := validStartingState(t)
 	volumeID := mountState.VolumeID
 	stageTarget := mountState.StagingTarget
-	publishTarget := filepath.Join(t.TempDir(), "publish")
 
 	status, err := d.stageStateStatus(volumeID, stageTarget)
 	if err != nil {
@@ -546,19 +547,8 @@ func TestStageAndPublishStateStatus(t *testing.T) {
 	if status != stateMissing {
 		t.Fatalf("stageStateStatus missing = %v, want %v", status, stateMissing)
 	}
-	status, err = d.publishStateStatus(volumeID, publishTarget)
-	if err != nil {
-		t.Fatalf("publishStateStatus missing error = %v", err)
-	}
-	if status != stateMissing {
-		t.Fatalf("publishStateStatus missing = %v, want %v", status, stateMissing)
-	}
-
 	if err := d.writeMountState(mountState); err != nil {
 		t.Fatalf("writeMountState error = %v", err)
-	}
-	if err := d.writePublishState(publishState{VolumeID: volumeID, Target: publishTarget}); err != nil {
-		t.Fatalf("writePublishState error = %v", err)
 	}
 	status, err = d.stageStateStatus(volumeID, stageTarget)
 	if err != nil {
@@ -567,27 +557,12 @@ func TestStageAndPublishStateStatus(t *testing.T) {
 	if status != stateMatching {
 		t.Fatalf("stageStateStatus matching = %v, want %v", status, stateMatching)
 	}
-	status, err = d.publishStateStatus(volumeID, publishTarget)
-	if err != nil {
-		t.Fatalf("publishStateStatus matching error = %v", err)
-	}
-	if status != stateMatching {
-		t.Fatalf("publishStateStatus matching = %v, want %v", status, stateMatching)
-	}
-
 	status, err = d.stageStateStatus(volumeID, filepath.Join(t.TempDir(), "other-stage"))
 	if err != nil {
 		t.Fatalf("stageStateStatus mismatched error = %v", err)
 	}
 	if status != stateMismatched {
 		t.Fatalf("stageStateStatus mismatched = %v, want %v", status, stateMismatched)
-	}
-	status, err = d.publishStateStatus("other-vol", publishTarget)
-	if err != nil {
-		t.Fatalf("publishStateStatus mismatched error = %v", err)
-	}
-	if status != stateMismatched {
-		t.Fatalf("publishStateStatus mismatched = %v, want %v", status, stateMismatched)
 	}
 }
 
@@ -2132,15 +2107,15 @@ func TestValidateVolumeCapabilitiesAcceptsMultiWriter(t *testing.T) {
 	}
 }
 
-func TestPublishStateLegacyDefaults(t *testing.T) {
+func TestPublishStateLegacyAccessModeDefault(t *testing.T) {
 	s := publishState{
 		VolumeID:      "vol-1",
 		StagingTarget: "/stage",
 		Target:        "/target",
 	}
 	s.applyLegacyDefaults()
-	if s.Status != publishStatusPublished {
-		t.Fatalf("legacy Status = %q, want %q", s.Status, publishStatusPublished)
+	if s.Status != "" {
+		t.Fatalf("legacy Status = %q, want empty", s.Status)
 	}
 	if s.AccessMode != csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER.String() {
 		t.Fatalf("legacy AccessMode = %q, want SINGLE_NODE_WRITER", s.AccessMode)
@@ -2162,34 +2137,40 @@ func TestPublishStateLegacyDefaultsDoNotOverwrite(t *testing.T) {
 	}
 }
 
-func TestHasActivePublishTargetsStaleCleanup(t *testing.T) {
+func TestHasActivePublishTargetsPreservesAbsentConsumers(t *testing.T) {
 	stateDir := t.TempDir()
-	d := &Driver{cfg: Config{StateDir: stateDir}, nodeRuntime: &fakeHostRuntime{}}
-
-	// Write a publish state for a target that is NOT mounted (stale).
-	state := publishState{
-		VolumeID:      "vol-1",
-		StagingTarget: "/staging",
-		Target:        "/target-not-mounted",
-		Status:        publishStatusPublished,
-		AccessMode:    csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER.String(),
+	runtime := &fakeHostRuntime{
+		isMountPointFn: func(path string) (bool, error) {
+			t.Fatalf("inventory observed mount point %q", path)
+			return false, nil
+		},
 	}
-	body, _ := json.MarshalIndent(state, "", "  ")
-	statePath := d.publishStatePath("/target-not-mounted")
-	if err := os.WriteFile(statePath, body, 0o600); err != nil {
-		t.Fatal(err)
+	d := &Driver{cfg: Config{StateDir: stateDir}, nodeRuntime: runtime}
+	statuses := []string{publishStatusPending, publishStatusPublished, publishStatusUnpublishing}
+	for _, statusValue := range statuses {
+		state := publishState{
+			VolumeID:      "vol-1",
+			StagingTarget: "/staging",
+			Target:        "/target-" + statusValue,
+			Status:        statusValue,
+			AccessMode:    csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER.String(),
+		}
+		if err := d.writePublishState(state); err != nil {
+			t.Fatalf("write %s state: %v", statusValue, err)
+		}
 	}
 
 	active, err := d.hasActivePublishTargets("vol-1", "/staging")
 	if err != nil {
 		t.Fatalf("hasActivePublishTargets error = %v", err)
 	}
-	if len(active) != 0 {
-		t.Fatalf("expected 0 active targets (stale cleaned), got %d", len(active))
+	if len(active) != len(statuses) {
+		t.Fatalf("active targets = %d, want %d", len(active), len(statuses))
 	}
-	// State file should be removed.
-	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("stale state file should be removed")
+	for _, statusValue := range statuses {
+		if _, err := os.Stat(d.publishStatePath("/target-" + statusValue)); err != nil {
+			t.Fatalf("%s state was not preserved: %v", statusValue, err)
+		}
 	}
 }
 
@@ -2239,29 +2220,33 @@ func TestHasActivePublishTargetsMatchesStagingTarget(t *testing.T) {
 	}
 }
 
-func TestHasActivePublishTargetsLegacyState(t *testing.T) {
-	stateDir := t.TempDir()
-	d := &Driver{cfg: Config{StateDir: stateDir}, nodeRuntime: &fakeHostRuntime{}}
+func TestHasActivePublishTargetsRejectsInvalidStatus(t *testing.T) {
+	for _, statusValue := range []string{"", "unknown"} {
+		t.Run(statusValue, func(t *testing.T) {
+			stateDir := t.TempDir()
+			d := &Driver{cfg: Config{StateDir: stateDir}}
+			state := publishState{
+				VolumeID:      "vol-1",
+				StagingTarget: "/staging",
+				Target:        "/target-not-mounted",
+				Status:        statusValue,
+			}
+			body, err := json.MarshalIndent(state, "", "  ")
+			if err != nil {
+				t.Fatalf("marshal publish state: %v", err)
+			}
+			statePath := d.publishStatePath(state.Target)
+			if err := os.WriteFile(statePath, body, 0o600); err != nil {
+				t.Fatalf("write publish state: %v", err)
+			}
 
-	// Write a legacy state (no Status, no AccessMode).
-	state := publishState{
-		VolumeID:      "vol-1",
-		StagingTarget: "/staging",
-		Target:        "/target-not-mounted",
-		PublishedAt:   "2026-01-01T00:00:00Z",
-	}
-	body, _ := json.MarshalIndent(state, "", "  ")
-	if err := os.WriteFile(d.publishStatePath("/target-not-mounted"), body, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	active, err := d.hasActivePublishTargets("vol-1", "/staging")
-	if err != nil {
-		t.Fatalf("hasActivePublishTargets error = %v", err)
-	}
-	// Target not mounted → stale, should be cleaned up.
-	if len(active) != 0 {
-		t.Fatalf("expected 0 active targets (legacy stale), got %d", len(active))
+			if _, err := d.hasActivePublishTargets("vol-1", "/staging"); err == nil {
+				t.Fatalf("hasActivePublishTargets accepted status %q", statusValue)
+			}
+			if _, err := os.Stat(statePath); err != nil {
+				t.Fatalf("invalid state was not preserved: %v", err)
+			}
+		})
 	}
 }
 

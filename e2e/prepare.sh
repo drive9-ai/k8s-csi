@@ -22,9 +22,8 @@ tmp_dir=""
 manifest_dir=""
 driver_namespace="${DRIVE9_CSI_E2E_DRIVER_NAMESPACE:-}"
 
+e2e_configure_prepare_image "$@"
 e2e_init
-e2e_need_env DRIVE9_CSI_IMAGE
-e2e_require_validation_image "DRIVE9_CSI_IMAGE" "$DRIVE9_CSI_IMAGE"
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/drive9-csi-prepare.XXXXXX")" ||
 	e2e_fail "create temporary directory"

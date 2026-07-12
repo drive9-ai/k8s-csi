@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -256,20 +255,6 @@ func coordinateActiveRecovery(
 		return activeRecoveryDegraded, err
 	}
 	return activeRecoveryRecovered, nil
-}
-
-func publishStatesForActiveRecovery(states []publishState, volumeID string, stagingTarget string) []publishState {
-	stagingTarget = filepath.Clean(stagingTarget)
-	var matching []publishState
-	for _, state := range states {
-		if (state.Status != publishStatusPublished && state.Status != publishStatusPending) ||
-			state.VolumeID != volumeID ||
-			filepath.Clean(state.StagingTarget) != stagingTarget {
-			continue
-		}
-		matching = append(matching, state)
-	}
-	return matching
 }
 
 func (d *Driver) observeActiveRecovery(

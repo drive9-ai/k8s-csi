@@ -256,7 +256,7 @@ stop_io_loop() {
 	local attempt
 	local pod_name="$1"
 	local file_name="$2"
-	local status
+	local state
 	local stopped=0
 
 	if ! kube_retry -n "$test_namespace" exec "$pod_name" -- sh -c '
@@ -270,27 +270,29 @@ stop_io_loop() {
 	fi
 
 	for attempt in {1..15}; do
-		kube_retry -n "$test_namespace" exec "$pod_name" -- sh -c '
+		state=$(kube_retry -n "$test_namespace" exec "$pod_name" -- sh -c '
 			if test -s /tmp/drive9-survival-failure; then
 				cat /tmp/drive9-survival.log >&2
-				exit 2
+				printf "failed\n"
+			elif test -s /tmp/drive9-survival-stopped; then
+				printf "stopped\n"
+			else
+				printf "running\n"
 			fi
-			test -s /tmp/drive9-survival-stopped
-		'
-		status="$?"
-		case "$status" in
-		0)
+		') || e2e_fail "observe workload I/O loop stop"
+		case "$state" in
+		stopped)
 			stopped=1
 			break
 			;;
-		1)
+		running)
 			sleep 1
 			;;
-		2)
+		failed)
 			e2e_fail "workload I/O loop recorded a failure"
 			;;
 		*)
-			e2e_fail "observe workload I/O loop stop"
+			e2e_fail "invalid workload I/O loop stop state"
 			;;
 		esac
 	done
