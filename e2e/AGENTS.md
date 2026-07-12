@@ -25,11 +25,12 @@ includes the non-mutating `e2e-check` static validation.
    `kube` wrapper. Only `lib/common.sh` may invoke `kubectl` directly.
 3. Reject context names containing `prod` or `production`.
 4. Require `DRIVE9_CSI_E2E_CONFIRM=1` before the first cluster mutation.
-5. `prepare.sh` must require the CSI image as either the publishing workflow's
-   `drive9-<cli-sha7>-csi-<csi-sha7>` trace tag or an immutable
-   `@sha256:<digest>` reference. Cases must verify the prepared Driver keeps
-   one accepted image reference, but must not require or deploy
-   `DRIVE9_CSI_IMAGE`.
+5. `prepare.sh --image-tag` must accept only the publishing workflow's bare
+   `drive9-<cli-sha7>-csi-<csi-sha7>` trace tag and map it to the fixed Drive9
+   CSI GHCR repository. A no-argument manual invocation may instead read an
+   accepted image reference from `DRIVE9_CSI_IMAGE`; combining both inputs must
+   fail. Cases must verify the prepared Driver keeps one accepted image
+   reference, but must not require or deploy `DRIVE9_CSI_IMAGE`.
 6. Print the selected context and API server before mutation, but never print,
    render, copy, or delete pre-provisioned Secret data.
 7. `prepare.sh` owns the persistent Driver resources and never deletes them.
@@ -81,25 +82,31 @@ includes the non-mutating `e2e-check` static validation.
 
 ## Codex Execution
 
-1. Before asking Codex to run an E2E entrypoint, make every required environment
-   variable available to its command subprocess. If a variable is missing,
-   Codex must stop instead of constructing a wrapped command to supply it.
+1. Before asking Codex to run an E2E entrypoint, make its required static
+   environment variables available to the command subprocess. If one is
+   missing, Codex must stop instead of constructing a wrapped command.
 2. From the repository root, invoke exactly one entrypoint directly per command:
 
    ```sh
-   e2e/prepare.sh
+   e2e/prepare.sh --image-tag drive9-a53e497-csi-d91bfe3
    e2e/basic-lifecycle.sh
    e2e/mount-survival.sh
    ```
 
-3. Do not prefix an entrypoint with `bash`, `sh`, `zsh`, `env`, or `./`. Do not
-   use `zsh -lc`, inline environment assignments, or command substitutions.
-   These forms do not match `.codex/rules/e2e.rules` and can persist sensitive
-   command text in approval rules.
-4. The project rule removes repeated command-execution approval only for the
-   three direct entrypoints. It does not waive the required environment,
-   explicit real-cluster authorization, or any Hard Safety Rule above.
-5. Never request Secret values or print or persist Secret data in a prompt,
+3. Copy the completed publishing workflow's bare trace tag into `--image-tag`
+   as a literal. Do not use `$TAG`, `${TAG}`, command substitution, a full image
+   reference, or `DRIVE9_CSI_IMAGE` for Codex preparation commands.
+4. Do not prefix an entrypoint with `bash`, `sh`, `zsh`, `env`, or `./`. Do not
+   use `zsh -lc`, inline environment assignments, shell control operators, or
+   extra case arguments. These forms do not match the reviewed command shape.
+5. Changes to `.codex/config.toml` static E2E values require a new Codex session
+   before they reach command subprocesses. User authorization to run a real E2E
+   does not authorize alternate shell forms or an execution-rule change.
+6. `.codex/rules/e2e.rules` removes repeated command-execution approval only for
+   `prepare.sh --image-tag <literal-tag>` and the two direct case entrypoints. It
+   does not waive required environment values, explicit real-cluster
+   authorization, or any Hard Safety Rule above.
+7. Never request Secret values or print or persist Secret data in a prompt,
    command line, approval rule, log, or Codex configuration.
 
 ## Mount-Survival Evidence
