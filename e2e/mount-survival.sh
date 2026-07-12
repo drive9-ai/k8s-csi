@@ -46,7 +46,7 @@ find_node_pod() {
 	local node_name="$1"
 	local pod_name
 
-	if ! pod_name=$(kube -n "$driver_namespace" get pods \
+	if ! pod_name=$(kube_retry -n "$driver_namespace" get pods \
 		-l app=drive9-csi-node \
 		--field-selector "spec.nodeName=$node_name" \
 		-o jsonpath='{.items[0].metadata.name}'); then
@@ -106,7 +106,7 @@ capture_mount_identity() {
 	local state_path="/var/lib/drive9-csi/${volume_id}.json"
 	local systemd_unit
 
-	if ! state=$(kube -n "$driver_namespace" exec "$node_pod" \
+	if ! state=$(kube_retry -n "$driver_namespace" exec "$node_pod" \
 		-c drive9-csi -- cat "$state_path"); then
 		e2e_fail "read mount state $state_path from $node_pod"
 	fi
@@ -135,14 +135,14 @@ capture_mount_identity() {
 	staging_target=$(printf '%s' "$state" | jq -r '.stagingTarget') ||
 		e2e_fail "read staging target"
 
-	if ! executable=$(kube -n "$driver_namespace" exec "$node_pod" \
+	if ! executable=$(kube_retry -n "$driver_namespace" exec "$node_pod" \
 		-c drive9-csi -- readlink "/host-proc/$pid/exe"); then
 		e2e_fail "read host executable for mount PID $pid"
 	fi
 	if [[ "$executable" != "$binary_path" ]]; then
 		e2e_fail "mount executable does not match recorded binary"
 	fi
-	if ! process_stat=$(kube -n "$driver_namespace" exec "$node_pod" \
+	if ! process_stat=$(kube_retry -n "$driver_namespace" exec "$node_pod" \
 		-c drive9-csi -- cat "/host-proc/$pid/stat"); then
 		e2e_fail "read host stat for mount PID $pid"
 	fi
@@ -154,7 +154,7 @@ capture_mount_identity() {
 		e2e_fail "mount PID start time does not match recorded state"
 	fi
 
-	if ! cgroup=$(kube -n "$driver_namespace" exec "$node_pod" \
+	if ! cgroup=$(kube_retry -n "$driver_namespace" exec "$node_pod" \
 		-c drive9-csi -- cat "/host-proc/$pid/cgroup"); then
 		e2e_fail "read host cgroup for mount PID $pid"
 	fi
@@ -162,7 +162,7 @@ capture_mount_identity() {
 		e2e_fail "mount PID is not owned by $systemd_unit"
 	fi
 
-	if ! mount_id=$(kube -n "$driver_namespace" exec "$node_pod" \
+	if ! mount_id=$(kube_retry -n "$driver_namespace" exec "$node_pod" \
 		-c drive9-csi -- awk -v target="$staging_target" \
 		'$5 == target { print $1 }' /host-proc/1/mountinfo); then
 		e2e_fail "read host mount ID for $staging_target"
@@ -194,10 +194,12 @@ start_io_loop() {
 
 	kube -n "$test_namespace" exec "$pod_name" -- sh -c '
 		file_name=$1
-		rm -f /tmp/drive9-survival-count /tmp/drive9-survival-failure
+		rm -f /tmp/drive9-survival-count
+		rm -f /tmp/drive9-survival-failure
+		rm -f /tmp/drive9-survival-stop /tmp/drive9-survival-stopped
 		(
 			count=0
-			while :; do
+			while ! test -e /tmp/drive9-survival-stop; do
 				count=$((count + 1))
 				value="survival-${count}"
 				if ! printf "%s\n" "$value" > "/workspace/${file_name}.tmp" ||
@@ -210,8 +212,8 @@ start_io_loop() {
 				printf "%s\n" "$count" > /tmp/drive9-survival-count
 				sleep 1
 			done
+			printf "stopped\n" > /tmp/drive9-survival-stopped
 		) </dev/null >/tmp/drive9-survival.log 2>&1 &
-		printf "%s\n" "$!" > /tmp/drive9-survival-pid
 	' sh "$file_name" || e2e_fail "start workload I/O loop"
 }
 
@@ -219,7 +221,7 @@ read_io_count() {
 	local pod_name="$1"
 	local count
 
-	count=$(kube -n "$test_namespace" exec "$pod_name" -- \
+	count=$(kube_retry -n "$test_namespace" exec "$pod_name" -- \
 		cat /tmp/drive9-survival-count 2>/dev/null) || return 1
 	[[ "$count" =~ ^[0-9]+$ ]] || return 1
 	printf '%s\n' "$count"
@@ -232,7 +234,7 @@ wait_for_io_progress() {
 	local count
 
 	for attempt in {1..60}; do
-		if kube -n "$test_namespace" exec "$pod_name" -- \
+		if kube_retry -n "$test_namespace" exec "$pod_name" -- \
 			test -s /tmp/drive9-survival-failure >/dev/null 2>&1; then
 			e2e_fail "workload I/O loop recorded a failure"
 		fi
@@ -250,16 +252,30 @@ stop_io_loop() {
 	local pod_name="$1"
 	local file_name="$2"
 
-	kube -n "$test_namespace" exec "$pod_name" -- sh -c '
+	kube_retry -n "$test_namespace" exec "$pod_name" -- sh -c '
+		stopped=false
 		if test -s /tmp/drive9-survival-failure; then
 			cat /tmp/drive9-survival.log >&2
 			exit 1
 		fi
-		if test -s /tmp/drive9-survival-pid; then
-			pid=$(cat /tmp/drive9-survival-pid)
-			kill "$pid" 2>/dev/null || true
-			sleep 2
-			kill -9 "$pid" 2>/dev/null || true
+		: > /tmp/drive9-survival-stop
+		attempt=0
+		while test "$attempt" -lt 15; do
+			if test -s /tmp/drive9-survival-stopped; then
+				stopped=true
+				break
+			fi
+			if test -s /tmp/drive9-survival-failure; then
+				cat /tmp/drive9-survival.log >&2
+				exit 1
+			fi
+			attempt=$((attempt + 1))
+			sleep 1
+		done
+		if test "$stopped" != true; then
+			cat /tmp/drive9-survival.log >&2
+			printf "I/O loop did not stop cooperatively\n" >&2
+			exit 1
 		fi
 		rm -f "/workspace/$1" "/workspace/$1.tmp"
 		sync
@@ -392,32 +408,41 @@ e2e_write_primary_workload
 e2e_write_test_pod drive9-csi-survival "$tmp_dir/pod.yaml"
 e2e_validate_case_manifests
 
-kube create -f "$tmp_dir/namespace.yaml" ||
-	e2e_fail "create case namespace"
 test_namespace_created=1
-kube create -f "$manifest_dir/storageclass.yaml" ||
-	e2e_fail "create case StorageClass"
+e2e_create_owned_resource "namespace/$test_namespace" \
+	namespace "$test_namespace" "$case_run_id" \
+	"$tmp_dir/namespace.yaml" ||
+	e2e_fail "create case namespace"
 storage_class_created=1
-kube create -f "$manifest_dir/volumeattributesclass.yaml" ||
-	e2e_fail "create case VolumeAttributesClass"
+e2e_create_owned_resource "storageclass/$storage_class" \
+	storageclass "$storage_class" "$case_run_id" \
+	"$manifest_dir/storageclass.yaml" ||
+	e2e_fail "create case StorageClass"
 volume_attributes_class_created=1
+e2e_create_owned_resource \
+	"volumeattributesclass/$volume_attributes_class" \
+	volumeattributesclass "$volume_attributes_class" "$case_run_id" \
+	"$manifest_dir/volumeattributesclass.yaml" ||
+	e2e_fail "create case VolumeAttributesClass"
 kube create -f "$tmp_dir/workload.yaml" ||
 	e2e_fail "create survival workload"
-kube apply -f "$tmp_dir/pod.yaml" || e2e_fail "apply survival Pod"
-kube -n "$test_namespace" wait pod/drive9-csi-survival \
+kube_retry apply -f "$tmp_dir/pod.yaml" ||
+	e2e_fail "apply survival Pod"
+kube_retry -n "$test_namespace" wait pod/drive9-csi-survival \
 	--for=condition=Ready --timeout=300s || e2e_fail "survival Pod ready"
 
-workload_uid=$(kube -n "$test_namespace" get pod drive9-csi-survival \
+workload_uid=$(kube_retry -n "$test_namespace" get \
+	pod drive9-csi-survival \
 	-o jsonpath='{.metadata.uid}') || e2e_fail "read workload Pod UID"
-node_name=$(kube -n "$test_namespace" get pod drive9-csi-survival \
+node_name=$(kube_retry -n "$test_namespace" get pod drive9-csi-survival \
 	-o jsonpath='{.spec.nodeName}') || e2e_fail "read workload node"
 [[ -n "$workload_uid" && -n "$node_name" ]] ||
 	e2e_fail "workload Pod identity is incomplete"
 
-pv_name=$(kube -n "$test_namespace" get pvc drive9-workspace-e2e \
+pv_name=$(kube_retry -n "$test_namespace" get pvc drive9-workspace-e2e \
 	-o jsonpath='{.spec.volumeName}') || e2e_fail "read bound PV name"
 [[ -n "$pv_name" ]] || e2e_fail "survival PVC did not bind a PV"
-volume_id=$(kube get pv "$pv_name" \
+volume_id=$(kube_retry get pv "$pv_name" \
 	-o jsonpath='{.spec.csi.volumeHandle}') || e2e_fail "read volume ID"
 if [[ ! "$volume_id" =~ ^(drive9|drive9-root)-[0-9a-f]{32}$ ]]; then
 	e2e_fail "PV contains an unexpected Drive9 volume ID"
@@ -426,7 +451,7 @@ fi
 if ! node_pod=$(find_node_pod "$node_name"); then
 	e2e_fail "resolve CSI node Pod"
 fi
-node_pod_uid=$(kube -n "$driver_namespace" get pod "$node_pod" \
+node_pod_uid=$(kube_retry -n "$driver_namespace" get pod "$node_pod" \
 	-o jsonpath='{.metadata.uid}') || e2e_fail "read CSI node Pod UID"
 [[ -n "$node_pod_uid" ]] || e2e_fail "CSI node Pod UID is empty"
 
@@ -438,7 +463,8 @@ fi
 capture_mount_identity "$node_pod" "$volume_id" "$tmp_dir/identity-before.json"
 
 e2e_info "deleting CSI node Pod $node_pod on $node_name"
-kube -n "$driver_namespace" delete pod "$node_pod" --wait=false ||
+kube_retry -n "$driver_namespace" delete pod "$node_pod" \
+	--ignore-not-found --wait=false ||
 	e2e_fail "delete CSI node Pod"
 if ! replacement_pod=$(
 	wait_for_replacement_node_pod "$node_name" "$node_pod_uid"
@@ -455,7 +481,8 @@ fi
 if ((count_after <= count_before)); then
 	e2e_fail "workload I/O did not continue across CSI node Pod replacement"
 fi
-current_workload_uid=$(kube -n "$test_namespace" get pod drive9-csi-survival \
+current_workload_uid=$(kube_retry -n "$test_namespace" get \
+	pod drive9-csi-survival \
 	-o jsonpath='{.metadata.uid}') || e2e_fail "read current workload Pod UID"
 if [[ "$current_workload_uid" != "$workload_uid" ]]; then
 	e2e_fail "workload Pod was replaced during CSI node Pod replacement"
@@ -476,10 +503,12 @@ e2e_info "workload I/O progressed from $count_before to $count_final"
 e2e_info "passed: workload I/O and host mount identity survived"
 
 stop_io_loop drive9-csi-survival "$io_file"
-kube -n "$test_namespace" delete pod drive9-csi-survival \
-	--wait=true --timeout=300s || e2e_fail "delete survival Pod"
-kube -n "$test_namespace" delete pvc drive9-workspace-e2e \
-	--wait=true --timeout=300s || e2e_fail "delete survival PVC"
+kube_retry -n "$test_namespace" delete pod drive9-csi-survival \
+	--ignore-not-found --wait=true --timeout=300s ||
+	e2e_fail "delete survival Pod"
+kube_retry -n "$test_namespace" delete pvc drive9-workspace-e2e \
+	--ignore-not-found --wait=true --timeout=300s ||
+	e2e_fail "delete survival PVC"
 e2e_wait_for_pv_deleted "$pv_name"
 wait_for_mount_cleanup "$replacement_pod" "$volume_id" \
 	"$tmp_dir/identity-before.json"

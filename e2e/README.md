@@ -60,6 +60,14 @@ VolumeAttributesClass with per-run ownership metadata. It cleans up only
 resources confirmed to belong to that run unless `DRIVE9_CSI_E2E_KEEP=1` is
 set. Prepare once, then run either case repeatedly or in any order.
 
+The shared Kubernetes wrapper retries only recognized client and API transport
+failures, such as EOF, TLS handshake timeout, connection reset, and temporary
+DNS failures. It makes at most four attempts with bounded backoff. Kubernetes
+semantic errors and workload assertions are not retried. Retried case commands
+are idempotent, and an ambiguous top-level resource create is accepted only
+after its per-run ownership label is verified. Cleanup uses the same transport
+retry and ownership checks.
+
 `DRIVE9_CSI_E2E_KEEP=1` keeps the generated Secret and local temporary
 manifests containing the API key. Use it only for debugging, then remove both
 the cluster resources and the printed temporary directory.
@@ -71,7 +79,9 @@ PV deletion.
 `mount-survival.sh` creates a live workload, records its host mount identity,
 deletes the matching CSI node Pod, waits for the replacement, verifies workload
 I/O continued, and confirms the mount PID, PID start time, mount ID, systemd
-unit, and Drive9 binary path did not change.
+unit, and Drive9 binary path did not change. Its background I/O loop stops
+through explicit stop and stopped markers; expected case teardown does not use
+signals or treat a forced process exit as a test failure.
 
 Set `DRIVE9_REMOTE_ROOT_PREFIX=/k8s/pvc-e2e` only when testing managed-directory
 mode. The default is workspace-root mode. The lifecycle case requires
