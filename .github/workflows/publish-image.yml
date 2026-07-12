@@ -1,17 +1,6 @@
-name: Publish CSI image
+name: Publish CSI validation image
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/publish-image.yml"
-      - "Dockerfile"
-      - "Makefile"
-      - "cmd/**"
-      - "go.mod"
-      - "go.sum"
-      - "internal/**"
   workflow_dispatch:
 
 permissions:
@@ -25,52 +14,100 @@ jobs:
   metadata:
     runs-on: ubuntu-24.04
     outputs:
-      drive9_version: ${{ steps.drive9_version.outputs.version }}
+      drive9_version: ${{ steps.release.outputs.version }}
+      drive9_source_commit: ${{ steps.release.outputs.source_commit }}
+      drive9_amd64_sha256: ${{ steps.release.outputs.linux_amd64_sha256 }}
+      drive9_arm64_sha256: ${{ steps.release.outputs.linux_arm64_sha256 }}
       tags: ${{ steps.image-tags.outputs.tags }}
       trace_tag: ${{ steps.image-tags.outputs.trace_tag }}
     steps:
-      - name: Show latest drive9 CLI version
-        id: drive9_version
+      - name: Resolve latest published Drive9 CLI release
+        id: release
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          TMP_DIR="$(mktemp -d)"
-          trap 'rm -rf "$TMP_DIR"' EXIT
-          curl -fsSL -o "$TMP_DIR/drive9" https://drive9.ai/releases/drive9-linux-amd64
-          chmod +x "$TMP_DIR/drive9"
-          "$TMP_DIR/drive9" --version | tee "$TMP_DIR/drive9-version.txt"
-          DRIVE9_VERSION="$(awk -F': *' '$1 == "version" {print $2; exit}' "$TMP_DIR/drive9-version.txt" | tr -d '[:space:]')"
-          if [ -z "$DRIVE9_VERSION" ]; then
-            echo "Failed to resolve drive9 CLI version" >&2
+          release_base="https://drive9.ai/releases"
+          version_before_file="${RUNNER_TEMP}/drive9-version-before"
+          version_after_file="${RUNNER_TEMP}/drive9-version-after"
+          checksums_file="${RUNNER_TEMP}/drive9-checksums.txt"
+          if ! curl --proto '=https' --tlsv1.2 -fsSL \
+            -o "$version_before_file" "${release_base}/version"; then
+            echo "Could not download the Drive9 CLI version" >&2
             exit 1
           fi
-          echo "Resolved drive9 CLI version: ${DRIVE9_VERSION}"
-          echo "version=${DRIVE9_VERSION}" >> "$GITHUB_OUTPUT"
+          if ! curl --proto '=https' --tlsv1.2 -fsSL \
+            -o "$checksums_file" "${release_base}/checksums.txt"; then
+            echo "Could not download the Drive9 CLI checksums" >&2
+            exit 1
+          fi
+          if ! curl --proto '=https' --tlsv1.2 -fsSL \
+            -o "$version_after_file" "${release_base}/version"; then
+            echo "Could not confirm the Drive9 CLI version" >&2
+            exit 1
+          fi
+
+          version=$(<"$version_before_file")
+          version_after=$(<"$version_after_file")
+          if [[ ! "$version" =~ ^[0-9a-f]{7}$ ]]; then
+            echo "Drive9 CLI version must be a seven-character commit prefix" >&2
+            exit 1
+          fi
+          if [[ "$version" != "$version_after" ]]; then
+            echo "Drive9 CLI release changed while resolving metadata" >&2
+            exit 1
+          fi
+          for artifact in drive9-linux-amd64 drive9-linux-arm64; do
+            checksum=$(awk -v artifact="$artifact" '
+              $2 == artifact { count += 1; value = $1 }
+              END { if (count == 1) print value }
+            ' "$checksums_file")
+            if [[ ! "$checksum" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "Release must contain exactly one checksum for $artifact" >&2
+              exit 1
+            fi
+            case "$artifact" in
+            drive9-linux-amd64)
+              printf 'linux_amd64_sha256=%s\n' "$checksum" >> "$GITHUB_OUTPUT"
+              ;;
+            drive9-linux-arm64)
+              printf 'linux_arm64_sha256=%s\n' "$checksum" >> "$GITHUB_OUTPUT"
+              ;;
+            esac
+          done
+
+          if ! source_commit=$(gh api \
+            "repos/mem9-ai/drive9/commits/${version}" \
+            --jq '.sha'); then
+            echo "Could not resolve Drive9 source commit $version" >&2
+            exit 1
+          fi
+          if [[ ! "$source_commit" =~ ^[0-9a-f]{40}$ ]] || \
+            [[ "${source_commit:0:7}" != "$version" ]]; then
+            echo "Drive9 source commit does not match release version $version" >&2
+            exit 1
+          fi
+
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'source_commit=%s\n' "$source_commit" >> "$GITHUB_OUTPUT"
 
       - name: Resolve image tags
         id: image-tags
         shell: bash
         env:
-          DRIVE9_VERSION: ${{ steps.drive9_version.outputs.version }}
+          DRIVE9_VERSION: ${{ steps.release.outputs.version }}
         run: |
-          set -euo pipefail
-          SAFE_DRIVE9_VERSION="$(printf '%s' "$DRIVE9_VERSION" | tr -c 'A-Za-z0-9_.-' '-')"
-          # Trace tag: drive9-<drive9-cli-version>-csi-<csisha7>.
-          TRACE_TAG="drive9-${SAFE_DRIVE9_VERSION}-csi-${GITHUB_SHA:0:7}"
-          echo "trace_tag=${TRACE_TAG}" >> "$GITHUB_OUTPUT"
-
-          # Build the full tag list.
-          FULL_IMAGE="${IMAGE:-ghcr.io/drive9-ai/drive9-csi}"
-          TAGS="${FULL_IMAGE}:${TRACE_TAG}"
-          # Multiline output for build-push-action's `tags:` input.
+          trace_tag="drive9-${DRIVE9_VERSION}-csi-${GITHUB_SHA:0:7}"
+          printf 'trace_tag=%s\n' "$trace_tag" >> "$GITHUB_OUTPUT"
           {
             echo 'tags<<EOF'
-            printf '%s\n' "$TAGS"
+            printf '%s:%s\n' "$IMAGE" "$trace_tag"
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
   build:
-    needs: metadata
+    needs:
+      - metadata
     strategy:
       fail-fast: false
       matrix:
@@ -102,6 +139,10 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
+          build-args: |
+            DRIVE9_CLI_VERSION=${{ needs.metadata.outputs.drive9_version }}
+            DRIVE9_CLI_LINUX_AMD64_SHA256=${{ needs.metadata.outputs.drive9_amd64_sha256 }}
+            DRIVE9_CLI_LINUX_ARM64_SHA256=${{ needs.metadata.outputs.drive9_arm64_sha256 }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.source=https://github.com/drive9-ai/k8s-csi
@@ -109,19 +150,19 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ needs.metadata.outputs.trace_tag }}
             ai.drive9.cli.version=${{ needs.metadata.outputs.drive9_version }}
+            ai.drive9.cli.source-commit=${{ needs.metadata.outputs.drive9_source_commit }}
 
       - name: Export digest
         shell: bash
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          set -euo pipefail
-          mkdir -p /tmp/digests
           digest="${DIGEST#sha256:}"
-          if [ -z "$digest" ]; then
+          if [[ -z "$digest" ]]; then
             echo "Build did not produce an image digest" >&2
             exit 1
           fi
+          mkdir -p /tmp/digests
           touch "/tmp/digests/${digest}"
 
       - name: Upload digest
@@ -137,6 +178,10 @@ jobs:
       - metadata
       - build
     runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.image.outputs.tag }}
+      digest: ${{ steps.image.outputs.digest }}
+      reference: ${{ steps.image.outputs.reference }}
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -160,27 +205,72 @@ jobs:
         env:
           TAGS: ${{ needs.metadata.outputs.tags }}
         run: |
-          set -euo pipefail
           tag_args=()
           while IFS= read -r tag; do
-            if [ -n "$tag" ]; then
+            if [[ -n "$tag" ]]; then
               tag_args+=("-t" "$tag")
             fi
           done <<< "$TAGS"
-          if [ "${#tag_args[@]}" -eq 0 ]; then
+          if ((${#tag_args[@]} == 0)); then
             echo "No image tags resolved" >&2
             exit 1
           fi
 
-          sources=()
-          while IFS= read -r -d '' digest_file; do
-            digest="$(basename "$digest_file")"
-            sources+=("${IMAGE}@sha256:${digest}")
-          done < <(find /tmp/digests -type f -print0 | sort -z)
-          if [ "${#sources[@]}" -eq 0 ]; then
+          shopt -s nullglob
+          digest_files=(/tmp/digests/*)
+          if ((${#digest_files[@]} == 0)); then
             echo "No image digests downloaded" >&2
             exit 1
           fi
+          sources=()
+          for digest_file in "${digest_files[@]}"; do
+            digest="${digest_file##*/}"
+            sources+=("${IMAGE}@sha256:${digest}")
+          done
 
-          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
-          docker buildx imagetools inspect "${IMAGE}:${{ needs.metadata.outputs.trace_tag }}"
+          if ! docker buildx imagetools create \
+            "${tag_args[@]}" "${sources[@]}"; then
+            echo "Could not create the multi-architecture image manifest" >&2
+            exit 1
+          fi
+          if ! docker buildx imagetools inspect \
+            "${IMAGE}:${{ needs.metadata.outputs.trace_tag }}"; then
+            echo "Could not inspect the published image manifest" >&2
+            exit 1
+          fi
+
+      - name: Output published validation image
+        id: image
+        shell: bash
+        env:
+          TRACE_TAG: ${{ needs.metadata.outputs.trace_tag }}
+          DRIVE9_VERSION: ${{ needs.metadata.outputs.drive9_version }}
+          DRIVE9_SOURCE_COMMIT: ${{ needs.metadata.outputs.drive9_source_commit }}
+        run: |
+          image_ref="${IMAGE}:${TRACE_TAG}"
+          manifest_file="${RUNNER_TEMP}/drive9-csi-manifest.json"
+          if ! docker buildx imagetools inspect "$image_ref" \
+            --format '{{json .}}' > "$manifest_file"; then
+            echo "Could not inspect the published image manifest" >&2
+            exit 1
+          fi
+          if ! image_digest=$(jq -er \
+            '.manifest.digest | select(test("^sha256:[0-9a-f]{64}$"))' \
+            "$manifest_file"); then
+            echo "Published image did not resolve to an immutable digest" >&2
+            exit 1
+          fi
+
+          printf 'tag=%s\n' "$TRACE_TAG" >> "$GITHUB_OUTPUT"
+          printf 'digest=%s\n' "$image_digest" >> "$GITHUB_OUTPUT"
+          printf 'reference=%s@%s\n' "$IMAGE" "$image_digest" >> "$GITHUB_OUTPUT"
+          {
+            printf '### Published validation image\n\n'
+            printf '> Validation only; this artifact is not release-admitted.\n\n'
+            printf -- '- Drive9 CLI version: `%s`\n' "$DRIVE9_VERSION"
+            printf -- '- Drive9 source commit: `%s`\n' "$DRIVE9_SOURCE_COMMIT"
+            printf -- '- CSI source commit: `%s`\n' "$GITHUB_SHA"
+            printf -- '- Tag: `%s`\n' "$image_ref"
+            printf -- '- Digest: `%s`\n' "$image_digest"
+            printf -- '- Immutable reference: `%s@%s`\n' "$IMAGE" "$image_digest"
+          } >> "$GITHUB_STEP_SUMMARY"
