@@ -106,12 +106,12 @@ func (d *Driver) recoverOneNodeMount(ctx context.Context, state mountState) {
 	}
 	var recoveryAttrs map[string]string
 	if state.Phase == mountStatePhaseStarting || state.Phase == mountStatePhaseActive {
-		attrs, mnmw, err := resolveRecoveryVolumeContextFromPV(ctx, d.k8s, d.cfg.DriverName, state.VolumeID)
+		attrs, _, err := resolveRecoveryVolumeContextFromPV(ctx, d.k8s, d.cfg.DriverName, state.VolumeID)
 		if err != nil {
 			log.Printf("drive9-csi: warning: cannot resolve recovery PV for %s: %v", state.VolumeID, err)
 			return
 		}
-		if err := d.validateRecoveryVolumeContext(state, attrs, mnmw); err != nil {
+		if err := d.validateRecoveryVolumeContext(state, attrs); err != nil {
 			log.Printf("drive9-csi: warning: unsafe recovery input for %s: %v", state.VolumeID, err)
 			return
 		}
@@ -250,7 +250,7 @@ func (d *Driver) recoverOneNodeMount(ctx context.Context, state mountState) {
 	}
 }
 
-func (d *Driver) validateRecoveryVolumeContext(state mountState, attrs map[string]string, mnmw bool) error {
+func (d *Driver) validateRecoveryVolumeContext(state mountState, attrs map[string]string) error {
 	contractAttrs := maps.Clone(attrs)
 	for _, key := range []string{paramAttrTTL, paramEntryTTL, paramDirTTL, paramPerfEnabled} {
 		delete(contractAttrs, key)
@@ -261,14 +261,6 @@ func (d *Driver) validateRecoveryVolumeContext(state mountState, attrs map[strin
 	}
 	if request.RemoteRoot != state.RemoteRoot {
 		return fmt.Errorf("PV remote root does not match durable state")
-	}
-	if mnmw {
-		if err := validateMNMWMountParameters(request.Profile, request.Durability); err != nil {
-			return err
-		}
-	}
-	if mnmw || mountStateMayUseMNMWContract(state) {
-		return validatePersistedMNMWMountArgs(state, request.Profile, request.Durability)
 	}
 	return nil
 }
@@ -297,13 +289,7 @@ func (d *Driver) drive9MountRequestFromAttributes(volumeID string, stagingTarget
 	if err != nil {
 		return drive9MountRequest{}, err
 	}
-	durability, err := effectiveMountDurability(attrs)
-	if err != nil {
-		return drive9MountRequest{}, err
-	}
-	if err := validateDurabilityTuning(durability, tuning); err != nil {
-		return drive9MountRequest{}, err
-	}
+	durability := durabilityFromParameters(attrs)
 	return drive9MountRequest{
 		VolumeID:      volumeID,
 		Server:        creds.Server,

@@ -13,7 +13,6 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -318,13 +317,6 @@ func (d *Driver) ValidateVolumeCapabilities(_ context.Context, req *csi.Validate
 			Message: err.Error(),
 		}, nil
 	}
-	if hasMNMW(caps) {
-		if err := validateMNMWVolumeContext(req.GetVolumeContext()); err != nil {
-			return &csi.ValidateVolumeCapabilitiesResponse{
-				Message: err.Error(),
-			}, nil
-		}
-	}
 	return &csi.ValidateVolumeCapabilitiesResponse{
 		Confirmed: &csi.ValidateVolumeCapabilitiesResponse_Confirmed{
 			VolumeCapabilities: caps,
@@ -393,19 +385,8 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	if err != nil {
 		return nil, err
 	}
-	durability, err := effectiveMountDurability(mountParams)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateDurabilityTuning(durability, tuning); err != nil {
-		return nil, err
-	}
+	durability := durabilityFromParameters(mountParams)
 	profile := profileFromParameters(mountParams)
-	if hasMNMW(req.GetVolumeCapabilities()) {
-		if err := validateMNMWMountParameters(profile, durability); err != nil {
-			return nil, err
-		}
-	}
 
 	remoteRoot, managedVolume, err := resolveCreateVolumeRemoteRoot(name, params, ref)
 	if err != nil {
@@ -667,38 +648,16 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	if _, err := effectiveMountPerf(req.GetVolumeContext()); err != nil {
 		return nil, err
 	}
-	tuning, err := effectiveMountTuning(req.GetVolumeContext())
-	if err != nil {
+	if _, err := effectiveMountTuning(req.GetVolumeContext()); err != nil {
 		return nil, err
 	}
 	profile := profileFromParameters(req.GetVolumeContext())
-	durability, err := effectiveMountDurability(req.GetVolumeContext())
-	if err != nil {
-		return nil, status.Error(codes.FailedPrecondition, status.Convert(err).Message())
-	}
-	if err := validateDurabilityTuning(durability, tuning); err != nil {
-		return nil, status.Error(codes.FailedPrecondition, status.Convert(err).Message())
-	}
-	mnmwRequested := hasMNMW([]*csi.VolumeCapability{req.GetVolumeCapability()})
-	if mnmwRequested {
-		if err := validateMNMWMountParameters(profile, durability); err != nil {
-			return nil, status.Error(codes.FailedPrecondition, status.Convert(err).Message())
-		}
-	}
 
 	repository := d.stateRepository()
 	state, stateErr := repository.Read(volumeID)
 	stateExists := stateErr == nil
 	if stateErr != nil && !errors.Is(stateErr, os.ErrNotExist) {
 		return nil, status.Errorf(codes.FailedPrecondition, "read durable mount state: %v", stateErr)
-	}
-	if stateExists && state.VolumeID == volumeID && state.RemoteRoot == remoteRoot &&
-		(state.Phase == mountStatePhaseActive || state.Phase == mountStatePhaseStarting) &&
-		(mnmwRequested || mountStateMayUseMNMWContract(state)) {
-		if err := validatePersistedMNMWMountArgs(state, profile, durability); err != nil {
-			return nil, status.Errorf(codes.FailedPrecondition,
-				"persisted MULTI_NODE_MULTI_WRITER mount contract: %v", err)
-		}
 	}
 	if stateExists && !mountStateMatches(state, volumeID, remoteRoot, stagingTarget) {
 		if err := d.reconcileStaleStageStateForMount(
@@ -1485,12 +1444,6 @@ func validateVolumeCapabilities(caps []*csi.VolumeCapability) error {
 			"MULTI_NODE_MULTI_WRITER cannot be combined with single-node writer capabilities")
 	}
 	return nil
-}
-
-func hasMNMW(caps []*csi.VolumeCapability) bool {
-	return slices.ContainsFunc(caps, func(cap *csi.VolumeCapability) bool {
-		return cap.GetAccessMode().GetMode() == csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER
-	})
 }
 
 func validateCapacityRange(r *csi.CapacityRange) error {

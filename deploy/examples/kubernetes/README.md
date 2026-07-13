@@ -30,13 +30,13 @@ The replicas may run on the same node or different nodes:
 ```text
 writer Deployment
   replica A (read-write) --\
-                           +--> one RWX PVC --> Drive9 remote-backed workspace
+                           +--> one RWX PVC --> Drive9 workspace
   replica B (read-write) --/
 ```
 
-The PVC uses Kubernetes `ReadWriteMany`. Its VolumeAttributesClass selects
-`profile=none`, so visible paths are remote-backed, and
-`durability=close-sync`, so a successful close waits for remote upload. The
+The PVC uses Kubernetes `ReadWriteMany` without a VolumeAttributesClass, so the
+CSI driver adds no RWX-specific `profile` or `durability` values. Any mount
+parameters configured by the user are forwarded to `drive9 mount`. The
 Deployment intentionally has no affinity or anti-affinity; a two-node cluster
 is not required to use the example.
 
@@ -48,16 +48,14 @@ is not required to use the example.
 | ---- | ---- | ---- |
 | Namespace | `drive9-shared-pvc-example` | Isolates all namespaced example resources |
 | StorageClass | `drive9-shared-pvc-example` | Dynamically provisions the PVC with `WaitForFirstConsumer` and retains the PV on cleanup |
-| VolumeAttributesClass | `drive9-shared-pvc-example` | Selects remote-backed `profile=none` and `durability=close-sync` |
 | Secret | `drive9-workspace-secret` | Holds the Drive9 server and API key in the workload namespace |
 | PersistentVolumeClaim | `drive9-workspace-shared` | Resolves the Secret through `drive9.ai/secret-name` and represents the shared workspace |
 | Deployment | `drive9-workspace-writer` | Runs two read-write replicas; each updates a file named after its Pod |
 
 <!-- markdownlint-enable MD013 -->
 
-The StorageClass and VolumeAttributesClass are cluster-scoped. Their example-
-specific names avoid changing the driver's default classes. The Secret, PVC,
-and Deployment are namespaced.
+The StorageClass is cluster-scoped. Its example-specific name avoids changing
+the driver's default classes. The Secret, PVC, and Deployment are namespaced.
 
 Credentials flow only through the PVC annotation and Secret:
 
@@ -76,9 +74,11 @@ attributes.
 Requirements:
 
 1. Select a compatible Drive9 CSI image and install the Driver first.
-2. Use a Kubernetes version with `VolumeAttributesClass` enabled.
-3. Replace `replace-with-drive9-api-key` in `shared-pvc.example.yaml` with a
+2. Replace `replace-with-drive9-api-key` in `shared-pvc.example.yaml` with a
    valid Drive9 API key.
+
+The shared-PVC example does not require `VolumeAttributesClass`; only the
+separate tuned examples use it.
 
 Driver installation and workload creation are separate operations. For local
 validation, first build and preload `ghcr.io/drive9-ai/drive9-csi:local` as
@@ -92,7 +92,7 @@ For production, copy that overlay pattern and replace `:local` with the
 published immutable image reference selected by your release process. Do not
 apply the fail-closed base directly.
 
-After replacing the placeholder API key, apply all six example resources with
+After replacing the placeholder API key, apply all five example resources with
 one command:
 
 ```sh
@@ -116,7 +116,8 @@ kubectl -n drive9-shared-pvc-example get pods \
   -o custom-columns=NAME:.metadata.name,NODE:.spec.nodeName
 ```
 
-List the files through either replica. Two Pod-named files should be present:
+List the files through either replica. What is visible follows the configured
+Drive9 mount arguments:
 
 ```sh
 kubectl -n drive9-shared-pvc-example exec \
@@ -124,11 +125,9 @@ kubectl -n drive9-shared-pvc-example exec \
   sh -c 'ls -1 /workspace/drive9-workspace-writer-*.txt'
 ```
 
-RWX support does not provide distributed file locks.
-It does not merge concurrent writes to the same file. Applications must avoid
-conflicting same-file writes or provide their own coordination. Cross-node
-visibility can also require bounded polling. This example demonstrates the
-mount contract, not strong POSIX or database-workload semantics.
+The CSI driver does not add a data-consistency policy for RWX. It forwards mount
+parameters and does not provide distributed locks, merge concurrent writes, or
+define cross-node visibility semantics.
 
 ## Cleanup
 

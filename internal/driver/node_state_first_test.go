@@ -40,19 +40,19 @@ func TestNodeStageStateFirstHealthySkipsDeniedSecretAndAPIs(t *testing.T) {
 	}
 }
 
-func TestNodeStageStateFirstHealthyMNMWRequiresCanonicalArgv(t *testing.T) {
+func TestNodeStageStateFirstHealthyMNMWSupportsConfiguredArgs(t *testing.T) {
 	fixture := newNodeStateFirstFixtureWithActive(t, true, func(state *mountState) {
 		state.MountArgs = append(
 			state.MountArgs[:len(state.MountArgs)-2],
-			"--profile", profileNone,
-			"--durability", durabilityCloseSync,
+			"--profile", "custom-profile",
+			"--durability", "custom-durability",
 			state.MountArgs[len(state.MountArgs)-2],
 			state.MountArgs[len(state.MountArgs)-1],
 		)
 	})
 	fixture.stageRequest.VolumeCapability = multiNodeMultiWriterMountCapability()
-	fixture.stageRequest.VolumeContext[paramProfile] = profileNone
-	fixture.stageRequest.VolumeContext[paramDurability] = durabilityCloseSync
+	fixture.stageRequest.VolumeContext[paramProfile] = "custom-profile"
+	fixture.stageRequest.VolumeContext[paramDurability] = "custom-durability"
 
 	if _, err := fixture.driver.NodeStageVolume(context.Background(), fixture.stageRequest); err != nil {
 		t.Fatalf("healthy MNMW NodeStageVolume(): %v", err)
@@ -62,147 +62,33 @@ func TestNodeStageStateFirstHealthyMNMWRequiresCanonicalArgv(t *testing.T) {
 	}
 }
 
-func TestNodeStageStateFirstRejectsMNMWArgvMismatchBeforeSideEffects(t *testing.T) {
+func TestNodeStageStateFirstHealthyIgnoresMNMWArgvMismatch(t *testing.T) {
 	fixture := newNodeStateFirstFixtureWithActive(t, true, func(state *mountState) {
 		state.MountArgs = append(
 			state.MountArgs[:len(state.MountArgs)-2],
-			"--profile", profileNone,
-			"--durability", durabilityWriteSync,
+			"--profile", "persisted-profile",
+			"--durability", "persisted-durability",
 			state.MountArgs[len(state.MountArgs)-2],
 			state.MountArgs[len(state.MountArgs)-1],
 		)
 	})
 	fixture.stageRequest.VolumeCapability = multiNodeMultiWriterMountCapability()
-	fixture.stageRequest.VolumeContext[paramProfile] = profileNone
-	fixture.stageRequest.VolumeContext[paramDurability] = durabilityCloseSync
+	fixture.stageRequest.VolumeContext[paramProfile] = "requested-profile"
+	fixture.stageRequest.VolumeContext[paramDurability] = "requested-durability"
 	before, err := fixture.driver.readMountState(fixture.active.VolumeID)
 	if err != nil {
 		t.Fatalf("read before: %v", err)
 	}
 
-	_, err = fixture.driver.NodeStageVolume(context.Background(), fixture.stageRequest)
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
+	if _, err := fixture.driver.NodeStageVolume(context.Background(), fixture.stageRequest); err != nil {
+		t.Fatalf("healthy MNMW NodeStageVolume(): %v", err)
 	}
 	if got := atomic.LoadInt32(&fixture.k8sActions); got != 0 {
-		t.Fatalf("MNMW mismatch made %d Kubernetes API calls", got)
-	}
-	if calls := fixture.runtime.Calls(); len(calls) != 0 {
-		t.Fatalf("MNMW mismatch touched host runtime: %#v", calls)
+		t.Fatalf("healthy MNMW stage made %d Kubernetes API calls", got)
 	}
 	after, readErr := fixture.driver.readMountState(fixture.active.VolumeID)
 	if readErr != nil || !reflectMountStatesEqual(before, after) {
-		t.Fatalf("MNMW mismatch changed state: before=%#v after=%#v err=%v", before, after, readErr)
-	}
-}
-
-func TestNodeStageStateFirstRejectsMNMWStateDowngradeBeforeSideEffects(t *testing.T) {
-	fixture := newNodeStateFirstFixtureWithActive(t, true, func(state *mountState) {
-		state.MountArgs = append(
-			state.MountArgs[:len(state.MountArgs)-2],
-			"--profile", profileNone,
-			"--durability", durabilityCloseSync,
-			state.MountArgs[len(state.MountArgs)-2],
-			state.MountArgs[len(state.MountArgs)-1],
-		)
-	})
-	before, err := fixture.driver.readMountState(fixture.active.VolumeID)
-	if err != nil {
-		t.Fatalf("read before: %v", err)
-	}
-
-	_, err = fixture.driver.NodeStageVolume(context.Background(), fixture.stageRequest)
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
-	}
-	if got := atomic.LoadInt32(&fixture.k8sActions); got != 0 {
-		t.Fatalf("MNMW downgrade made %d Kubernetes API calls", got)
-	}
-	if calls := fixture.runtime.Calls(); len(calls) != 0 {
-		t.Fatalf("MNMW downgrade touched host runtime: %#v", calls)
-	}
-	after, readErr := fixture.driver.readMountState(fixture.active.VolumeID)
-	if readErr != nil || !reflectMountStatesEqual(before, after) {
-		t.Fatalf("MNMW downgrade changed state: before=%#v after=%#v err=%v", before, after, readErr)
-	}
-}
-
-func TestNodeStageStateFirstRejectsStaleTargetMNMWDowngradeBeforeSideEffects(t *testing.T) {
-	fixture := newNodeStateFirstFixtureWithActive(t, false, func(state *mountState) {
-		state.MountArgs = append(
-			state.MountArgs[:len(state.MountArgs)-2],
-			"--profile", profileNone,
-			"--durability", durabilityCloseSync,
-			state.MountArgs[len(state.MountArgs)-2],
-			state.MountArgs[len(state.MountArgs)-1],
-		)
-	})
-	fixture.stageRequest.StagingTargetPath += "-replacement"
-	before, err := fixture.driver.readMountState(fixture.active.VolumeID)
-	if err != nil {
-		t.Fatalf("read before: %v", err)
-	}
-
-	_, err = fixture.driver.NodeStageVolume(context.Background(), fixture.stageRequest)
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
-	}
-	if got := atomic.LoadInt32(&fixture.k8sActions); got != 0 {
-		t.Fatalf("stale-target MNMW downgrade made %d Kubernetes API calls", got)
-	}
-	if calls := fixture.runtime.Calls(); len(calls) != 0 {
-		t.Fatalf("stale-target MNMW downgrade touched host runtime: %#v", calls)
-	}
-	after, readErr := fixture.driver.readMountState(fixture.active.VolumeID)
-	if readErr != nil || !reflectMountStatesEqual(before, after) {
-		t.Fatalf("stale-target MNMW downgrade changed state: before=%#v after=%#v err=%v", before, after, readErr)
-	}
-}
-
-func TestNodeStageStateFirstRejectsStartingMNMWMismatchBeforeReconcile(t *testing.T) {
-	fixture := newNodeStateFirstFixture(t, true)
-	starting := validStartingState(t)
-	starting.VolumeID = fixture.active.VolumeID
-	starting.RemoteRoot = fixture.active.RemoteRoot
-	starting.StagingTarget = fixture.active.StagingTarget
-	names, err := newVolumeHostNames(starting.VolumeID, starting.AttemptID)
-	if err != nil {
-		t.Fatalf("newVolumeHostNames(): %v", err)
-	}
-	starting.SystemdUnit = names.SystemdUnit
-	starting.EnvPath = names.EnvPath
-	starting.ArgsPath = names.ArgsPath
-	starting.MountArgs = append(
-		starting.MountArgs[:len(starting.MountArgs)-2],
-		"--profile", profileNone,
-		"--durability", durabilityWriteSync,
-		starting.MountArgs[len(starting.MountArgs)-2],
-		starting.MountArgs[len(starting.MountArgs)-1],
-	)
-	if err := os.Remove(fixture.driver.mountStatePath(starting.VolumeID)); err != nil {
-		t.Fatalf("remove active fixture state: %v", err)
-	}
-	store := newMountStateStore(fixture.driver.cfg.StateDir, newHostRuntime())
-	if err := store.Write(starting); err != nil {
-		t.Fatalf("write starting state: %v", err)
-	}
-	fixture.stageRequest.VolumeCapability = multiNodeMultiWriterMountCapability()
-	fixture.stageRequest.VolumeContext[paramProfile] = profileNone
-	fixture.stageRequest.VolumeContext[paramDurability] = durabilityCloseSync
-
-	_, err = fixture.driver.NodeStageVolume(context.Background(), fixture.stageRequest)
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
-	}
-	if got := atomic.LoadInt32(&fixture.k8sActions); got != 0 {
-		t.Fatalf("starting MNMW mismatch made %d Kubernetes API calls", got)
-	}
-	if calls := fixture.runtime.Calls(); len(calls) != 0 {
-		t.Fatalf("starting MNMW mismatch touched host runtime: %#v", calls)
-	}
-	after, readErr := store.Read(starting.VolumeID)
-	if readErr != nil || !reflectMountStatesEqual(starting, after) {
-		t.Fatalf("starting mismatch changed state: before=%#v after=%#v err=%v", starting, after, readErr)
+		t.Fatalf("healthy MNMW stage changed state: before=%#v after=%#v err=%v", before, after, readErr)
 	}
 }
 
