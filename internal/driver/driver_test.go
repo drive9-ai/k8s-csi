@@ -145,6 +145,34 @@ func TestValidateVolumeCapabilitiesAcceptsRWX(t *testing.T) {
 	}
 }
 
+func TestCreateAndValidateVolumeCapabilitiesRejectMixedMNMW(t *testing.T) {
+	caps := []*csi.VolumeCapability{
+		multiNodeMultiWriterMountCapability(),
+		singleNodeMountCapability(),
+	}
+	d := &Driver{}
+
+	_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "mixed-mnmw",
+		VolumeCapabilities: caps,
+	})
+	if status.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("CreateVolume status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+	}
+
+	resp, err := d.ValidateVolumeCapabilities(context.Background(), &csi.ValidateVolumeCapabilitiesRequest{
+		VolumeId:           "vol-1",
+		VolumeContext:      map[string]string{paramProfile: profileNone, paramDurability: durabilityCloseSync},
+		VolumeCapabilities: caps,
+	})
+	if err != nil {
+		t.Fatalf("ValidateVolumeCapabilities error = %v", err)
+	}
+	if resp.GetConfirmed() != nil || resp.GetMessage() == "" {
+		t.Fatalf("mixed MNMW response = %+v", resp)
+	}
+}
+
 func TestValidateVolumeCapabilitiesRejectsNilAndBlock(t *testing.T) {
 	if err := validateVolumeCapabilities([]*csi.VolumeCapability{nil}); err == nil {
 		t.Fatal("expected nil capability to be rejected")

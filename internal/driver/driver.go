@@ -692,6 +692,14 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	if stateErr != nil && !errors.Is(stateErr, os.ErrNotExist) {
 		return nil, status.Errorf(codes.FailedPrecondition, "read durable mount state: %v", stateErr)
 	}
+	if stateExists && state.VolumeID == volumeID && state.RemoteRoot == remoteRoot &&
+		(state.Phase == mountStatePhaseActive || state.Phase == mountStatePhaseStarting) &&
+		(mnmwRequested || mountStateMayUseMNMWContract(state)) {
+		if err := validatePersistedMNMWMountArgs(state, profile, durability); err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition,
+				"persisted MULTI_NODE_MULTI_WRITER mount contract: %v", err)
+		}
+	}
 	if stateExists && !mountStateMatches(state, volumeID, remoteRoot, stagingTarget) {
 		if err := d.reconcileStaleStageStateForMount(
 			ctx,
@@ -704,13 +712,6 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 			return nil, err
 		}
 		stateExists = false
-	}
-	if stateExists && (state.Phase == mountStatePhaseActive || state.Phase == mountStatePhaseStarting) &&
-		(mnmwRequested || mountStateMayUseMNMWContract(state)) {
-		if err := validatePersistedMNMWMountArgs(state, profile, durability); err != nil {
-			return nil, status.Errorf(codes.FailedPrecondition,
-				"persisted MULTI_NODE_MULTI_WRITER mount contract: %v", err)
-		}
 	}
 
 	activeNeedsRecovery := false
@@ -1451,6 +1452,8 @@ func validateVolumeCapabilities(caps []*csi.VolumeCapability) error {
 	if len(caps) == 0 {
 		return status.Error(codes.InvalidArgument, "volume capability is required")
 	}
+	hasMNMWMode := false
+	hasSingleNodeMode := false
 	for _, cap := range caps {
 		if cap == nil {
 			return status.Error(codes.InvalidArgument, "nil volume capability")
@@ -1469,11 +1472,17 @@ func validateVolumeCapabilities(caps []*csi.VolumeCapability) error {
 		switch mode {
 		case csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
 			csi.VolumeCapability_AccessMode_SINGLE_NODE_SINGLE_WRITER,
-			csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER,
-			csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER:
+			csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER:
+			hasSingleNodeMode = true
+		case csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER:
+			hasMNMWMode = true
 		default:
 			return status.Errorf(codes.InvalidArgument, "unsupported writer access mode %s", mode.String())
 		}
+	}
+	if hasMNMWMode && hasSingleNodeMode {
+		return status.Error(codes.InvalidArgument,
+			"MULTI_NODE_MULTI_WRITER cannot be combined with single-node writer capabilities")
 	}
 	return nil
 }

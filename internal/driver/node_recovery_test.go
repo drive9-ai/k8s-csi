@@ -469,6 +469,13 @@ func TestBootRecoveryRejectsUnprovedModeAndMNMWArgvWithoutMutation(t *testing.T)
 		{name: "mixed RWX and read only", objects: func(state mountState) []kruntime.Object {
 			return []kruntime.Object{recoveryPV(state, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany, corev1.ReadOnlyMany}, nil)}
 		}},
+		{name: "MNMW state downgrade to RWO", mutate: func(state *mountState) {
+			state.MountArgs = recoveryMountArgs(state.MountArgs, durabilityCloseSync)
+		}, objects: func(state mountState) []kruntime.Object {
+			return []kruntime.Object{recoveryPV(state, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, map[string]string{
+				paramProfile: "coding-agent",
+			})}
+		}},
 		{name: "MNMW primary mismatch", objects: func(state mountState) []kruntime.Object {
 			return []kruntime.Object{recoveryPV(state, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, map[string]string{
 				paramProfile: profileNone, paramDurability: durabilityCloseSync,

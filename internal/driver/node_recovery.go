@@ -266,6 +266,8 @@ func (d *Driver) validateRecoveryVolumeContext(state mountState, attrs map[strin
 		if err := validateMNMWMountParameters(request.Profile, request.Durability); err != nil {
 			return err
 		}
+	}
+	if mnmw || mountStateMayUseMNMWContract(state) {
 		return validatePersistedMNMWMountArgs(state, request.Profile, request.Durability)
 	}
 	return nil
