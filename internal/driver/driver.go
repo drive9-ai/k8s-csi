@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -317,6 +318,13 @@ func (d *Driver) ValidateVolumeCapabilities(_ context.Context, req *csi.Validate
 			Message: err.Error(),
 		}, nil
 	}
+	if hasMNMW(caps) {
+		if err := validateMNMWVolumeContext(req.GetVolumeContext()); err != nil {
+			return &csi.ValidateVolumeCapabilitiesResponse{
+				Message: err.Error(),
+			}, nil
+		}
+	}
 	return &csi.ValidateVolumeCapabilitiesResponse{
 		Confirmed: &csi.ValidateVolumeCapabilitiesResponse_Confirmed{
 			VolumeCapabilities: caps,
@@ -385,14 +393,26 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	if err != nil {
 		return nil, err
 	}
+	durability, err := effectiveMountDurability(mountParams)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateDurabilityTuning(durability, tuning); err != nil {
+		return nil, err
+	}
 	profile := profileFromParameters(mountParams)
+	if hasMNMW(req.GetVolumeCapabilities()) {
+		if err := validateMNMWMountParameters(profile, durability); err != nil {
+			return nil, err
+		}
+	}
 
 	remoteRoot, managedVolume, err := resolveCreateVolumeRemoteRoot(name, params, ref)
 	if err != nil {
 		return nil, err
 	}
 	if managedVolume {
-		return d.createManagedDirectoryVolume(ctx, req, creds, ref, name, remoteRoot, profile, ttls, perf, tuning)
+		return d.createManagedDirectoryVolume(ctx, req, creds, ref, name, remoteRoot, profile, durability, ttls, perf, tuning)
 	}
 
 	client := newDrive9Client(creds)
@@ -411,6 +431,7 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	ttls.addToVolumeContext(volumeContext)
 	perf.addToVolumeContext(volumeContext)
 	tuning.addToVolumeContext(volumeContext)
+	addDurabilityToVolumeContext(volumeContext, durability)
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
 			VolumeId:      volumeID,
@@ -420,7 +441,7 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	}, nil
 }
 
-func (d *Driver) createManagedDirectoryVolume(ctx context.Context, req *csi.CreateVolumeRequest, creds drive9Credentials, ref pvcSecretRef, name string, remoteRoot string, profile string, ttls mountTTLs, perf mountPerf, tuning mountTuning) (*csi.CreateVolumeResponse, error) {
+func (d *Driver) createManagedDirectoryVolume(ctx context.Context, req *csi.CreateVolumeRequest, creds drive9Credentials, ref pvcSecretRef, name string, remoteRoot string, profile string, durability string, ttls mountTTLs, perf mountPerf, tuning mountTuning) (*csi.CreateVolumeResponse, error) {
 	volumeID := volumeIDForRemoteRoot(remoteRoot)
 	marker := volumeMarker{
 		Version:    1,
@@ -483,6 +504,7 @@ func (d *Driver) createManagedDirectoryVolume(ctx context.Context, req *csi.Crea
 	ttls.addToVolumeContext(volumeContext)
 	perf.addToVolumeContext(volumeContext)
 	tuning.addToVolumeContext(volumeContext)
+	addDurabilityToVolumeContext(volumeContext, durability)
 	return &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
 			VolumeId:      volumeID,
@@ -639,17 +661,29 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 			return nil, status.Error(codes.FailedPrecondition, "volume id does not match volume context remoteRoot")
 		}
 	}
-	ttls, err := effectiveMountTTLs(req.GetVolumeContext())
-	if err != nil {
+	if _, err := effectiveMountTTLs(req.GetVolumeContext()); err != nil {
 		return nil, err
 	}
-	perf, err := effectiveMountPerf(req.GetVolumeContext())
-	if err != nil {
+	if _, err := effectiveMountPerf(req.GetVolumeContext()); err != nil {
 		return nil, err
 	}
 	tuning, err := effectiveMountTuning(req.GetVolumeContext())
 	if err != nil {
 		return nil, err
+	}
+	profile := profileFromParameters(req.GetVolumeContext())
+	durability, err := effectiveMountDurability(req.GetVolumeContext())
+	if err != nil {
+		return nil, status.Error(codes.FailedPrecondition, status.Convert(err).Message())
+	}
+	if err := validateDurabilityTuning(durability, tuning); err != nil {
+		return nil, status.Error(codes.FailedPrecondition, status.Convert(err).Message())
+	}
+	mnmwRequested := hasMNMW([]*csi.VolumeCapability{req.GetVolumeCapability()})
+	if mnmwRequested {
+		if err := validateMNMWMountParameters(profile, durability); err != nil {
+			return nil, status.Error(codes.FailedPrecondition, status.Convert(err).Message())
+		}
 	}
 
 	repository := d.stateRepository()
@@ -657,6 +691,14 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	stateExists := stateErr == nil
 	if stateErr != nil && !errors.Is(stateErr, os.ErrNotExist) {
 		return nil, status.Errorf(codes.FailedPrecondition, "read durable mount state: %v", stateErr)
+	}
+	if stateExists && state.VolumeID == volumeID && state.RemoteRoot == remoteRoot &&
+		(state.Phase == mountStatePhaseActive || state.Phase == mountStatePhaseStarting) &&
+		(mnmwRequested || mountStateMayUseMNMWContract(state)) {
+		if err := validatePersistedMNMWMountArgs(state, profile, durability); err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition,
+				"persisted MULTI_NODE_MULTI_WRITER mount contract: %v", err)
+		}
 	}
 	if stateExists && !mountStateMatches(state, volumeID, remoteRoot, stagingTarget) {
 		if err := d.reconcileStaleStageStateForMount(
@@ -753,6 +795,10 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	if err != nil {
 		return nil, err
 	}
+	mountRequest, err := d.drive9MountRequestFromAttributes(volumeID, stagingTarget, req.GetVolumeContext(), creds)
+	if err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "build mount request: %v", err)
+	}
 	remoteValidated := false
 	if activeNeedsRecovery {
 		pvAttributes, err := resolveVolumeContextFromPV(ctx, d.k8s, d.cfg.DriverName, volumeID)
@@ -771,19 +817,6 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		} else if err := d.validateRemoteVolumeMarker(ctx, client, volumeID, remoteRoot); err != nil {
 			return nil, err
 		}
-		recoveryRequest := drive9MountRequest{
-			VolumeID:      volumeID,
-			Server:        creds.Server,
-			APIKey:        creds.APIKey,
-			RemoteRoot:    remoteRoot,
-			StagingTarget: stagingTarget,
-			Profile:       strings.TrimSpace(req.GetVolumeContext()["profile"]),
-			AttrTTL:       ttls.AttrTTL,
-			EntryTTL:      ttls.EntryTTL,
-			DirTTL:        ttls.DirTTL,
-			PerfDir:       d.mountPerfDir(volumeID, perf),
-			Tuning:        tuning,
-		}
 		desiredBinary, err := validateDesiredDrive9Content(d.hostRuntime())
 		if err != nil {
 			return nil, status.Errorf(codes.FailedPrecondition, "snapshot desired Drive9 binary: %v", err)
@@ -793,7 +826,7 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 			ctx:         ctx,
 			repository:  repository,
 			credentials: mountLaunchCredentials{Server: creds.Server, APIKey: creds.APIKey},
-			desiredArgs: d.drive9MountArgs(recoveryRequest, d.mountCacheDir(volumeID)),
+			desiredArgs: d.drive9MountArgs(mountRequest, d.mountCacheDir(volumeID)),
 		}
 		result, recoveryErr := coordinateActiveRecovery(state, desiredBinary, activeObservation, executor)
 		if recoveryErr != nil {
@@ -853,20 +886,6 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	}
 	if err := os.MkdirAll(stagingTarget, 0o755); err != nil {
 		return nil, status.Errorf(codes.Internal, "create staging target: %v", err)
-	}
-	profile := strings.TrimSpace(req.GetVolumeContext()["profile"])
-	mountRequest := drive9MountRequest{
-		VolumeID:      volumeID,
-		Server:        creds.Server,
-		APIKey:        creds.APIKey,
-		RemoteRoot:    remoteRoot,
-		StagingTarget: stagingTarget,
-		Profile:       profile,
-		AttrTTL:       ttls.AttrTTL,
-		EntryTTL:      ttls.EntryTTL,
-		DirTTL:        ttls.DirTTL,
-		PerfDir:       d.mountPerfDir(volumeID, perf),
-		Tuning:        tuning,
 	}
 	for _, directory := range []string{
 		d.mountCacheDir(volumeID),
@@ -1433,6 +1452,8 @@ func validateVolumeCapabilities(caps []*csi.VolumeCapability) error {
 	if len(caps) == 0 {
 		return status.Error(codes.InvalidArgument, "volume capability is required")
 	}
+	hasMNMWMode := false
+	hasSingleNodeMode := false
 	for _, cap := range caps {
 		if cap == nil {
 			return status.Error(codes.InvalidArgument, "nil volume capability")
@@ -1452,11 +1473,24 @@ func validateVolumeCapabilities(caps []*csi.VolumeCapability) error {
 		case csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
 			csi.VolumeCapability_AccessMode_SINGLE_NODE_SINGLE_WRITER,
 			csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER:
+			hasSingleNodeMode = true
+		case csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER:
+			hasMNMWMode = true
 		default:
-			return status.Errorf(codes.InvalidArgument, "only single-node writer access is supported, got %s", mode.String())
+			return status.Errorf(codes.InvalidArgument, "unsupported writer access mode %s", mode.String())
 		}
 	}
+	if hasMNMWMode && hasSingleNodeMode {
+		return status.Error(codes.InvalidArgument,
+			"MULTI_NODE_MULTI_WRITER cannot be combined with single-node writer capabilities")
+	}
 	return nil
+}
+
+func hasMNMW(caps []*csi.VolumeCapability) bool {
+	return slices.ContainsFunc(caps, func(cap *csi.VolumeCapability) bool {
+		return cap.GetAccessMode().GetMode() == csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER
+	})
 }
 
 func validateCapacityRange(r *csi.CapacityRange) error {
@@ -1689,14 +1723,15 @@ func checkMultiTargetAccess(active []publishState, requestedMode csi.VolumeCapab
 	if len(active) == 0 {
 		return nil
 	}
-	if requestedMode != csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER {
+	if requestedMode != csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER &&
+		requestedMode != csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER {
 		return status.Error(codes.FailedPrecondition,
-			"volume already published; SINGLE_NODE_MULTI_WRITER access mode required for multi-target")
+			"volume already published; a multi-writer access mode is required for multi-target")
 	}
 	for _, a := range active {
-		if a.AccessMode != csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER.String() {
+		if a.AccessMode != requestedMode.String() {
 			return status.Error(codes.FailedPrecondition,
-				"volume already published with incompatible access mode; all targets must use SINGLE_NODE_MULTI_WRITER")
+				"volume already published with incompatible access mode; all targets must use the same multi-writer mode")
 		}
 	}
 	return nil

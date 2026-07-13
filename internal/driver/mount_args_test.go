@@ -64,6 +64,36 @@ func TestDrive9MountArgsDefaultsMountTTLs(t *testing.T) {
 	assertStringSlice(t, got, want)
 }
 
+func TestDrive9MountArgsIncludesDurability(t *testing.T) {
+	d := &Driver{cfg: Config{StateDir: t.TempDir()}}
+	cacheDir := filepath.Join(d.cfg.StateDir, "cache", "vol")
+
+	got := d.drive9MountArgs(drive9MountRequest{
+		VolumeID:      "vol",
+		RemoteRoot:    "/",
+		StagingTarget: "/stage",
+		Profile:       "none",
+		Durability:    durabilityCloseSync,
+	}, cacheDir)
+
+	want := []string{
+		"mount",
+		"--foreground",
+		"--mode=fuse",
+		"--direct-mount-strict",
+		"--allow-other",
+		"--cache-dir", cacheDir,
+		"--attr-ttl", "30s",
+		"--entry-ttl", "30s",
+		"--dir-ttl", "30s",
+		"--profile", "none",
+		"--durability", durabilityCloseSync,
+		":/",
+		"/stage",
+	}
+	assertStringSlice(t, got, want)
+}
+
 func TestDrive9MountArgsIncludesPerfDir(t *testing.T) {
 	stateDir := t.TempDir()
 	d := &Driver{cfg: Config{StateDir: stateDir}}

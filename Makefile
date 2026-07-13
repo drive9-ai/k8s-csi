@@ -6,7 +6,8 @@ GOARCH ?= amd64
 PLATFORM ?= $(GOOS)/$(GOARCH)
 PLATFORMS ?= linux/amd64,linux/arm64
 E2E_PREPARE := e2e/prepare.sh
-E2E_CASES := e2e/basic-lifecycle.sh e2e/mount-survival.sh
+E2E_CASES := e2e/basic-lifecycle.sh e2e/mount-survival.sh \
+	e2e/multi-node-rwx.sh
 E2E_SCRIPTS := $(E2E_PREPARE) $(E2E_CASES)
 
 .PHONY: fmt-check
@@ -62,6 +63,7 @@ e2e-check:
 	bash -n e2e/prepare.sh
 	bash -n e2e/basic-lifecycle.sh
 	bash -n e2e/mount-survival.sh
+	bash -n e2e/multi-node-rwx.sh
 	bash -n e2e/lib/common.sh
 	bash -n e2e/lib/manifests.sh
 	hack/check-e2e-common.sh
@@ -153,6 +155,24 @@ e2e-check:
 	@rg -Fq '/tmp/drive9-survival-stopped' e2e/mount-survival.sh
 	@if rg -n 'drive9-survival-pid|kill -9' e2e/mount-survival.sh; then \
 		echo "mount-survival I/O loop must stop cooperatively" >&2; \
+		exit 1; \
+	fi
+	@rg -Fq 'ReadWriteMany' e2e/lib/manifests.sh
+	@rg -Fq 'durability: |-' e2e/lib/manifests.sh
+	@rg -Fq 'requiredDuringSchedulingIgnoredDuringExecution' \
+		e2e/lib/manifests.sh
+	@rg -Fq 'kubernetes.io/hostname' e2e/lib/manifests.sh
+	@rg -Fq 'for attempt in {1..60}' e2e/multi-node-rwx.sh
+	@rg -Fq 'DRIVE9_PROFILE="none"' e2e/multi-node-rwx.sh
+	@rg -Fq 'case_durability="close-sync"' e2e/multi-node-rwx.sh
+	@rg -Fq 'e2e_render_case_manifests "$$case_durability"' \
+		e2e/multi-node-rwx.sh
+	@rg -Fq 'Pods were scheduled on the same node' e2e/multi-node-rwx.sh
+	@rg -Fq 'read after Pod A deletion' e2e/multi-node-rwx.sh
+	@rg -Fq 'write after Pod A deletion' e2e/multi-node-rwx.sh
+	@rg -Fq 'e2e/multi-node-rwx.sh' e2e/README.md e2e/AGENTS.md
+	@if rg -Fq 'multi-node-rwx.sh' .codex/rules/e2e.rules; then \
+		echo "multi-node RWX must not gain an automatic execution rule" >&2; \
 		exit 1; \
 	fi
 	@test ! -e hack/e2e-k8s.sh

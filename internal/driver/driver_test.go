@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -134,17 +136,40 @@ func TestNormalizeRemotePathRejectsTraversal(t *testing.T) {
 	}
 }
 
-func TestValidateVolumeCapabilitiesRejectsRWX(t *testing.T) {
+func TestValidateVolumeCapabilitiesAcceptsRWX(t *testing.T) {
 	err := validateVolumeCapabilities([]*csi.VolumeCapability{
-		{
-			AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
-			AccessMode: &csi.VolumeCapability_AccessMode{
-				Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
-			},
-		},
+		multiNodeMultiWriterMountCapability(),
 	})
-	if err == nil {
-		t.Fatal("expected RWX capability to be rejected")
+	if err != nil {
+		t.Fatalf("expected RWX capability to be accepted, got %v", err)
+	}
+}
+
+func TestCreateAndValidateVolumeCapabilitiesRejectMixedMNMW(t *testing.T) {
+	caps := []*csi.VolumeCapability{
+		multiNodeMultiWriterMountCapability(),
+		singleNodeMountCapability(),
+	}
+	d := &Driver{}
+
+	_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name:               "mixed-mnmw",
+		VolumeCapabilities: caps,
+	})
+	if status.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("CreateVolume status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+	}
+
+	resp, err := d.ValidateVolumeCapabilities(context.Background(), &csi.ValidateVolumeCapabilitiesRequest{
+		VolumeId:           "vol-1",
+		VolumeContext:      map[string]string{paramProfile: profileNone, paramDurability: durabilityCloseSync},
+		VolumeCapabilities: caps,
+	})
+	if err != nil {
+		t.Fatalf("ValidateVolumeCapabilities error = %v", err)
+	}
+	if resp.GetConfirmed() != nil || resp.GetMessage() == "" {
+		t.Fatalf("mixed MNMW response = %+v", resp)
 	}
 }
 
@@ -256,10 +281,10 @@ func TestNodeStageVolumeRejectsUnsupportedCapabilities(t *testing.T) {
 				Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
 			},
 		}},
-		{name: "rwx", cap: &csi.VolumeCapability{
+		{name: "reader-only", cap: &csi.VolumeCapability{
 			AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
 			AccessMode: &csi.VolumeCapability_AccessMode{
-				Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
+				Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY,
 			},
 		}},
 	}
@@ -304,6 +329,79 @@ func TestNodeStageVolumeRejectsMismatchedVolumeID(t *testing.T) {
 	})
 	if status.Code(err).String() != "FailedPrecondition" {
 		t.Fatalf("NodeStageVolume status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
+	}
+}
+
+func TestNodeStageVolumeRejectsUnsafeDurabilityBeforeSideEffects(t *testing.T) {
+	remoteRoot := "/k8s/pvc/rwx-stage"
+	volumeID := volumeIDForRemoteRoot(remoteRoot)
+	tests := []struct {
+		name       string
+		capability *csi.VolumeCapability
+		context    map[string]string
+		wantParam  string
+	}{
+		{
+			name:       "MNMW wrong profile",
+			capability: multiNodeMultiWriterMountCapability(),
+			context: map[string]string{
+				paramProfile:    "coding-agent",
+				paramDurability: durabilityCloseSync,
+			},
+			wantParam: paramProfile,
+		},
+		{
+			name:       "MNMW missing durability",
+			capability: multiNodeMultiWriterMountCapability(),
+			context:    map[string]string{paramProfile: profileNone},
+			wantParam:  paramDurability,
+		},
+		{
+			name:       "RWO invalid durability",
+			capability: singleNodeMountCapability(),
+			context:    map[string]string{paramDurability: "auto"},
+			wantParam:  paramDurability,
+		},
+		{
+			name:       "RWO durability writeback conflict",
+			capability: singleNodeMountCapability(),
+			context: map[string]string{
+				paramDurability:           durabilityWriteSync,
+				paramWritebackBatchWindow: "20ms",
+			},
+			wantParam: paramWritebackBatchWindow,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			k8s := k8sfake.NewSimpleClientset()
+			d := &Driver{
+				cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"},
+				k8s: k8s,
+			}
+			volumeContext := map[string]string{"remoteRoot": remoteRoot}
+			for key, value := range tt.context {
+				volumeContext[key] = value
+			}
+			_, err := d.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+				VolumeId:          volumeID,
+				StagingTargetPath: t.TempDir(),
+				VolumeCapability:  tt.capability,
+				VolumeContext:     volumeContext,
+			})
+			if status.Code(err) != codes.FailedPrecondition {
+				t.Fatalf("status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
+			}
+			if !strings.Contains(err.Error(), tt.wantParam) {
+				t.Fatalf("error %q does not name %s", err, tt.wantParam)
+			}
+			if actions := k8s.Actions(); len(actions) != 0 {
+				t.Fatalf("invalid stage made Kubernetes calls: %#v", actions)
+			}
+			if _, readErr := d.stateRepository().Read(volumeID); !errors.Is(readErr, os.ErrNotExist) {
+				t.Fatalf("invalid stage changed durable state: %v", readErr)
+			}
+		})
 	}
 }
 
@@ -823,6 +921,129 @@ func TestCreateVolumeStoresConfiguredMountTuning(t *testing.T) {
 		ReaddirPrefetchMaxBytes:     "4194304",
 		WritebackBatchWindow:        "20ms",
 	})
+}
+
+func TestCreateVolumeAcceptsMNMWDurabilityForBothVolumeModes(t *testing.T) {
+	for _, managed := range []bool{false, true} {
+		for _, durability := range []string{durabilityCloseSync, durabilityWriteSync} {
+			name := fmt.Sprintf("managed=%t/%s", managed, durability)
+			t.Run(name, func(t *testing.T) {
+				fd := newFakeDrive9(t)
+				defer fd.close()
+
+				pvcName := "pvc-rwx"
+				k8s := k8sfake.NewSimpleClientset(
+					fd.k8sPVC(pvcName, "default", "drive9-secret"),
+					fd.k8sSecret("drive9-secret", "default"),
+				)
+				d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+				extra := map[string]string{
+					paramProfile:    " none ",
+					paramDurability: " " + durability + " ",
+				}
+				if managed {
+					extra["remoteRootPrefix"] = "/k8s/pvc"
+				}
+
+				resp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+					Name:               pvcName,
+					Parameters:         pvcParams(pvcName, "default", extra),
+					VolumeCapabilities: []*csi.VolumeCapability{multiNodeMultiWriterMountCapability()},
+				})
+				if err != nil {
+					t.Fatalf("CreateVolume error = %v", err)
+				}
+				ctx := resp.GetVolume().GetVolumeContext()
+				if ctx[paramProfile] != "none" || ctx[paramDurability] != durability {
+					t.Fatalf("VolumeContext profile/durability = %q/%q", ctx[paramProfile], ctx[paramDurability])
+				}
+				for _, key := range []string{"apiKey", "server"} {
+					if _, ok := ctx[key]; ok {
+						t.Fatalf("VolumeContext contains %s", key)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestCreateVolumeRejectsUnsafeMNMWBeforeRemoteMutation(t *testing.T) {
+	tests := []struct {
+		name  string
+		extra map[string]string
+	}{
+		{name: "missing profile", extra: map[string]string{paramDurability: durabilityCloseSync}},
+		{name: "wrong profile", extra: map[string]string{paramProfile: "coding-agent", paramDurability: durabilityCloseSync}},
+		{name: "missing durability", extra: map[string]string{paramProfile: "none"}},
+		{name: "invalid durability", extra: map[string]string{paramProfile: "none", paramDurability: "auto"}},
+		{name: "writeback conflict", extra: map[string]string{
+			paramProfile:              "none",
+			paramDurability:           durabilityCloseSync,
+			paramWritebackBatchWindow: "20ms",
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fd := newFakeDrive9(t)
+			defer fd.close()
+
+			pvcName := "pvc-rwx-invalid"
+			k8s := k8sfake.NewSimpleClientset(
+				fd.k8sPVC(pvcName, "default", "drive9-secret"),
+				fd.k8sSecret("drive9-secret", "default"),
+			)
+			d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+			tt.extra["remoteRootPrefix"] = "/k8s/pvc"
+			_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+				Name:               pvcName,
+				Parameters:         pvcParams(pvcName, "default", tt.extra),
+				VolumeCapabilities: []*csi.VolumeCapability{multiNodeMultiWriterMountCapability()},
+			})
+			if status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+			}
+			if fd.exists("/k8s") {
+				t.Fatal("invalid configuration mutated Drive9 before rejection")
+			}
+		})
+	}
+}
+
+func TestCreateVolumeRWOOptionalDurability(t *testing.T) {
+	for _, durability := range []string{"", durabilityCloseSync, durabilityWriteSync} {
+		t.Run(durability, func(t *testing.T) {
+			fd := newFakeDrive9(t)
+			defer fd.close()
+
+			pvcName := "pvc-rwo-durability"
+			k8s := k8sfake.NewSimpleClientset(
+				fd.k8sPVC(pvcName, "default", "drive9-secret"),
+				fd.k8sSecret("drive9-secret", "default"),
+			)
+			d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+			extra := map[string]string{}
+			if durability != "" {
+				extra[paramDurability] = " " + durability + " "
+			}
+			resp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+				Name:               pvcName,
+				Parameters:         pvcParams(pvcName, "default", extra),
+				VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+			})
+			if err != nil {
+				t.Fatalf("CreateVolume error = %v", err)
+			}
+			ctx := resp.GetVolume().GetVolumeContext()
+			if got := ctx[paramDurability]; got != durability {
+				t.Fatalf("VolumeContext durability = %q, want %q", got, durability)
+			}
+			if durability == "" {
+				if _, ok := ctx[paramDurability]; ok {
+					t.Fatal("absent RWO durability was persisted")
+				}
+			}
+		})
+	}
 }
 
 func TestCreateVolumeStoresMutableMountParameters(t *testing.T) {
@@ -1972,39 +2193,23 @@ func jsonMarshal(v any) ([]byte, error) {
 
 // --- Multi-Pod Same PVC Tests ---
 
-func TestControllerGetCapabilitiesIncludesMultiWriter(t *testing.T) {
+func TestControllerGetCapabilitiesExactSet(t *testing.T) {
 	d := &Driver{}
 	resp, err := d.ControllerGetCapabilities(context.Background(), &csi.ControllerGetCapabilitiesRequest{})
 	if err != nil {
 		t.Fatalf("ControllerGetCapabilities error = %v", err)
 	}
-	found := false
+	got := make([]csi.ControllerServiceCapability_RPC_Type, 0, len(resp.GetCapabilities()))
 	for _, cap := range resp.GetCapabilities() {
-		if cap.GetRpc().GetType() == csi.ControllerServiceCapability_RPC_SINGLE_NODE_MULTI_WRITER {
-			found = true
-			break
-		}
+		got = append(got, cap.GetRpc().GetType())
 	}
-	if !found {
-		t.Fatal("ControllerGetCapabilities must include SINGLE_NODE_MULTI_WRITER")
+	want := []csi.ControllerServiceCapability_RPC_Type{
+		csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
+		csi.ControllerServiceCapability_RPC_SINGLE_NODE_MULTI_WRITER,
+		csi.ControllerServiceCapability_RPC_MODIFY_VOLUME,
 	}
-}
-
-func TestControllerGetCapabilitiesIncludesModifyVolume(t *testing.T) {
-	d := &Driver{}
-	resp, err := d.ControllerGetCapabilities(context.Background(), &csi.ControllerGetCapabilitiesRequest{})
-	if err != nil {
-		t.Fatalf("ControllerGetCapabilities error = %v", err)
-	}
-	found := false
-	for _, cap := range resp.GetCapabilities() {
-		if cap.GetRpc().GetType() == csi.ControllerServiceCapability_RPC_MODIFY_VOLUME {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatal("ControllerGetCapabilities must include MODIFY_VOLUME")
+	if !slices.Equal(got, want) {
+		t.Fatalf("Controller capabilities = %v, want %v", got, want)
 	}
 }
 
@@ -2021,6 +2226,32 @@ func TestControllerModifyVolumeRejectsDynamicUpdates(t *testing.T) {
 	}
 }
 
+func TestControllerModifyVolumeAcceptsDurabilityButRemainsUnimplemented(t *testing.T) {
+	d := &Driver{}
+	_, err := d.ControllerModifyVolume(context.Background(), &csi.ControllerModifyVolumeRequest{
+		VolumeId: "drive9-root-demo",
+		MutableParameters: map[string]string{
+			paramDurability: durabilityCloseSync,
+		},
+	})
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("ControllerModifyVolume status = %s, want Unimplemented (err=%v)", status.Code(err), err)
+	}
+}
+
+func TestControllerModifyVolumeRejectsInvalidDurability(t *testing.T) {
+	d := &Driver{}
+	_, err := d.ControllerModifyVolume(context.Background(), &csi.ControllerModifyVolumeRequest{
+		VolumeId: "drive9-root-demo",
+		MutableParameters: map[string]string{
+			paramDurability: "auto",
+		},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("ControllerModifyVolume status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+	}
+}
+
 func TestControllerModifyVolumeRejectsUnsupportedMutableParameters(t *testing.T) {
 	d := &Driver{}
 	_, err := d.ControllerModifyVolume(context.Background(), &csi.ControllerModifyVolumeRequest{
@@ -2034,21 +2265,22 @@ func TestControllerModifyVolumeRejectsUnsupportedMutableParameters(t *testing.T)
 	}
 }
 
-func TestNodeGetCapabilitiesIncludesMultiWriter(t *testing.T) {
+func TestNodeGetCapabilitiesExactSet(t *testing.T) {
 	d := &Driver{}
 	resp, err := d.NodeGetCapabilities(context.Background(), &csi.NodeGetCapabilitiesRequest{})
 	if err != nil {
 		t.Fatalf("NodeGetCapabilities error = %v", err)
 	}
-	found := false
+	got := make([]csi.NodeServiceCapability_RPC_Type, 0, len(resp.GetCapabilities()))
 	for _, cap := range resp.GetCapabilities() {
-		if cap.GetRpc().GetType() == csi.NodeServiceCapability_RPC_SINGLE_NODE_MULTI_WRITER {
-			found = true
-			break
-		}
+		got = append(got, cap.GetRpc().GetType())
 	}
-	if !found {
-		t.Fatal("NodeGetCapabilities must include SINGLE_NODE_MULTI_WRITER")
+	want := []csi.NodeServiceCapability_RPC_Type{
+		csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME,
+		csi.NodeServiceCapability_RPC_SINGLE_NODE_MULTI_WRITER,
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Node capabilities = %v, want %v", got, want)
 	}
 }
 
@@ -2069,26 +2301,52 @@ func TestValidateVolumeCapabilitiesRPC(t *testing.T) {
 		t.Fatal("expected confirmed for SINGLE_NODE_MULTI_WRITER capability")
 	}
 
-	// Unsupported capability — should not confirm.
+	// MULTI_NODE_MULTI_WRITER is confirmed without adding an RPC capability.
 	resp, err = d.ValidateVolumeCapabilities(context.Background(), &csi.ValidateVolumeCapabilitiesRequest{
 		VolumeId: "vol-1",
-		VolumeCapabilities: []*csi.VolumeCapability{
-			{
-				AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
-				AccessMode: &csi.VolumeCapability_AccessMode{
-					Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
-				},
-			},
+		VolumeContext: map[string]string{
+			paramProfile:    profileNone,
+			paramDurability: durabilityCloseSync,
 		},
+		VolumeCapabilities: []*csi.VolumeCapability{multiNodeMultiWriterMountCapability()},
 	})
 	if err != nil {
 		t.Fatalf("ValidateVolumeCapabilities error = %v", err)
 	}
-	if resp.GetConfirmed() != nil {
-		t.Fatal("MULTI_NODE_MULTI_WRITER should not be confirmed")
+	if resp.GetConfirmed() == nil {
+		t.Fatal("MULTI_NODE_MULTI_WRITER should be confirmed")
 	}
-	if resp.GetMessage() == "" {
-		t.Fatal("expected message for unsupported capability")
+
+	// MULTI_NODE_MULTI_WRITER with a default RWO context must not be confirmed.
+	resp, err = d.ValidateVolumeCapabilities(context.Background(), &csi.ValidateVolumeCapabilitiesRequest{
+		VolumeId: "vol-1",
+		VolumeContext: map[string]string{
+			paramProfile: "coding-agent",
+		},
+		VolumeCapabilities: []*csi.VolumeCapability{multiNodeMultiWriterMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("ValidateVolumeCapabilities error = %v", err)
+	}
+	if resp.GetConfirmed() != nil || resp.GetMessage() == "" {
+		t.Fatalf("unsafe MULTI_NODE_MULTI_WRITER response = %+v", resp)
+	}
+
+	// Unsupported read-only capability — should not confirm.
+	resp, err = d.ValidateVolumeCapabilities(context.Background(), &csi.ValidateVolumeCapabilitiesRequest{
+		VolumeId: "vol-1",
+		VolumeCapabilities: []*csi.VolumeCapability{{
+			AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
+			AccessMode: &csi.VolumeCapability_AccessMode{
+				Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY,
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ValidateVolumeCapabilities error = %v", err)
+	}
+	if resp.GetConfirmed() != nil || resp.GetMessage() == "" {
+		t.Fatalf("unsupported capability response = %+v", resp)
 	}
 
 	// Missing volume ID.
@@ -2297,6 +2555,48 @@ func TestCheckMultiTargetAccessMultiWriterAllowsSecondTarget(t *testing.T) {
 	err := checkMultiTargetAccess(active, csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER)
 	if err != nil {
 		t.Fatalf("expected multi-writer to allow second target, got %v", err)
+	}
+}
+
+func TestCheckMultiTargetAccessMNMWAllowsSecondTarget(t *testing.T) {
+	active := []publishState{{
+		VolumeID:   "vol-1",
+		AccessMode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER.String(),
+		Status:     publishStatusPublished,
+	}}
+	err := checkMultiTargetAccess(active, csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER)
+	if err != nil {
+		t.Fatalf("expected MNMW to allow second target, got %v", err)
+	}
+}
+
+func TestCheckMultiTargetAccessMultiWriterModesRejectMixing(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		active    csi.VolumeCapability_AccessMode_Mode
+		requested csi.VolumeCapability_AccessMode_Mode
+	}{
+		{
+			name:      "SNMW then MNMW",
+			active:    csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER,
+			requested: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
+		},
+		{
+			name:      "MNMW then SNMW",
+			active:    csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
+			requested: csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkMultiTargetAccess([]publishState{{
+				VolumeID:   "vol-1",
+				AccessMode: tc.active.String(),
+				Status:     publishStatusPublished,
+			}}, tc.requested)
+			if status.Code(err) != codes.FailedPrecondition {
+				t.Fatalf("status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
+			}
+		})
 	}
 }
 
@@ -2552,6 +2852,15 @@ func multiWriterMountCapability() *csi.VolumeCapability {
 		AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
 		AccessMode: &csi.VolumeCapability_AccessMode{
 			Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_MULTI_WRITER,
+		},
+	}
+}
+
+func multiNodeMultiWriterMountCapability() *csi.VolumeCapability {
+	return &csi.VolumeCapability{
+		AccessType: &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{}},
+		AccessMode: &csi.VolumeCapability_AccessMode{
+			Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
 		},
 	}
 }

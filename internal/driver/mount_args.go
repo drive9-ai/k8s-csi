@@ -11,6 +11,7 @@ type drive9MountRequest struct {
 	RemoteRoot    string
 	StagingTarget string
 	Profile       string
+	Durability    string
 	AttrTTL       string
 	EntryTTL      string
 	DirTTL        string
@@ -41,6 +42,9 @@ func (d *Driver) drive9MountArgs(req drive9MountRequest, cacheDir string) []stri
 		if req.Profile == "coding-agent" {
 			args = append(args, "--local-root", d.drive9LocalRoot(req.VolumeID))
 		}
+	}
+	if req.Durability != "" {
+		args = append(args, "--durability", req.Durability)
 	}
 	if req.PerfDir != "" {
 		args = append(args, "--perf-dir", req.PerfDir)

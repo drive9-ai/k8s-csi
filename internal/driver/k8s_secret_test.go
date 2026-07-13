@@ -2,11 +2,14 @@ package driver
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -185,5 +188,112 @@ func TestValidateNoAPIKeyInAttributes(t *testing.T) {
 		if err := validateNoAPIKeyInAttributes(map[string]string{key: "leak"}); err == nil {
 			t.Fatalf("expected error for credential key %q in attributes", key)
 		}
+	}
+}
+
+func TestResolveRecoveryPV(t *testing.T) {
+	const (
+		driverName = "csi.drive9.ai"
+		volumeID   = "drive9-volume"
+	)
+	newPV := func(name string, driver string, handle string, modes ...corev1.PersistentVolumeAccessMode) *corev1.PersistentVolume {
+		return &corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: corev1.PersistentVolumeSpec{
+				AccessModes: modes,
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					CSI: &corev1.CSIPersistentVolumeSource{
+						Driver:           driver,
+						VolumeHandle:     handle,
+						VolumeAttributes: map[string]string{"remoteRoot": "/k8s/pvc/volume"},
+					},
+				},
+			},
+		}
+	}
+	tests := []struct {
+		name     string
+		objects  []kruntime.Object
+		listErr  bool
+		wantMNMW bool
+		wantErr  bool
+	}{
+		{name: "RWX", objects: []kruntime.Object{newPV("rwx", driverName, volumeID, corev1.ReadWriteMany)}, wantMNMW: true},
+		{name: "RWO", objects: []kruntime.Object{newPV("rwo", driverName, volumeID, corev1.ReadWriteOnce)}},
+		{name: "RWOP", objects: []kruntime.Object{newPV("rwop", driverName, volumeID, corev1.ReadWriteOncePod)}},
+		{name: "RWX with read only", objects: []kruntime.Object{newPV("rwx-mixed", driverName, volumeID, corev1.ReadWriteMany, corev1.ReadOnlyMany)}, wantErr: true},
+		{name: "RWO and RWOP", objects: []kruntime.Object{newPV("rwo-mixed", driverName, volumeID, corev1.ReadWriteOnce, corev1.ReadWriteOncePod)}},
+		{name: "missing", objects: []kruntime.Object{newPV("other", driverName, "another-volume", corev1.ReadWriteMany)}, wantErr: true},
+		{name: "duplicate", objects: []kruntime.Object{
+			newPV("first", driverName, volumeID, corev1.ReadWriteMany),
+			newPV("second", driverName, volumeID, corev1.ReadWriteMany),
+		}, wantErr: true},
+		{name: "other driver before owner", objects: []kruntime.Object{
+			newPV("other", "other.example.com", volumeID, corev1.ReadWriteMany),
+			newPV("owner", driverName, volumeID, corev1.ReadWriteMany),
+		}, wantMNMW: true},
+		{name: "owner before other driver", objects: []kruntime.Object{
+			newPV("owner", driverName, volumeID, corev1.ReadWriteOnce),
+			newPV("other", "other.example.com", volumeID, corev1.ReadWriteMany),
+		}},
+		{name: "wrong driver", objects: []kruntime.Object{newPV("wrong", "other.example.com", volumeID, corev1.ReadWriteMany)}, wantErr: true},
+		{name: "empty access modes", objects: []kruntime.Object{newPV("empty", driverName, volumeID)}, wantErr: true},
+		{name: "read only", objects: []kruntime.Object{newPV("readonly", driverName, volumeID, corev1.ReadOnlyMany)}, wantErr: true},
+		{name: "read only mixed with RWO", objects: []kruntime.Object{newPV("readonly-rwo", driverName, volumeID, corev1.ReadOnlyMany, corev1.ReadWriteOnce)}, wantErr: true},
+		{name: "unsupported", objects: []kruntime.Object{newPV("unsupported", driverName, volumeID, corev1.PersistentVolumeAccessMode("UnknownWriter"))}, wantErr: true},
+		{name: "list error", listErr: true, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			k8s := fake.NewSimpleClientset(test.objects...)
+			if test.listErr {
+				k8s.PrependReactor("list", "persistentvolumes", func(k8stesting.Action) (bool, kruntime.Object, error) {
+					return true, nil, errors.New("injected PV list failure")
+				})
+			}
+
+			attrs, mnmw, err := resolveRecoveryVolumeContextFromPV(
+				context.Background(), k8s, driverName, volumeID,
+			)
+			if test.wantErr && err == nil {
+				t.Fatal("resolveRecoveryVolumeContextFromPV() accepted unprovable recovery input")
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("resolveRecoveryVolumeContextFromPV() error = %v", err)
+			}
+			if err == nil {
+				if mnmw != test.wantMNMW {
+					t.Fatalf("MNMW = %t, want %t", mnmw, test.wantMNMW)
+				}
+				if attrs["remoteRoot"] != "/k8s/pvc/volume" {
+					t.Fatalf("remoteRoot = %q", attrs["remoteRoot"])
+				}
+				attrs["remoteRoot"] = "/mutated"
+				for _, object := range test.objects {
+					pv := object.(*corev1.PersistentVolume)
+					if pv.Spec.CSI.Driver == driverName &&
+						pv.Spec.CSI.VolumeHandle == volumeID &&
+						pv.Spec.CSI.VolumeAttributes["remoteRoot"] != "/k8s/pvc/volume" {
+						t.Fatal("returned attributes alias the PV map")
+					}
+				}
+			} else if attrs != nil || mnmw {
+				t.Fatalf("error returned attributes=%v MNMW=%t", attrs, mnmw)
+			}
+
+			pvLists := 0
+			secretGets := 0
+			for _, action := range k8s.Actions() {
+				switch {
+				case action.GetVerb() == "list" && action.GetResource().Resource == "persistentvolumes":
+					pvLists++
+				case action.GetVerb() == "get" && action.GetResource().Resource == "secrets":
+					secretGets++
+				}
+			}
+			if pvLists != 1 || secretGets != 0 {
+				t.Fatalf("Kubernetes actions: PV lists=%d Secret gets=%d, want 1/0", pvLists, secretGets)
+			}
+		})
 	}
 }
