@@ -6,13 +6,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kruntime "k8s.io/apimachinery/pkg/runtime"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func TestNodeRecoveryRereadsDurableStateAfterVolumeLock(t *testing.T) {
@@ -66,6 +69,7 @@ func TestNodeRecoveryCleansAbandonedStageWithoutRemoteAPI(t *testing.T) {
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{Name: "pv-starting-recovery"},
 		Spec: corev1.PersistentVolumeSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 			PersistentVolumeSource: corev1.PersistentVolumeSource{
 				CSI: &corev1.CSIPersistentVolumeSource{
 					Driver:       "csi.drive9.ai",
@@ -196,9 +200,11 @@ func TestNodeRecoveryDoesNotMutatePublishTransactions(t *testing.T) {
 	} {
 		t.Run(statusValue, func(t *testing.T) {
 			fixture := newStartingReconcileFixture(t)
+			canonicalizeRecoveryStateIdentity(t, &fixture.state)
 			fixture.mounted = true
 			fixture.process = "ready"
 			fixture.service = systemdUnitActive
+			fixture.states.states = []mountState{fixture.state}
 			fixture.installCallbacks()
 
 			stateDir := t.TempDir()
@@ -217,6 +223,11 @@ func TestNodeRecoveryDoesNotMutatePublishTransactions(t *testing.T) {
 				nodeCapabilities: availableNodeCapabilities(),
 				nodePreflightSet: true,
 			}
+			driver.k8s = k8sfake.NewSimpleClientset(recoveryPV(
+				fixture.state,
+				[]corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				nil,
+			))
 			publish := publishState{
 				VolumeID:      fixture.state.VolumeID,
 				StagingTarget: fixture.state.StagingTarget,
@@ -246,6 +257,473 @@ func TestNodeRecoveryDoesNotMutatePublishTransactions(t *testing.T) {
 					mountOps.bindCalls, mountOps.unmountCalls, mountOps.lazyUnmountCalls)
 			}
 		})
+	}
+}
+
+func TestBootRecoveryHealthyActiveResolvesPVBeforeReturn(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		modes []corev1.PersistentVolumeAccessMode
+		attrs map[string]string
+		mnmw  bool
+	}{
+		{name: "RWO", modes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, attrs: map[string]string{
+			paramAttrTTL: "invalid-legacy-ttl", paramPerfEnabled: "invalid-legacy-perf",
+		}},
+		{name: "RWX", modes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, attrs: map[string]string{
+			paramProfile: profileNone, paramDurability: durabilityCloseSync,
+		}, mnmw: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newNodeStateFirstFixtureWithActive(t, true, func(state *mountState) {
+				if test.mnmw {
+					state.MountArgs = recoveryMountArgs(state.MountArgs, durabilityCloseSync)
+				}
+			})
+			k8s := k8sfake.NewSimpleClientset(recoveryPV(fixture.active, test.modes, test.attrs))
+			fixture.driver.k8s = k8s
+			before, err := fixture.driver.readMountState(fixture.active.VolumeID)
+			if err != nil {
+				t.Fatalf("read before recovery: %v", err)
+			}
+
+			fixture.driver.recoverOneNodeMount(context.Background(), fixture.active)
+
+			after, err := fixture.driver.readMountState(fixture.active.VolumeID)
+			if err != nil || !reflectMountStatesEqual(before, after) {
+				t.Fatalf("healthy recovery changed state: before=%#v after=%#v err=%v", before, after, err)
+			}
+			assertRecoveryK8sActions(t, k8s.Actions(), 1, 0)
+			assertNoNodeStateFirstDestructiveCalls(t, fixture.runtime.Calls())
+		})
+	}
+}
+
+func TestBootRecoveryActiveSkipKeepsCredentialsLazy(t *testing.T) {
+	fixture := newNodeStateFirstFixtureWithActive(t, true, func(state *mountState) {
+		state.MountArgs = recoveryMountArgs(state.MountArgs, durabilityCloseSync)
+	})
+	originalIsMountPoint := fixture.runtime.isMountPointFn
+	mountChecks := 0
+	fixture.runtime.isMountPointFn = func(path string) (bool, error) {
+		mountChecks++
+		if mountChecks == 1 {
+			return false, nil
+		}
+		return originalIsMountPoint(path)
+	}
+	k8s := k8sfake.NewSimpleClientset(recoveryPV(
+		fixture.active,
+		[]corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+		map[string]string{
+			paramProfile: profileNone, paramDurability: durabilityCloseSync,
+			attrSecretName: "missing", attrSecretNamespace: "default",
+		},
+	))
+	fixture.driver.k8s = k8s
+	before, _ := fixture.driver.readMountState(fixture.active.VolumeID)
+
+	fixture.driver.recoverOneNodeMount(context.Background(), fixture.active)
+
+	after, err := fixture.driver.readMountState(fixture.active.VolumeID)
+	if err != nil || !reflectMountStatesEqual(before, after) {
+		t.Fatalf("active skip changed state: before=%#v after=%#v err=%v", before, after, err)
+	}
+	assertRecoveryK8sActions(t, k8s.Actions(), 1, 0)
+	assertNoNodeStateFirstDestructiveCalls(t, fixture.runtime.Calls())
+	if mountChecks < 2 {
+		t.Fatalf("active recovery made %d mount checks, want fast-path plus skip observation", mountChecks)
+	}
+}
+
+func TestBootRecoveryStartingPromotionResolvesPVWithoutSecret(t *testing.T) {
+	fixture := newStartingReconcileFixture(t)
+	canonicalizeRecoveryStateIdentity(t, &fixture.state)
+	fixture.mounted = true
+	fixture.process = "ready"
+	fixture.service = systemdUnitActive
+	fixture.state.MountArgs = recoveryMountArgs(fixture.state.MountArgs, durabilityCloseSync)
+	fixture.states.states = []mountState{fixture.state}
+	fixture.installCallbacks()
+	stateDir := t.TempDir()
+	store := newMountStateStore(stateDir, newHostRuntime())
+	if err := store.Write(fixture.state); err != nil {
+		t.Fatalf("write starting state: %v", err)
+	}
+	k8s := k8sfake.NewSimpleClientset(recoveryPV(
+		fixture.state,
+		[]corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+		map[string]string{paramProfile: profileNone, paramDurability: durabilityCloseSync},
+	))
+	driver := &Driver{
+		cfg: Config{StateDir: stateDir, DriverName: "csi.drive9.ai"},
+		k8s: k8s, nodeRuntime: fixture.runtime,
+		nodeCapabilities: availableNodeCapabilities(), nodePreflightSet: true,
+	}
+
+	driver.recoverOneNodeMount(context.Background(), fixture.state)
+
+	recovered, err := store.Read(fixture.state.VolumeID)
+	if err != nil || recovered.Phase != mountStatePhaseActive {
+		t.Fatalf("starting recovery = %#v, %v; want active", recovered, err)
+	}
+	assertRecoveryK8sActions(t, k8s.Actions(), 1, 0)
+}
+
+func TestBootRecoveryUnhealthyActiveFetchesSecretAfterSinglePVList(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		modes []corev1.PersistentVolumeAccessMode
+		mnmw  bool
+	}{
+		{name: "RWO", modes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}},
+		{name: "RWX", modes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, mnmw: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newNodeStateFirstFixtureWithActive(t, false, func(state *mountState) {
+				if test.mnmw {
+					state.MountArgs = recoveryMountArgs(state.MountArgs, durabilityCloseSync)
+				}
+			})
+			attrs := map[string]string{
+				attrSecretName: "missing", attrSecretNamespace: "default", paramDurability: durabilityCloseSync,
+			}
+			if test.mnmw {
+				attrs[paramProfile] = profileNone
+			}
+			k8s := k8sfake.NewSimpleClientset(recoveryPV(fixture.active, test.modes, attrs))
+			fixture.driver.k8s = k8s
+			before, _ := fixture.driver.readMountState(fixture.active.VolumeID)
+
+			fixture.driver.recoverOneNodeMount(context.Background(), fixture.active)
+
+			after, err := fixture.driver.readMountState(fixture.active.VolumeID)
+			if err != nil || !reflectMountStatesEqual(before, after) {
+				t.Fatalf("credential failure changed active state: before=%#v after=%#v err=%v", before, after, err)
+			}
+			assertRecoveryK8sActions(t, k8s.Actions(), 1, 1)
+			assertNoNodeStateFirstDestructiveCalls(t, fixture.runtime.Calls())
+		})
+	}
+}
+
+func TestBootRecoveryStartingResumeFetchesSecretAfterSinglePVList(t *testing.T) {
+	fixture := newStartingReconcileFixture(t)
+	canonicalizeRecoveryStateIdentity(t, &fixture.state)
+	fixture.state.MountArgs = recoveryMountArgs(fixture.state.MountArgs, durabilityCloseSync)
+	fixture.useRecoveryDesired()
+	fixture.service = systemdUnitNotFound
+	fixture.installCallbacks()
+	stateDir := t.TempDir()
+	store := newMountStateStore(stateDir, newHostRuntime())
+	if err := store.Write(fixture.state); err != nil {
+		t.Fatalf("write starting state: %v", err)
+	}
+	k8s := k8sfake.NewSimpleClientset(recoveryPV(
+		fixture.state,
+		[]corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+		map[string]string{
+			paramProfile: profileNone, paramDurability: durabilityCloseSync,
+			attrSecretName: "missing", attrSecretNamespace: "default",
+		},
+	))
+	driver := &Driver{
+		cfg: Config{StateDir: stateDir, DriverName: "csi.drive9.ai"},
+		k8s: k8s, nodeRuntime: fixture.runtime,
+		nodeCapabilities: availableNodeCapabilities(), nodePreflightSet: true,
+	}
+
+	driver.recoverOneNodeMount(context.Background(), fixture.state)
+
+	recovered, err := store.Read(fixture.state.VolumeID)
+	if err != nil || !reflectMountStatesEqual(fixture.state, recovered) {
+		t.Fatalf("credential failure changed starting state: before=%#v after=%#v err=%v", fixture.state, recovered, err)
+	}
+	assertRecoveryK8sActions(t, k8s.Actions(), 1, 1)
+	if runs := countMountSystemdRuns(fixture.runtime.Calls()); runs != 0 {
+		t.Fatalf("credential failure launched %d mount services", runs)
+	}
+}
+
+func TestBootRecoveryRejectsUnprovedModeAndMNMWArgvWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name    string
+		objects func(mountState) []kruntime.Object
+		mutate  func(*mountState)
+	}{
+		{name: "missing PV", objects: func(mountState) []kruntime.Object { return nil }},
+		{name: "duplicate PV", objects: func(state mountState) []kruntime.Object {
+			return []kruntime.Object{
+				recoveryPV(state, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, nil),
+				recoveryPVWithName("duplicate", state, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, nil),
+			}
+		}},
+		{name: "wrong driver", objects: func(state mountState) []kruntime.Object {
+			pv := recoveryPV(state, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, nil)
+			pv.Spec.CSI.Driver = "other.example.com"
+			return []kruntime.Object{pv}
+		}},
+		{name: "unsupported mode", objects: func(state mountState) []kruntime.Object {
+			return []kruntime.Object{recoveryPV(state, []corev1.PersistentVolumeAccessMode{"UnknownWriter"}, nil)}
+		}},
+		{name: "MNMW primary mismatch", objects: func(state mountState) []kruntime.Object {
+			return []kruntime.Object{recoveryPV(state, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, map[string]string{
+				paramProfile: profileNone, paramDurability: durabilityCloseSync,
+			})}
+		}},
+		{name: "MNMW invalid profile", mutate: func(state *mountState) {
+			state.MountArgs = recoveryMountArgs(state.MountArgs, durabilityCloseSync)
+			for i := range state.MountArgs {
+				if i > 0 && state.MountArgs[i-1] == "--profile" {
+					state.MountArgs[i] = "coding-agent"
+				}
+			}
+		}, objects: func(state mountState) []kruntime.Object {
+			return []kruntime.Object{recoveryPV(state, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, map[string]string{
+				paramProfile: "coding-agent", paramDurability: durabilityCloseSync,
+			})}
+		}},
+		{name: "MNMW durability tuning conflict", mutate: func(state *mountState) {
+			state.MountArgs = recoveryMountArgs(state.MountArgs, durabilityCloseSync)
+		}, objects: func(state mountState) []kruntime.Object {
+			return []kruntime.Object{recoveryPV(state, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, map[string]string{
+				paramProfile: profileNone, paramDurability: durabilityCloseSync, paramWritebackBatchWindow: "20ms",
+			})}
+		}},
+		{name: "MNMW fallback mismatch", mutate: func(state *mountState) {
+			state.MountArgs = recoveryMountArgs(state.MountArgs, durabilityCloseSync)
+			state.Reason = mountStartReasonRecovery
+			state.FallbackBinaryPath = "/var/lib/drive9-csi/bin/drive9-" + strings.Repeat("b", 64)
+			state.FallbackMountArgs = withoutMountArg(state.MountArgs, "--durability")
+		}, objects: func(state mountState) []kruntime.Object {
+			return []kruntime.Object{recoveryPV(state, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, map[string]string{
+				paramProfile: profileNone, paramDurability: durabilityCloseSync,
+			})}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newStartingReconcileFixture(t)
+			canonicalizeRecoveryStateIdentity(t, &fixture.state)
+			fixture.mounted = true
+			fixture.process = "ready"
+			fixture.service = systemdUnitActive
+			if test.mutate != nil {
+				test.mutate(&fixture.state)
+			}
+			fixture.states.states = []mountState{fixture.state}
+			fixture.installCallbacks()
+			stateDir := t.TempDir()
+			store := newMountStateStore(stateDir, newHostRuntime())
+			if err := store.Write(fixture.state); err != nil {
+				t.Fatalf("write starting state: %v", err)
+			}
+			statePath, _ := store.statePath(fixture.state.VolumeID)
+			before, _ := os.ReadFile(statePath)
+			k8s := k8sfake.NewSimpleClientset(test.objects(fixture.state)...)
+			driver := &Driver{
+				cfg: Config{StateDir: stateDir, DriverName: "csi.drive9.ai"},
+				k8s: k8s, nodeRuntime: fixture.runtime,
+				nodeCapabilities: availableNodeCapabilities(), nodePreflightSet: true,
+			}
+
+			driver.recoverOneNodeMount(context.Background(), fixture.state)
+
+			after, _ := os.ReadFile(statePath)
+			if string(after) != string(before) {
+				t.Fatalf("fail-closed recovery changed durable state: before=%q after=%q", before, after)
+			}
+			assertRecoveryK8sActions(t, k8s.Actions(), 1, 0)
+			assertNoNodeStateFirstDestructiveCalls(t, fixture.runtime.Calls())
+		})
+	}
+}
+
+func TestBootRecoveryRelaunchPublishesCanonicalDurability(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		modes      []corev1.PersistentVolumeAccessMode
+		profile    string
+		durability string
+	}{
+		{name: "RWO absent", modes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}},
+		{name: "RWO explicit", modes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, durability: durabilityWriteSync},
+		{name: "MNMW", modes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, profile: profileNone, durability: durabilityCloseSync},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newFakeDrive9(t)
+			defer fake.close()
+			secret := fake.k8sSecret("drive9-secret", "default")
+			starting := validStartingState(t)
+			active := validActiveState(t)
+			canonicalizeRecoveryStateIdentity(t, &starting)
+			canonicalizeRecoveryStateIdentity(t, &active)
+			addContract := func(args []string) []string {
+				if test.profile != "" {
+					return recoveryMountArgs(args, test.durability)
+				}
+				if test.durability == "" {
+					return args
+				}
+				return append(args[:len(args)-2], "--durability", test.durability,
+					args[len(args)-2], args[len(args)-1])
+			}
+			starting.MountArgs = addContract(starting.MountArgs)
+			active.MountArgs = addContract(active.MountArgs)
+			fake.mkdir(active.RemoteRoot)
+			fake.putJSON(markerPath(active.RemoteRoot), volumeMarker{
+				Version: 1, Driver: "csi.drive9.ai",
+				VolumeID: active.VolumeID, RemoteRoot: active.RemoteRoot,
+			})
+
+			stateDir := t.TempDir()
+			store := newMountStateStore(stateDir, newHostRuntime())
+			if err := store.Write(starting); err != nil {
+				t.Fatalf("write starting state: %v", err)
+			}
+			if err := store.Write(active); err != nil {
+				t.Fatalf("write active state: %v", err)
+			}
+			attrs := map[string]string{
+				attrSecretName: secret.Name, attrSecretNamespace: secret.Namespace,
+			}
+			if test.profile != "" {
+				attrs[paramProfile] = test.profile
+			}
+			if test.durability != "" {
+				attrs[paramDurability] = test.durability
+			}
+			k8s := k8sfake.NewSimpleClientset(secret, recoveryPV(active, test.modes, attrs))
+			launch := newMountLaunchFixture(t, "")
+			launch.attemptNumber = 1
+			originalExec := launch.runtime.execFn
+			launch.runtime.execFn = func(ctx context.Context, command hostCommand) (hostCommandResult, error) {
+				inner := hostInnerCommand(command)
+				if containsArgument(inner, "--property=Description") {
+					current, err := store.Read(active.VolumeID)
+					if err != nil {
+						return hostCommandResult{}, err
+					}
+					return systemdDescriptionResult(current), nil
+				}
+				return originalExec(ctx, command)
+			}
+			originalRead := launch.runtime.readFileFn
+			launch.runtime.readFileFn = func(path string) ([]byte, error) {
+				if path == hostProcPIDPath(launch.pid, "cgroup") {
+					current, err := store.Read(active.VolumeID)
+					if err != nil {
+						return nil, err
+					}
+					return []byte("0::/system.slice/" + current.SystemdUnit + "\n"), nil
+				}
+				return originalRead(path)
+			}
+			driver := &Driver{
+				cfg: Config{StateDir: stateDir, DriverName: "csi.drive9.ai"},
+				k8s: k8s, nodeRuntime: launch.runtime,
+				nodeCapabilities: availableNodeCapabilities(), nodePreflightSet: true,
+			}
+
+			driver.recoverOneNodeMount(context.Background(), active)
+
+			recovered, err := store.Read(active.VolumeID)
+			if err != nil || recovered.Phase != mountStatePhaseActive || recovered.BinaryPath != launch.drive9Path {
+				t.Fatalf("boot relaunch = %#v, %v; want desired active mount", recovered, err)
+			}
+			assertRecoveryK8sActions(t, k8s.Actions(), 1, 1)
+			if runs := countMountSystemdRuns(launch.runtime.Calls()); runs != 1 {
+				t.Fatalf("boot relaunch systemd-run count = %d, want 1", runs)
+			}
+			wantArgsBody := encodeNULTerminated(append([]string{launch.drive9Path}, recovered.MountArgs...))
+			if got := launch.publishedBody(t, ".args."); string(got) != string(wantArgsBody) {
+				t.Fatalf("published recovery argv = %q, want %q", got, wantArgsBody)
+			}
+			if test.durability == "" {
+				if stringSliceContains(recovered.MountArgs, "--durability") {
+					t.Fatalf("absent RWO durability emitted argv: %q", recovered.MountArgs)
+				}
+			} else if err := validateCanonicalMountOption(
+				recovered.MountArgs, "--durability", test.durability,
+			); err != nil {
+				t.Fatalf("recovered argv: %v (args=%q)", err, recovered.MountArgs)
+			}
+			if test.profile != "" {
+				if err := validateCanonicalMountOption(recovered.MountArgs, "--profile", test.profile); err != nil {
+					t.Fatalf("recovered argv: %v (args=%q)", err, recovered.MountArgs)
+				}
+			}
+		})
+	}
+}
+
+func recoveryPV(
+	state mountState,
+	modes []corev1.PersistentVolumeAccessMode,
+	extra map[string]string,
+) *corev1.PersistentVolume {
+	return recoveryPVWithName("pv-"+safeFileName(state.VolumeID), state, modes, extra)
+}
+
+func recoveryPVWithName(
+	name string,
+	state mountState,
+	modes []corev1.PersistentVolumeAccessMode,
+	extra map[string]string,
+) *corev1.PersistentVolume {
+	attrs := map[string]string{"remoteRoot": state.RemoteRoot}
+	for key, value := range extra {
+		attrs[key] = value
+	}
+	return &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: corev1.PersistentVolumeSpec{
+			AccessModes: modes,
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				CSI: &corev1.CSIPersistentVolumeSource{
+					Driver: "csi.drive9.ai", VolumeHandle: state.VolumeID, VolumeAttributes: attrs,
+				},
+			},
+		},
+	}
+}
+
+func recoveryMountArgs(args []string, durability string) []string {
+	args = append([]string(nil), args...)
+	return append(args[:len(args)-2],
+		"--profile", profileNone, "--durability", durability,
+		args[len(args)-2], args[len(args)-1],
+	)
+}
+
+func canonicalizeRecoveryStateIdentity(t *testing.T, state *mountState) {
+	t.Helper()
+	state.VolumeID = volumeIDForRemoteRoot(state.RemoteRoot)
+	names, err := newVolumeHostNames(state.VolumeID, state.AttemptID)
+	if err != nil {
+		t.Fatalf("newVolumeHostNames(): %v", err)
+	}
+	state.SystemdUnit = names.SystemdUnit
+	if state.Phase == mountStatePhaseStarting {
+		state.EnvPath, state.ArgsPath = names.EnvPath, names.ArgsPath
+	}
+}
+
+func assertRecoveryK8sActions(t *testing.T, actions []k8stesting.Action, pvLists int, secretGets int) {
+	t.Helper()
+	gotPVLists := 0
+	gotSecretGets := 0
+	for _, action := range actions {
+		if action.GetVerb() == "list" && action.GetResource().Resource == "persistentvolumes" {
+			gotPVLists++
+		}
+		if action.GetVerb() == "get" && action.GetResource().Resource == "secrets" {
+			gotSecretGets++
+		}
+	}
+	if gotPVLists != pvLists || gotSecretGets != secretGets {
+		t.Fatalf("Kubernetes actions: PV lists=%d Secret gets=%d, want %d/%d",
+			gotPVLists, gotSecretGets, pvLists, secretGets)
 	}
 }
 

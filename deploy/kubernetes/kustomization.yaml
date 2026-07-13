@@ -9,3 +9,5 @@ resources:
   - node.yaml
   - storageclass.yaml
   - volumeattributesclass.yaml
+  - storageclass-rwx.yaml
+  - volumeattributesclass-rwx.yaml

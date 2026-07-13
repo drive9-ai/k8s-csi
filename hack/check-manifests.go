@@ -24,6 +24,7 @@ var failures int
 
 func main() {
 	checkTextContracts()
+	checkSharedPVCExample()
 	checkNodeManifest()
 	checkControllerManifest()
 	if failures != 0 {
@@ -37,6 +38,12 @@ func checkTextContracts() {
 	contracts := []fileContract{
 		{
 			path: "deploy/kubernetes/storageclass.yaml",
+			required: []string{
+				"  name: drive9-rwo", "provisioner: csi.drive9.ai",
+				"parameters: {}", "reclaimPolicy: Retain",
+				"volumeBindingMode: WaitForFirstConsumer",
+				"allowVolumeExpansion: false",
+			},
 			forbidden: []string{
 				"csi.storage.k8s.io/provisioner-secret-name",
 				"csi.storage.k8s.io/provisioner-secret-namespace",
@@ -54,18 +61,53 @@ func checkTextContracts() {
 		{
 			path: "deploy/kubernetes/volumeattributesclass.yaml",
 			required: []string{
+				"  name: drive9-coding-agent", "driverName: csi.drive9.ai",
+				"  profile: coding-agent",
 				"  attrTTL: 30s", "  entryTTL: 30s", "  dirTTL: 30s",
 				"  perfEnabled: \"false\"",
 			},
 			forbidden: []string{
+				"durability:",
 				"readdirPrefetch:", "readdirPrefetchMaxFiles:",
 				"readdirPrefetchMaxFileBytes:",
 				"readdirPrefetchMaxBytes:", "writebackBatchWindow:",
 			},
 		},
 		{
-			path:     "deploy/kubernetes/kustomization.yaml",
-			required: []string{"volumeattributesclass.yaml"},
+			path: "deploy/kubernetes/storageclass-rwx.yaml",
+			required: []string{
+				"kind: StorageClass", "  name: drive9-rwx",
+				"provisioner: csi.drive9.ai", "parameters: {}",
+				"reclaimPolicy: Retain",
+				"volumeBindingMode: WaitForFirstConsumer",
+				"allowVolumeExpansion: false",
+			},
+			forbidden: []string{
+				"apiKey", "server:", "secret", "profile:", "durability:",
+			},
+		},
+		{
+			path: "deploy/kubernetes/volumeattributesclass-rwx.yaml",
+			required: []string{
+				"kind: VolumeAttributesClass", "  name: drive9-rwx",
+				"driverName: csi.drive9.ai", "  profile: none",
+				"  durability: close-sync",
+			},
+			forbidden: []string{
+				"apiKey", "server:", "secret", "attrTTL:", "entryTTL:",
+				"dirTTL:", "perfEnabled:", "readdirPrefetch:",
+				"writebackBatchWindow:",
+			},
+		},
+		{
+			path: "deploy/kubernetes/kustomization.yaml",
+			required: []string{
+				"storageclass.yaml", "volumeattributesclass.yaml",
+				"storageclass-rwx.yaml", "volumeattributesclass-rwx.yaml",
+			},
+			forbidden: []string{
+				"secret.example.yaml", "shared-pvc.example.yaml",
+			},
 		},
 		{
 			path: "deploy/kubernetes/controller.yaml",
@@ -119,7 +161,9 @@ func checkTextContracts() {
 			path: "Dockerfile",
 			required: []string{
 				"FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS runtime",
-				"/usr/local/bin/drive9 mount --direct-mount-strict --help",
+				"/usr/local/bin/drive9 mount --direct-mount-strict \\\n" +
+					"  --profile=none --durability=close-sync --help",
+				"grep -F 'close-sync'", "grep -F 'write-sync'",
 				"COPY hack/drive9-csi-upload-perf.sh ",
 				"/usr/local/bin/drive9-csi-upload-perf",
 				"chmod +x /usr/local/bin/drive9-csi-upload-perf",
@@ -139,7 +183,68 @@ func checkTextContracts() {
 			path: "deploy/examples/kubernetes/pvc.example.yaml",
 			required: []string{
 				"drive9.ai/secret-name:",
-				"volumeAttributesClassName: drive9-coding-agent",
+				"volumeAttributesClassName: drive9-coding-agent-tuned",
+			},
+		},
+		{
+			path: "deploy/examples/kubernetes/shared-pvc.example.yaml",
+			required: []string{
+				"kind: Namespace",
+				"kind: StorageClass",
+				"kind: VolumeAttributesClass",
+				"kind: Secret",
+				"kind: PersistentVolumeClaim",
+				"kind: Deployment",
+				"namespace: drive9-shared-pvc-example",
+				"apiKey: replace-with-drive9-api-key",
+				"name: drive9-workspace-shared",
+				"name: drive9-workspace-writer",
+				"storageClassName: drive9-shared-pvc-example",
+				"volumeAttributesClassName: drive9-shared-pvc-example",
+				"claimName: drive9-workspace-shared",
+				"replicas: 2",
+				"  profile: none", "  durability: close-sync",
+				"    - ReadWriteMany",
+				"fieldPath: metadata.name",
+				"${POD_NAME}.txt",
+			},
+			forbidden: []string{
+				"ReadWriteOnce", "profile: coding-agent", "\nkind: Pod\n",
+				"\n      affinity:", "podAffinity:", "podAntiAffinity:",
+				"topologyKey:",
+				"drive9-workspace-reader", "readOnly: true",
+			},
+		},
+		{
+			path: "deploy/examples/kubernetes/README.md",
+			required: []string{
+				"shared-pvc.example.yaml",
+				"kubectl apply -k deploy/overlays/local",
+				"kubectl apply -f deploy/examples/kubernetes/shared-pvc.example.yaml",
+				"`ReadWriteMany`", "`profile=none`",
+				"`durability=close-sync`",
+				"same node or different nodes",
+				"does not provide distributed file locks",
+				"does not merge concurrent writes to the same file",
+				"Resources in the Single-File Example",
+				"The example StorageClass uses `Retain`",
+			},
+			forbidden: []string{
+				"SINGLE_NODE_MULTI_WRITER", "same-node sharing example",
+				"required pod affinity",
+			},
+		},
+		{
+			path: "README.md",
+			required: []string{
+				"`ReadWriteMany` requires `profile=none` and",
+				"`durability=close-sync` or `durability=write-sync`",
+				"does not provide distributed file locks",
+				"does not merge concurrent writes to the same file",
+			},
+			forbidden: []string{
+				"No snapshots, expansion, RWX, or automatic tenant provisioning.",
+				"it is not a `ReadWriteMany` or cross-node example",
 			},
 		},
 		{
@@ -171,6 +276,45 @@ func checkTextContracts() {
 			if strings.Contains(body, forbidden) {
 				failf("%s contains forbidden %q", contract.path, forbidden)
 			}
+		}
+	}
+}
+
+func checkSharedPVCExample() {
+	body := strings.TrimSpace(readFile(
+		"deploy/examples/kubernetes/shared-pvc.example.yaml",
+	))
+	documents := strings.Split(body, "\n---\n")
+	want := map[string]int{
+		"Namespace": 1, "StorageClass": 1, "VolumeAttributesClass": 1,
+		"Secret": 1, "PersistentVolumeClaim": 1, "Deployment": 1,
+	}
+	if len(documents) != 6 {
+		failf("shared PVC example document count = %d", len(documents))
+	}
+	for _, document := range documents {
+		jsonBody, err := utilyaml.ToJSON([]byte(document))
+		if err != nil {
+			failf("convert shared PVC example document to JSON: %v", err)
+			continue
+		}
+		var metadata struct {
+			Kind string `json:"kind"`
+		}
+		if err := json.Unmarshal(jsonBody, &metadata); err != nil {
+			failf("parse shared PVC example document: %v", err)
+			continue
+		}
+		if want[metadata.Kind] != 1 {
+			failf("shared PVC example has unexpected or duplicate kind %q",
+				metadata.Kind)
+			continue
+		}
+		want[metadata.Kind] = 0
+	}
+	for kind, count := range want {
+		if count != 0 {
+			failf("shared PVC example missing kind %q", kind)
 		}
 	}
 }
