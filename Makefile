@@ -163,13 +163,16 @@ e2e-check:
 		e2e/lib/manifests.sh
 	@rg -Fq 'kubernetes.io/hostname' e2e/lib/manifests.sh
 	@rg -Fq 'for attempt in {1..60}' e2e/multi-node-rwx.sh
-	@rg -Fq 'DRIVE9_PROFILE="none"' e2e/multi-node-rwx.sh
-	@rg -Fq 'case_durability="close-sync"' e2e/multi-node-rwx.sh
+	@rg -Fq 'DRIVE9_PROFILE="coding-agent"' e2e/multi-node-rwx.sh
+	@rg -Fq 'case_durability=""' e2e/multi-node-rwx.sh
+	@rg -Fq 'local started_at="$$SECONDS"' e2e/multi-node-rwx.sh
+	@rg -Fq 'cross-node visibility latency' e2e/multi-node-rwx.sh
 	@rg -Fq 'e2e_render_case_manifests "$$case_durability"' \
 		e2e/multi-node-rwx.sh
 	@rg -Fq 'Pods were scheduled on the same node' e2e/multi-node-rwx.sh
 	@rg -Fq 'read after Pod A deletion' e2e/multi-node-rwx.sh
 	@rg -Fq 'write after Pod A deletion' e2e/multi-node-rwx.sh
+	@rg -Fq 'informational only' e2e/README.md
 	@rg -Fq 'e2e/multi-node-rwx.sh' e2e/README.md e2e/AGENTS.md
 	@if rg -Fq 'multi-node-rwx.sh' .codex/rules/e2e.rules; then \
 		echo "multi-node RWX must not gain an automatic execution rule" >&2; \
