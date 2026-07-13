@@ -87,25 +87,13 @@ func checkTextContracts() {
 			},
 		},
 		{
-			path: "deploy/kubernetes/volumeattributesclass-rwx.yaml",
-			required: []string{
-				"kind: VolumeAttributesClass", "  name: drive9-rwx",
-				"driverName: csi.drive9.ai", "  profile: none",
-				"  durability: close-sync",
-			},
-			forbidden: []string{
-				"apiKey", "server:", "secret", "attrTTL:", "entryTTL:",
-				"dirTTL:", "perfEnabled:", "readdirPrefetch:",
-				"writebackBatchWindow:",
-			},
-		},
-		{
 			path: "deploy/kubernetes/kustomization.yaml",
 			required: []string{
 				"storageclass.yaml", "volumeattributesclass.yaml",
-				"storageclass-rwx.yaml", "volumeattributesclass-rwx.yaml",
+				"storageclass-rwx.yaml",
 			},
 			forbidden: []string{
+				"volumeattributesclass-rwx.yaml",
 				"secret.example.yaml", "shared-pvc.example.yaml",
 			},
 		},
@@ -161,11 +149,7 @@ func checkTextContracts() {
 			path: "Dockerfile",
 			required: []string{
 				"FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS runtime",
-				"/usr/local/bin/drive9 mount --direct-mount-strict \\\n" +
-					"  --profile=none --durability=close-sync --help",
-				"/usr/local/bin/drive9 mount --direct-mount-strict \\\n" +
-					"  --profile=none --durability=write-sync --help",
-				"grep -F 'close-sync'", "grep -F 'write-sync'",
+				"/usr/local/bin/drive9 mount --direct-mount-strict --help",
 				"COPY hack/drive9-csi-upload-perf.sh ",
 				"/usr/local/bin/drive9-csi-upload-perf",
 				"chmod +x /usr/local/bin/drive9-csi-upload-perf",
@@ -193,7 +177,6 @@ func checkTextContracts() {
 			required: []string{
 				"kind: Namespace",
 				"kind: StorageClass",
-				"kind: VolumeAttributesClass",
 				"kind: Secret",
 				"kind: PersistentVolumeClaim",
 				"kind: Deployment",
@@ -202,16 +185,16 @@ func checkTextContracts() {
 				"name: drive9-workspace-shared",
 				"name: drive9-workspace-writer",
 				"storageClassName: drive9-shared-pvc-example",
-				"volumeAttributesClassName: drive9-shared-pvc-example",
 				"claimName: drive9-workspace-shared",
 				"replicas: 2",
-				"  profile: none", "  durability: close-sync",
 				"    - ReadWriteMany",
 				"fieldPath: metadata.name",
 				"${POD_NAME}.txt",
 			},
 			forbidden: []string{
-				"ReadWriteOnce", "profile: coding-agent", "\nkind: Pod\n",
+				"ReadWriteOnce", "kind: VolumeAttributesClass",
+				"volumeAttributesClassName:", "profile:", "durability:",
+				"\nkind: Pod\n",
 				"\n      affinity:", "podAffinity:", "podAntiAffinity:",
 				"topologyKey:",
 				"drive9-workspace-reader", "readOnly: true",
@@ -223,11 +206,10 @@ func checkTextContracts() {
 				"shared-pvc.example.yaml",
 				"kubectl apply -k deploy/overlays/local",
 				"kubectl apply -f deploy/examples/kubernetes/shared-pvc.example.yaml",
-				"`ReadWriteMany`", "`profile=none`",
-				"`durability=close-sync`",
+				"`ReadWriteMany`", "adds no RWX-specific",
 				"same node or different nodes",
-				"does not provide distributed file locks",
-				"does not merge concurrent writes to the same file",
+				"does not add a data-consistency policy for RWX",
+				"does not provide distributed locks",
 				"Resources in the Single-File Example",
 				"The example StorageClass uses `Retain`",
 			},
@@ -239,8 +221,7 @@ func checkTextContracts() {
 		{
 			path: "README.md",
 			required: []string{
-				"`ReadWriteMany` requires `profile=none` and",
-				"`durability=close-sync` or `durability=write-sync`",
+				"`ReadWriteMany` adds no `profile` or `durability` requirements or defaults",
 				"does not provide distributed file locks",
 				"does not merge concurrent writes to the same file",
 			},
@@ -288,10 +269,10 @@ func checkSharedPVCExample() {
 	))
 	documents := strings.Split(body, "\n---\n")
 	want := map[string]int{
-		"Namespace": 1, "StorageClass": 1, "VolumeAttributesClass": 1,
-		"Secret": 1, "PersistentVolumeClaim": 1, "Deployment": 1,
+		"Namespace": 1, "StorageClass": 1, "Secret": 1,
+		"PersistentVolumeClaim": 1, "Deployment": 1,
 	}
-	if len(documents) != 6 {
+	if len(documents) != 5 {
 		failf("shared PVC example document count = %d", len(documents))
 	}
 	for _, document := range documents {

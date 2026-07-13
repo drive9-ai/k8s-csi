@@ -12,8 +12,8 @@ It intentionally ships a small stable surface first:
 - Optional managed directory volumes backed by Drive9 remote paths.
 - `ReadWriteOnce` by default. `SINGLE_NODE_MULTI_WRITER` supported for same-node
   multi-pod access.
-- `ReadWriteMany` requires `profile=none` and
-  `durability=close-sync` or `durability=write-sync`.
+- `ReadWriteMany` adds no `profile` or `durability` requirements or defaults;
+  configured mount parameters are forwarded to `drive9 mount`.
 - Credentials are resolved from PVC annotation `drive9.ai/secret-name` →
   Kubernetes Secret.
 - Default workspace-root volumes do not create or delete Drive9 workspace data.
@@ -181,9 +181,8 @@ hello-drive9
 ```
 
 The shared-PVC example is a single-file application bundle containing its own
-Namespace, StorageClass, VolumeAttributesClass, Secret, PVC, writer Deployment,
-and two writer replicas. Replace `replace-with-drive9-api-key` in the file, then
-apply it once:
+Namespace, StorageClass, Secret, PVC, writer Deployment, and two writer
+replicas. Replace `replace-with-drive9-api-key` in the file, then apply it once:
 
 ```sh
 kubectl apply -f deploy/examples/kubernetes/shared-pvc.example.yaml
@@ -195,9 +194,8 @@ kubectl -n drive9-shared-pvc-example exec \
 
 Both writer replicas update a file named after their Pod every five seconds.
 Kubernetes may place the replicas on the same node or different nodes. The PVC
-uses `ReadWriteMany` with
-`profile=none` and `durability=close-sync`; each replica can see both files
-through the shared read-write mount. See
+uses `ReadWriteMany` without RWX-specific mount-parameter defaults; visibility
+semantics follow the Drive9 arguments configured by the user. See
 `deploy/examples/kubernetes/README.md` for the scenario, resource roles,
 credential flow, verification steps, consistency limits, and retention
 behavior.
@@ -498,8 +496,7 @@ kubectl -n drive9-csi exec <drive9-csi-node-pod> -c drive9-csi -- \
 - Linux only.
 - `ReadWriteOnce` by default. `SINGLE_NODE_MULTI_WRITER` supported for same-node
   multi-pod access.
-- `ReadWriteMany` requires `profile=none` and
-  `durability=close-sync` or `durability=write-sync`.
+- `ReadWriteMany` does not add `profile` or `durability` defaults or validation.
 - One Drive9 principal per mounted volume lifecycle.
 - No volume expansion or quota enforcement.
 - RWX does not provide distributed file locks, same-file merge, byte-range
