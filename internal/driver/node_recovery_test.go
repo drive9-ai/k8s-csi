@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -17,6 +16,56 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
+
+func TestDrive9MountRequestFromAttributesPassesThroughMountParameters(t *testing.T) {
+	remoteRoot := "/k8s/pvc/custom-args"
+	volumeID := volumeIDForRemoteRoot(remoteRoot)
+	d := &Driver{cfg: Config{StateDir: t.TempDir()}}
+
+	for _, test := range []struct {
+		name           string
+		attrs          map[string]string
+		wantProfile    string
+		wantDurability string
+	}{
+		{name: "absent", attrs: map[string]string{"remoteRoot": remoteRoot}},
+		{
+			name: "configured",
+			attrs: map[string]string{
+				"remoteRoot":              remoteRoot,
+				paramProfile:              " custom-profile ",
+				paramDurability:           " custom-durability ",
+				paramWritebackBatchWindow: "20ms",
+			},
+			wantProfile:    "custom-profile",
+			wantDurability: "custom-durability",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request, err := d.drive9MountRequestFromAttributes(
+				volumeID, "/var/lib/kubelet/stage", test.attrs, drive9Credentials{},
+			)
+			if err != nil {
+				t.Fatalf("drive9MountRequestFromAttributes() error = %v", err)
+			}
+			if request.Profile != test.wantProfile || request.Durability != test.wantDurability {
+				t.Fatalf("profile/durability = %q/%q, want %q/%q",
+					request.Profile, request.Durability, test.wantProfile, test.wantDurability)
+			}
+
+			args := d.drive9MountArgs(request, "/var/lib/drive9-csi/cache/test")
+			if test.wantProfile == "" {
+				if stringSliceContains(args, "--profile") || stringSliceContains(args, "--durability") {
+					t.Fatalf("absent mount parameters emitted argv: %q", args)
+				}
+				return
+			}
+			assertMountOptionValue(t, args, "--profile", test.wantProfile)
+			assertMountOptionValue(t, args, "--durability", test.wantDurability)
+			assertMountOptionValue(t, args, "--writeback-batch-window", "20ms")
+		})
+	}
+}
 
 func TestNodeRecoveryRereadsDurableStateAfterVolumeLock(t *testing.T) {
 	stale := validActiveState(t)
@@ -445,7 +494,7 @@ func TestBootRecoveryStartingResumeFetchesSecretAfterSinglePVList(t *testing.T) 
 	}
 }
 
-func TestBootRecoveryRejectsUnprovedModeAndMNMWArgvWithoutMutation(t *testing.T) {
+func TestBootRecoveryRejectsUnprovedModeWithoutMutation(t *testing.T) {
 	tests := []struct {
 		name    string
 		objects func(mountState) []kruntime.Object
@@ -468,47 +517,6 @@ func TestBootRecoveryRejectsUnprovedModeAndMNMWArgvWithoutMutation(t *testing.T)
 		}},
 		{name: "mixed RWX and read only", objects: func(state mountState) []kruntime.Object {
 			return []kruntime.Object{recoveryPV(state, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany, corev1.ReadOnlyMany}, nil)}
-		}},
-		{name: "MNMW state downgrade to RWO", mutate: func(state *mountState) {
-			state.MountArgs = recoveryMountArgs(state.MountArgs, durabilityCloseSync)
-		}, objects: func(state mountState) []kruntime.Object {
-			return []kruntime.Object{recoveryPV(state, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, map[string]string{
-				paramProfile: "coding-agent",
-			})}
-		}},
-		{name: "MNMW primary mismatch", objects: func(state mountState) []kruntime.Object {
-			return []kruntime.Object{recoveryPV(state, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, map[string]string{
-				paramProfile: profileNone, paramDurability: durabilityCloseSync,
-			})}
-		}},
-		{name: "MNMW invalid profile", mutate: func(state *mountState) {
-			state.MountArgs = recoveryMountArgs(state.MountArgs, durabilityCloseSync)
-			for i := range state.MountArgs {
-				if i > 0 && state.MountArgs[i-1] == "--profile" {
-					state.MountArgs[i] = "coding-agent"
-				}
-			}
-		}, objects: func(state mountState) []kruntime.Object {
-			return []kruntime.Object{recoveryPV(state, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, map[string]string{
-				paramProfile: "coding-agent", paramDurability: durabilityCloseSync,
-			})}
-		}},
-		{name: "MNMW durability tuning conflict", mutate: func(state *mountState) {
-			state.MountArgs = recoveryMountArgs(state.MountArgs, durabilityCloseSync)
-		}, objects: func(state mountState) []kruntime.Object {
-			return []kruntime.Object{recoveryPV(state, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, map[string]string{
-				paramProfile: profileNone, paramDurability: durabilityCloseSync, paramWritebackBatchWindow: "20ms",
-			})}
-		}},
-		{name: "MNMW fallback mismatch", mutate: func(state *mountState) {
-			state.MountArgs = recoveryMountArgs(state.MountArgs, durabilityCloseSync)
-			state.Reason = mountStartReasonRecovery
-			state.FallbackBinaryPath = "/var/lib/drive9-csi/bin/drive9-" + strings.Repeat("b", 64)
-			state.FallbackMountArgs = withoutMountArg(state.MountArgs, "--durability")
-		}, objects: func(state mountState) []kruntime.Object {
-			return []kruntime.Object{recoveryPV(state, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, map[string]string{
-				paramProfile: profileNone, paramDurability: durabilityCloseSync,
-			})}
 		}},
 	}
 	for _, test := range tests {
@@ -549,7 +557,7 @@ func TestBootRecoveryRejectsUnprovedModeAndMNMWArgvWithoutMutation(t *testing.T)
 	}
 }
 
-func TestBootRecoveryRelaunchPublishesCanonicalDurability(t *testing.T) {
+func TestBootRecoveryRelaunchPublishesConfiguredMountParameters(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		modes      []corev1.PersistentVolumeAccessMode
@@ -557,8 +565,8 @@ func TestBootRecoveryRelaunchPublishesCanonicalDurability(t *testing.T) {
 		durability string
 	}{
 		{name: "RWO absent", modes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}},
-		{name: "RWO explicit", modes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, durability: durabilityWriteSync},
-		{name: "MNMW", modes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, profile: profileNone, durability: durabilityCloseSync},
+		{name: "RWO explicit", modes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, durability: "custom-rwo-durability"},
+		{name: "MNMW configured", modes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, profile: "custom-rwx-profile", durability: "custom-rwx-durability"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fake := newFakeDrive9(t)
@@ -570,7 +578,9 @@ func TestBootRecoveryRelaunchPublishesCanonicalDurability(t *testing.T) {
 			canonicalizeRecoveryStateIdentity(t, &active)
 			addContract := func(args []string) []string {
 				if test.profile != "" {
-					return recoveryMountArgs(args, test.durability)
+					return append(args[:len(args)-2],
+						"--profile", test.profile, "--durability", test.durability,
+						args[len(args)-2], args[len(args)-1])
 				}
 				if test.durability == "" {
 					return args
@@ -653,15 +663,11 @@ func TestBootRecoveryRelaunchPublishesCanonicalDurability(t *testing.T) {
 				if stringSliceContains(recovered.MountArgs, "--durability") {
 					t.Fatalf("absent RWO durability emitted argv: %q", recovered.MountArgs)
 				}
-			} else if err := validateCanonicalMountOption(
-				recovered.MountArgs, "--durability", test.durability,
-			); err != nil {
-				t.Fatalf("recovered argv: %v (args=%q)", err, recovered.MountArgs)
+			} else {
+				assertMountOptionValue(t, recovered.MountArgs, "--durability", test.durability)
 			}
 			if test.profile != "" {
-				if err := validateCanonicalMountOption(recovered.MountArgs, "--profile", test.profile); err != nil {
-					t.Fatalf("recovered argv: %v (args=%q)", err, recovered.MountArgs)
-				}
+				assertMountOptionValue(t, recovered.MountArgs, "--profile", test.profile)
 			}
 		})
 	}
@@ -704,6 +710,16 @@ func recoveryMountArgs(args []string, durability string) []string {
 		"--profile", profileNone, "--durability", durability,
 		args[len(args)-2], args[len(args)-1],
 	)
+}
+
+func assertMountOptionValue(t *testing.T, args []string, option string, want string) {
+	t.Helper()
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == option && args[i+1] == want {
+			return
+		}
+	}
+	t.Fatalf("mount argv missing %s %s: %q", option, want, args)
 }
 
 func canonicalizeRecoveryStateIdentity(t *testing.T, state *mountState) {

@@ -117,10 +117,10 @@ unit, and Drive9 binary path did not change. Its background I/O loop stops
 through explicit stop and stopped markers; expected case teardown does not use
 signals or treat a forced process exit as a test failure.
 
-`multi-node-rwx.sh` uses `profile=none`, `durability=close-sync`, and
-`ReadWriteMany`. It validates observed cross-node visibility for separate files;
-it does not claim distributed locking, concurrent same-file merge, or immediate
-cache coherence.
+`multi-node-rwx.sh` explicitly supplies `profile=none` and
+`durability=close-sync` as test inputs with `ReadWriteMany`; these values are not
+driver requirements or defaults. The case validates observed cross-node
+visibility for separate files without claiming broader consistency semantics.
 
 Set `DRIVE9_REMOTE_ROOT_PREFIX=/k8s/pvc-e2e` only when testing managed-directory
 mode. The default is workspace-root mode. The lifecycle case requires

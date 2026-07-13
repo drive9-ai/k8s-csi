@@ -63,10 +63,7 @@ COPY --from=csi-builder /out/drive9-csi-launcher /usr/local/bin/drive9-csi-launc
 COPY --from=drive9-downloader /out/drive9 /usr/local/bin/drive9
 COPY hack/drive9-csi-upload-perf.sh /usr/local/bin/drive9-csi-upload-perf
 RUN chmod +x /usr/local/bin/drive9-csi-upload-perf \
- && close_sync_help="$(/usr/local/bin/drive9 mount --direct-mount-strict \
-  --profile=none --durability=close-sync --help 2>&1)" \
- && write_sync_help="$(/usr/local/bin/drive9 mount --direct-mount-strict \
-  --profile=none --durability=write-sync --help 2>&1)" \
- && printf '%s\n' "${close_sync_help}" | grep -F 'close-sync' >/dev/null \
- && printf '%s\n' "${write_sync_help}" | grep -F 'write-sync' >/dev/null
+ && mount_help="$(/usr/local/bin/drive9 mount --direct-mount-strict --help 2>&1)" \
+ && printf '%s\n' "${mount_help}" | grep -F -- '-profile ' >/dev/null \
+ && printf '%s\n' "${mount_help}" | grep -F -- '-durability ' >/dev/null
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/drive9-csi"]

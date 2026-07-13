@@ -26,6 +26,12 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
+const (
+	profileNone         = "none"
+	durabilityCloseSync = "close-sync"
+	durabilityWriteSync = "write-sync"
+)
+
 func TestBuildRemoteRoot(t *testing.T) {
 	got, err := buildRemoteRoot("/k8s/workspaces", "pvc-123_test")
 	if err != nil {
@@ -329,79 +335,6 @@ func TestNodeStageVolumeRejectsMismatchedVolumeID(t *testing.T) {
 	})
 	if status.Code(err).String() != "FailedPrecondition" {
 		t.Fatalf("NodeStageVolume status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
-	}
-}
-
-func TestNodeStageVolumeRejectsUnsafeDurabilityBeforeSideEffects(t *testing.T) {
-	remoteRoot := "/k8s/pvc/rwx-stage"
-	volumeID := volumeIDForRemoteRoot(remoteRoot)
-	tests := []struct {
-		name       string
-		capability *csi.VolumeCapability
-		context    map[string]string
-		wantParam  string
-	}{
-		{
-			name:       "MNMW wrong profile",
-			capability: multiNodeMultiWriterMountCapability(),
-			context: map[string]string{
-				paramProfile:    "coding-agent",
-				paramDurability: durabilityCloseSync,
-			},
-			wantParam: paramProfile,
-		},
-		{
-			name:       "MNMW missing durability",
-			capability: multiNodeMultiWriterMountCapability(),
-			context:    map[string]string{paramProfile: profileNone},
-			wantParam:  paramDurability,
-		},
-		{
-			name:       "RWO invalid durability",
-			capability: singleNodeMountCapability(),
-			context:    map[string]string{paramDurability: "auto"},
-			wantParam:  paramDurability,
-		},
-		{
-			name:       "RWO durability writeback conflict",
-			capability: singleNodeMountCapability(),
-			context: map[string]string{
-				paramDurability:           durabilityWriteSync,
-				paramWritebackBatchWindow: "20ms",
-			},
-			wantParam: paramWritebackBatchWindow,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			k8s := k8sfake.NewSimpleClientset()
-			d := &Driver{
-				cfg: Config{StateDir: t.TempDir(), DriverName: "csi.drive9.ai"},
-				k8s: k8s,
-			}
-			volumeContext := map[string]string{"remoteRoot": remoteRoot}
-			for key, value := range tt.context {
-				volumeContext[key] = value
-			}
-			_, err := d.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
-				VolumeId:          volumeID,
-				StagingTargetPath: t.TempDir(),
-				VolumeCapability:  tt.capability,
-				VolumeContext:     volumeContext,
-			})
-			if status.Code(err) != codes.FailedPrecondition {
-				t.Fatalf("status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
-			}
-			if !strings.Contains(err.Error(), tt.wantParam) {
-				t.Fatalf("error %q does not name %s", err, tt.wantParam)
-			}
-			if actions := k8s.Actions(); len(actions) != 0 {
-				t.Fatalf("invalid stage made Kubernetes calls: %#v", actions)
-			}
-			if _, readErr := d.stateRepository().Read(volumeID); !errors.Is(readErr, os.ErrNotExist) {
-				t.Fatalf("invalid stage changed durable state: %v", readErr)
-			}
-		})
 	}
 }
 
@@ -923,10 +856,28 @@ func TestCreateVolumeStoresConfiguredMountTuning(t *testing.T) {
 	})
 }
 
-func TestCreateVolumeAcceptsMNMWDurabilityForBothVolumeModes(t *testing.T) {
+func TestCreateVolumePassesThroughMNMWMountParametersForBothVolumeModes(t *testing.T) {
+	tests := []struct {
+		name           string
+		extra          map[string]string
+		wantProfile    string
+		wantDurability string
+	}{
+		{name: "absent"},
+		{
+			name: "configured",
+			extra: map[string]string{
+				paramProfile:              " custom-profile ",
+				paramDurability:           " custom-durability ",
+				paramWritebackBatchWindow: "20ms",
+			},
+			wantProfile:    "custom-profile",
+			wantDurability: "custom-durability",
+		},
+	}
 	for _, managed := range []bool{false, true} {
-		for _, durability := range []string{durabilityCloseSync, durabilityWriteSync} {
-			name := fmt.Sprintf("managed=%t/%s", managed, durability)
+		for _, test := range tests {
+			name := fmt.Sprintf("managed=%t/%s", managed, test.name)
 			t.Run(name, func(t *testing.T) {
 				fd := newFakeDrive9(t)
 				defer fd.close()
@@ -937,9 +888,9 @@ func TestCreateVolumeAcceptsMNMWDurabilityForBothVolumeModes(t *testing.T) {
 					fd.k8sSecret("drive9-secret", "default"),
 				)
 				d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
-				extra := map[string]string{
-					paramProfile:    " none ",
-					paramDurability: " " + durability + " ",
+				extra := map[string]string{}
+				for key, value := range test.extra {
+					extra[key] = value
 				}
 				if managed {
 					extra["remoteRootPrefix"] = "/k8s/pvc"
@@ -954,8 +905,13 @@ func TestCreateVolumeAcceptsMNMWDurabilityForBothVolumeModes(t *testing.T) {
 					t.Fatalf("CreateVolume error = %v", err)
 				}
 				ctx := resp.GetVolume().GetVolumeContext()
-				if ctx[paramProfile] != "none" || ctx[paramDurability] != durability {
+				if ctx[paramProfile] != test.wantProfile || ctx[paramDurability] != test.wantDurability {
 					t.Fatalf("VolumeContext profile/durability = %q/%q", ctx[paramProfile], ctx[paramDurability])
+				}
+				if test.wantDurability == "" {
+					if _, ok := ctx[paramDurability]; ok {
+						t.Fatal("absent durability was persisted")
+					}
 				}
 				for _, key := range []string{"apiKey", "server"} {
 					if _, ok := ctx[key]; ok {
@@ -967,50 +923,8 @@ func TestCreateVolumeAcceptsMNMWDurabilityForBothVolumeModes(t *testing.T) {
 	}
 }
 
-func TestCreateVolumeRejectsUnsafeMNMWBeforeRemoteMutation(t *testing.T) {
-	tests := []struct {
-		name  string
-		extra map[string]string
-	}{
-		{name: "missing profile", extra: map[string]string{paramDurability: durabilityCloseSync}},
-		{name: "wrong profile", extra: map[string]string{paramProfile: "coding-agent", paramDurability: durabilityCloseSync}},
-		{name: "missing durability", extra: map[string]string{paramProfile: "none"}},
-		{name: "invalid durability", extra: map[string]string{paramProfile: "none", paramDurability: "auto"}},
-		{name: "writeback conflict", extra: map[string]string{
-			paramProfile:              "none",
-			paramDurability:           durabilityCloseSync,
-			paramWritebackBatchWindow: "20ms",
-		}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fd := newFakeDrive9(t)
-			defer fd.close()
-
-			pvcName := "pvc-rwx-invalid"
-			k8s := k8sfake.NewSimpleClientset(
-				fd.k8sPVC(pvcName, "default", "drive9-secret"),
-				fd.k8sSecret("drive9-secret", "default"),
-			)
-			d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
-			tt.extra["remoteRootPrefix"] = "/k8s/pvc"
-			_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
-				Name:               pvcName,
-				Parameters:         pvcParams(pvcName, "default", tt.extra),
-				VolumeCapabilities: []*csi.VolumeCapability{multiNodeMultiWriterMountCapability()},
-			})
-			if status.Code(err) != codes.InvalidArgument {
-				t.Fatalf("status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
-			}
-			if fd.exists("/k8s") {
-				t.Fatal("invalid configuration mutated Drive9 before rejection")
-			}
-		})
-	}
-}
-
-func TestCreateVolumeRWOOptionalDurability(t *testing.T) {
-	for _, durability := range []string{"", durabilityCloseSync, durabilityWriteSync} {
+func TestCreateVolumeOptionalDurability(t *testing.T) {
+	for _, durability := range []string{"", "custom-durability"} {
 		t.Run(durability, func(t *testing.T) {
 			fd := newFakeDrive9(t)
 			defer fd.close()
@@ -1061,6 +975,7 @@ func TestCreateVolumeStoresMutableMountParameters(t *testing.T) {
 		Parameters: pvcParams("pvc-vac", "default", nil),
 		MutableParameters: map[string]string{
 			paramProfile:                     " coding-agent ",
+			paramDurability:                  " custom-durability ",
 			paramAttrTTL:                     "1000ms",
 			paramEntryTTL:                    "1m",
 			paramDirTTL:                      "2m30s",
@@ -1079,6 +994,9 @@ func TestCreateVolumeStoresMutableMountParameters(t *testing.T) {
 	ctx := createResp.GetVolume().GetVolumeContext()
 	if got := ctx[paramProfile]; got != "coding-agent" {
 		t.Fatalf("volume context %s = %q, want coding-agent", paramProfile, got)
+	}
+	if got := ctx[paramDurability]; got != "custom-durability" {
+		t.Fatalf("volume context %s = %q, want custom-durability", paramDurability, got)
 	}
 	assertVolumeContextMountTTLs(t, ctx, mountTTLs{
 		AttrTTL:  "1s",
@@ -2226,29 +2144,16 @@ func TestControllerModifyVolumeRejectsDynamicUpdates(t *testing.T) {
 	}
 }
 
-func TestControllerModifyVolumeAcceptsDurabilityButRemainsUnimplemented(t *testing.T) {
+func TestControllerModifyVolumeAcceptsArbitraryDurabilityButRemainsUnimplemented(t *testing.T) {
 	d := &Driver{}
 	_, err := d.ControllerModifyVolume(context.Background(), &csi.ControllerModifyVolumeRequest{
 		VolumeId: "drive9-root-demo",
 		MutableParameters: map[string]string{
-			paramDurability: durabilityCloseSync,
+			paramDurability: "custom-durability",
 		},
 	})
 	if status.Code(err) != codes.Unimplemented {
 		t.Fatalf("ControllerModifyVolume status = %s, want Unimplemented (err=%v)", status.Code(err), err)
-	}
-}
-
-func TestControllerModifyVolumeRejectsInvalidDurability(t *testing.T) {
-	d := &Driver{}
-	_, err := d.ControllerModifyVolume(context.Background(), &csi.ControllerModifyVolumeRequest{
-		VolumeId: "drive9-root-demo",
-		MutableParameters: map[string]string{
-			paramDurability: "auto",
-		},
-	})
-	if status.Code(err) != codes.InvalidArgument {
-		t.Fatalf("ControllerModifyVolume status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
 	}
 }
 
@@ -2301,12 +2206,12 @@ func TestValidateVolumeCapabilitiesRPC(t *testing.T) {
 		t.Fatal("expected confirmed for SINGLE_NODE_MULTI_WRITER capability")
 	}
 
-	// MULTI_NODE_MULTI_WRITER is confirmed without adding an RPC capability.
+	// MULTI_NODE_MULTI_WRITER does not impose mount-parameter requirements.
 	resp, err = d.ValidateVolumeCapabilities(context.Background(), &csi.ValidateVolumeCapabilitiesRequest{
 		VolumeId: "vol-1",
 		VolumeContext: map[string]string{
-			paramProfile:    profileNone,
-			paramDurability: durabilityCloseSync,
+			paramProfile:    "custom-profile",
+			paramDurability: "custom-durability",
 		},
 		VolumeCapabilities: []*csi.VolumeCapability{multiNodeMultiWriterMountCapability()},
 	})
@@ -2317,19 +2222,16 @@ func TestValidateVolumeCapabilitiesRPC(t *testing.T) {
 		t.Fatal("MULTI_NODE_MULTI_WRITER should be confirmed")
 	}
 
-	// MULTI_NODE_MULTI_WRITER with a default RWO context must not be confirmed.
+	// MULTI_NODE_MULTI_WRITER is also valid without profile or durability.
 	resp, err = d.ValidateVolumeCapabilities(context.Background(), &csi.ValidateVolumeCapabilitiesRequest{
-		VolumeId: "vol-1",
-		VolumeContext: map[string]string{
-			paramProfile: "coding-agent",
-		},
+		VolumeId:           "vol-1",
 		VolumeCapabilities: []*csi.VolumeCapability{multiNodeMultiWriterMountCapability()},
 	})
 	if err != nil {
 		t.Fatalf("ValidateVolumeCapabilities error = %v", err)
 	}
-	if resp.GetConfirmed() != nil || resp.GetMessage() == "" {
-		t.Fatalf("unsafe MULTI_NODE_MULTI_WRITER response = %+v", resp)
+	if resp.GetConfirmed() == nil {
+		t.Fatalf("MULTI_NODE_MULTI_WRITER without mount parameters was not confirmed: %+v", resp)
 	}
 
 	// Unsupported read-only capability — should not confirm.

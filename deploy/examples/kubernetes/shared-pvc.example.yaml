@@ -13,15 +13,6 @@ reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: false
 ---
-apiVersion: storage.k8s.io/v1
-kind: VolumeAttributesClass
-metadata:
-  name: drive9-shared-pvc-example
-driverName: csi.drive9.ai
-parameters:
-  profile: none
-  durability: close-sync
----
 apiVersion: v1
 kind: Secret
 metadata:
@@ -43,7 +34,6 @@ spec:
   accessModes:
     - ReadWriteMany
   storageClassName: drive9-shared-pvc-example
-  volumeAttributesClassName: drive9-shared-pvc-example
   resources:
     requests:
       storage: 1Gi
