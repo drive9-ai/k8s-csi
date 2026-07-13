@@ -1,6 +1,13 @@
 ---
 title: CSI VolumeAttributesClass Mount Parameters Design
+status: implemented
 ---
+
+## Status
+
+Implemented by `766bc13`. The `Current Behavior` section below describes the
+pre-change baseline; `README.md` and `AGENTS.md` describe the resulting current
+contract.
 
 ## Goal
 
@@ -16,7 +23,7 @@ First implementation scope:
 4. Do not dynamically update already-mounted volumes when a PVC changes `spec.volumeAttributesClassName`.
 5. Upgrade the `csi-provisioner` sidecar to `registry.k8s.io/sig-storage/csi-provisioner:v6.3.0`, which supports GA `storage.k8s.io/v1` VolumeAttributesClass.
 
-## Current Behavior
+## Pre-change Behavior
 
 Current CSI manifest puts mount behavior directly in the default StorageClass:
 

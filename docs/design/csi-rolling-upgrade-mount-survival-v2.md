@@ -1,8 +1,16 @@
 ---
 title: CSI DaemonSet Rolling Upgrade — Mount Survival Design
+status: implemented-validation-only
 ---
 
 <!-- markdownlint-disable MD013 -->
+
+## Status
+
+The core mount-survival implementation landed in `92b52a8`. Manually published
+images remain validation-only: the N/N-1 bidirectional cache/writeback
+compatibility gate below must land and pass before a fallback-capable image is
+release-admitted.
 
 ## Supersession
 
@@ -15,9 +23,9 @@ invariants here remain authoritative.
 ## Problem
 
 When the `drive9-csi-node` DaemonSet is updated (rolling update), the CSI Pod
-restarts. Currently, `shutdownNodeMounts()` runs on Pod exit and actively
-unmounts all `drive9 mount` processes + staging targets. After restart, recovery
-re-mounts the staging targets, but existing business Pods lose their mount
+restarts. Before this design, `shutdownNodeMounts()` ran on Pod exit and actively
+unmounted all `drive9 mount` processes + staging targets. After restart, recovery
+re-mounted the staging targets, but existing business Pods lost their mount
 points because:
 
 1. The old FUSE connection is destroyed. Existing staging, publish, and

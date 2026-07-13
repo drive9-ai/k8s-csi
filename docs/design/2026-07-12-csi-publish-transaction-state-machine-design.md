@@ -1,10 +1,15 @@
 ---
 title: CSI Publish Transaction State Machine Design
-status: proposed
+status: implemented
 updated: 2026-07-12
 ---
 
 <!-- markdownlint-disable MD013 MD060 -->
+
+## Status
+
+Implemented by `b523022`. The checked-in driver and tests now enforce the
+`pending`/`published`/`unpublishing` transaction described below.
 
 ## Scope Baseline
 
@@ -41,8 +46,8 @@ the design must return to scope review before implementation.
 
 ## Context
 
-Current main has durable `pending` and `published` publish states, but cleanup
-has no durable direction:
+The pre-change implementation had durable `pending` and `published` publish
+states, but cleanup had no durable direction:
 
 1. NodeUnpublishVolume unmounts the target and then removes state.
 2. A crash after unmount leaves `published` plus an absent target.

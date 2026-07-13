@@ -1,6 +1,15 @@
 ---
 title: CSI Node Mount Recovery Design
+status: superseded
+superseded_by: docs/design/csi-rolling-upgrade-mount-survival-v2.md
 ---
+
+## Status
+
+The defensive remount approach recorded here was implemented and tested, then
+superseded by host-systemd mount survival. Current mounts outlive CSI node Pod
+replacement; use the superseding design and current runtime documentation for
+the active contract.
 
 ## Goal
 
@@ -63,7 +72,7 @@ The publish target binds to the mount instance that existed when the bind mount 
 
 Rebinding publish targets updates the host-side kubelet target. It does not replace the mount object already present in a running workload Pod's mount namespace. A running Pod can therefore remain broken even when the host-side publish target has been repaired.
 
-## Current Behavior
+## Historical Behavior
 
 The same `drive9-csi` binary runs in both the controller Deployment and node DaemonSet.
 

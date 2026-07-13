@@ -10,6 +10,10 @@ This document is a discussion draft. It records a proposed simplification and
 the evidence collected so far. It does not authorize implementation,
 deployment, commit, or push.
 
+The proposal has not been implemented: the current node DaemonSet does not set
+`hostPID: true`. Its FUSE-helper assumptions are historical and were superseded
+by `2026-07-12-csi-direct-mount-strict-helper-removal-design.md`.
+
 ## Problem
 
 The CSI node Pod currently does not use the host PID namespace. It enters the

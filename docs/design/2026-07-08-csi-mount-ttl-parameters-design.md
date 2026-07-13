@@ -1,6 +1,13 @@
 ---
 title: CSI Mount TTL Parameters Design
+status: implemented
 ---
+
+## Status
+
+Implemented by `9ff7d41`. This document records the original StorageClass-based
+contract. VolumeAttributesClass is now the preferred source for mount behavior;
+legacy StorageClass parameters remain supported as a compatibility fallback.
 
 ## Goal
 

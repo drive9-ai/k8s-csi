@@ -16,7 +16,8 @@ title: Drive9 CSI Kubernetes Examples
 The examples assume the Drive9 CSI driver is already installed with a compatible
 image. The checked-in driver base uses the fail-closed
 `registry.invalid/drive9-csi:unpublished` image and cannot run as-is. Use an
-immutable image for production.
+immutable, release-admitted image for production; a validation workflow tag or
+digest alone is not release-admission evidence.
 
 ## Shared-PVC Scenario
 
@@ -89,8 +90,8 @@ kubectl apply -k deploy/overlays/local
 ```
 
 For production, copy that overlay pattern and replace `:local` with the
-published immutable image reference selected by your release process. Do not
-apply the fail-closed base directly.
+release-admitted immutable image reference selected by your release process. Do
+not apply the fail-closed base directly.
 
 After replacing the placeholder API key, apply all five example resources with
 one command:
@@ -158,6 +159,12 @@ resources:
 | `pod.example.yaml` | Single-Pod read/write smoke workload |
 
 <!-- markdownlint-enable MD013 -->
+
+The tuned VolumeAttributesClass parameters are consumed when the PVC's volume is
+created. The driver does not dynamically apply a later
+`spec.volumeAttributesClassName` change; recreate the volume to use a different
+mount configuration. Legacy StorageClass mount parameters remain supported, but
+VAC values take precedence for new volumes.
 
 Use these files when testing one resource at a time or integrating the PVC into
 an existing namespace. Use `shared-pvc.example.yaml` when the goal is a complete

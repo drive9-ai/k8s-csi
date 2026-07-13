@@ -1,4 +1,13 @@
-# CSI DaemonSet Rolling Upgrade — Mount Survival Design
+---
+title: CSI DaemonSet Rolling Upgrade — Mount Survival Design V1
+status: superseded
+superseded_by: docs/design/csi-rolling-upgrade-mount-survival-v2.md
+---
+
+## Status
+
+Superseded by `csi-rolling-upgrade-mount-survival-v2.md`. This file is retained
+as design history and is not the current implementation contract.
 
 ## Problem
 

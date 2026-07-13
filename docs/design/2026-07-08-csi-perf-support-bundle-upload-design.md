@@ -1,6 +1,14 @@
 ---
 title: CSI Perf Support Bundle Upload Design
+status: implemented
 ---
+
+## Status
+
+Implemented by `9ff7d41` and `07e19f3`. VolumeAttributesClass is now the
+preferred source for `perfEnabled`; legacy StorageClass parameters remain a
+compatibility fallback. The later mount-survival design supersedes descriptions
+below that imply the node plugin directly owns the long-running mount process.
 
 ## Goal
 
@@ -8,9 +16,11 @@ Drive9 CSI should provide a safe support workflow for collecting `drive9 mount -
 
 The upload should use the `drive9` CLI already present in the CSI node image, but it must not use the user's workload Drive9 credentials or upload into the user's business space.
 
-## Current Context
+## Design-time Context
 
-The node plugin image already contains `/usr/local/bin/drive9` because `NodeStageVolume` execs it for FUSE mounts.
+At design time, the node plugin image already contained `/usr/local/bin/drive9`
+and `NodeStageVolume` launched it for FUSE mounts. The current host-systemd
+lifecycle installs and launches a content-addressed host copy instead.
 
 The CLI has an upload primitive through `drive9 fs cp`:
 

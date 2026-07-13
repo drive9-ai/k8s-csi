@@ -1,4 +1,13 @@
-# Drive9 CSI + Sidecar Plan
+---
+title: Drive9 CSI + Sidecar Initial Plan
+status: historical
+---
+
+## Historical Status
+
+This file records the repository's initial June 2026 scope. Its RWO-only and
+other non-goal statements are not the current feature contract. Use `README.md`
+for the user contract and `AGENTS.md` for the current implementation reference.
 
 ## Goal
 
