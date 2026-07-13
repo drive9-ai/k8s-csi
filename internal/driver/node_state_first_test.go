@@ -96,6 +96,37 @@ func TestNodeStageStateFirstRejectsMNMWArgvMismatchBeforeSideEffects(t *testing.
 	}
 }
 
+func TestNodeStageStateFirstRejectsMNMWStateDowngradeBeforeSideEffects(t *testing.T) {
+	fixture := newNodeStateFirstFixtureWithActive(t, true, func(state *mountState) {
+		state.MountArgs = append(
+			state.MountArgs[:len(state.MountArgs)-2],
+			"--profile", profileNone,
+			"--durability", durabilityCloseSync,
+			state.MountArgs[len(state.MountArgs)-2],
+			state.MountArgs[len(state.MountArgs)-1],
+		)
+	})
+	before, err := fixture.driver.readMountState(fixture.active.VolumeID)
+	if err != nil {
+		t.Fatalf("read before: %v", err)
+	}
+
+	_, err = fixture.driver.NodeStageVolume(context.Background(), fixture.stageRequest)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
+	}
+	if got := atomic.LoadInt32(&fixture.k8sActions); got != 0 {
+		t.Fatalf("MNMW downgrade made %d Kubernetes API calls", got)
+	}
+	if calls := fixture.runtime.Calls(); len(calls) != 0 {
+		t.Fatalf("MNMW downgrade touched host runtime: %#v", calls)
+	}
+	after, readErr := fixture.driver.readMountState(fixture.active.VolumeID)
+	if readErr != nil || !reflectMountStatesEqual(before, after) {
+		t.Fatalf("MNMW downgrade changed state: before=%#v after=%#v err=%v", before, after, readErr)
+	}
+}
+
 func TestNodeStageStateFirstRejectsStartingMNMWMismatchBeforeReconcile(t *testing.T) {
 	fixture := newNodeStateFirstFixture(t, true)
 	starting := validStartingState(t)

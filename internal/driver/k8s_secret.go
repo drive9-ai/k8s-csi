@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"maps"
-	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -186,15 +185,20 @@ func classifyRecoveryPVAccessModes(modes []corev1.PersistentVolumeAccessMode) (b
 	if len(modes) == 0 {
 		return false, fmt.Errorf("must contain a supported writer mode")
 	}
-	if slices.Contains(modes, corev1.ReadWriteMany) {
-		return true, nil
-	}
+	mnmw := false
 	for _, mode := range modes {
-		if mode != corev1.ReadWriteOnce && mode != corev1.ReadWriteOncePod {
+		switch mode {
+		case corev1.ReadWriteMany:
+			mnmw = true
+		case corev1.ReadWriteOnce, corev1.ReadWriteOncePod:
+		default:
 			return false, fmt.Errorf("unsupported writer mode %q", mode)
 		}
 	}
-	return false, nil
+	if mnmw && len(modes) != 1 {
+		return false, fmt.Errorf("ReadWriteMany must not be combined with another access mode")
+	}
+	return mnmw, nil
 }
 
 // validateNoAPIKeyInAttributes checks that volumeAttributes do not

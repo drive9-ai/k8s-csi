@@ -318,8 +318,32 @@ func validatePersistedMNMWMountArgs(state mountState, profile string, durability
 				return fmt.Errorf("persisted %s argv: %w", persisted.name, err)
 			}
 		}
+		if mountArgsUseOption(persisted.args, "--writeback-batch-window") {
+			return fmt.Errorf("persisted %s argv: --writeback-batch-window is incompatible with durability", persisted.name)
+		}
 	}
 	return nil
+}
+
+func mountStateMayUseMNMWContract(state mountState) bool {
+	for _, args := range [][]string{state.MountArgs, state.FallbackMountArgs} {
+		if mountArgsUseOption(args, "--profile") &&
+			mountArgsUseOption(args, "--durability") {
+			return true
+		}
+	}
+	return false
+}
+
+func mountArgsUseOption(args []string, option string) bool {
+	alias := strings.TrimPrefix(option, "-")
+	for _, arg := range args {
+		if arg == option || strings.HasPrefix(arg, option+"=") ||
+			arg == alias || strings.HasPrefix(arg, alias+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 func validateCanonicalMountOption(args []string, option string, expected string) error {

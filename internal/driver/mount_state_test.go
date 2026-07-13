@@ -420,6 +420,9 @@ func TestPersistedMNMWMountArgs(t *testing.T) {
 			args[7] = durabilityWriteSync
 			return args
 		}},
+		{name: "writeback batch window", mutate: func(args []string) []string {
+			return append(args[:len(args)-2], "--writeback-batch-window", "20ms", args[len(args)-2], args[len(args)-1])
+		}},
 		{name: "profile equals alias", mutate: func(args []string) []string {
 			args = withoutOption(args, "--profile")
 			return append(args[:len(args)-2], "--profile=none", args[len(args)-2], args[len(args)-1])
@@ -502,6 +505,8 @@ func TestPersistedMNMWMountArgsValidatesFallback(t *testing.T) {
 		}},
 		{name: "single-dash override", fallback: append(append([]string(nil), primary[:len(primary)-2]...),
 			"-profile", "coding-agent", primary[len(primary)-2], primary[len(primary)-1])},
+		{name: "writeback batch window", fallback: append(append([]string(nil), primary[:len(primary)-2]...),
+			"--writeback-batch-window", "20ms", primary[len(primary)-2], primary[len(primary)-1])},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			state := mountState{

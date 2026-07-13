@@ -114,6 +114,21 @@ func validateMNMWMountParameters(profile string, durability string) error {
 	return nil
 }
 
+func validateMNMWVolumeContext(values map[string]string) error {
+	tuning, err := effectiveMountTuning(values)
+	if err != nil {
+		return err
+	}
+	durability, err := effectiveMountDurability(values)
+	if err != nil {
+		return err
+	}
+	if err := validateDurabilityTuning(durability, tuning); err != nil {
+		return err
+	}
+	return validateMNMWMountParameters(profileFromParameters(values), durability)
+}
+
 func addDurabilityToVolumeContext(ctx map[string]string, durability string) {
 	if durability != "" {
 		ctx[paramDurability] = durability

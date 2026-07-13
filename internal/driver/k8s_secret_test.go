@@ -221,7 +221,7 @@ func TestResolveRecoveryPV(t *testing.T) {
 		{name: "RWX", objects: []kruntime.Object{newPV("rwx", driverName, volumeID, corev1.ReadWriteMany)}, wantMNMW: true},
 		{name: "RWO", objects: []kruntime.Object{newPV("rwo", driverName, volumeID, corev1.ReadWriteOnce)}},
 		{name: "RWOP", objects: []kruntime.Object{newPV("rwop", driverName, volumeID, corev1.ReadWriteOncePod)}},
-		{name: "RWX with read only", objects: []kruntime.Object{newPV("rwx-mixed", driverName, volumeID, corev1.ReadOnlyMany, corev1.ReadWriteMany)}, wantMNMW: true},
+		{name: "RWX with read only", objects: []kruntime.Object{newPV("rwx-mixed", driverName, volumeID, corev1.ReadWriteMany, corev1.ReadOnlyMany)}, wantErr: true},
 		{name: "RWO and RWOP", objects: []kruntime.Object{newPV("rwo-mixed", driverName, volumeID, corev1.ReadWriteOnce, corev1.ReadWriteOncePod)}},
 		{name: "missing", objects: []kruntime.Object{newPV("other", driverName, "another-volume", corev1.ReadWriteMany)}, wantErr: true},
 		{name: "duplicate", objects: []kruntime.Object{
