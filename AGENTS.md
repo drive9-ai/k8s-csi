@@ -31,11 +31,11 @@ make image-multi IMAGE=ghcr.io/drive9-ai/drive9-csi:<tag>  # multi-arch buildx +
 ```
 
 Override platform: `GOOS`, `GOARCH` env vars. Default
-`GOPROXY=http://proxy.golang.org,direct`.
+`GOPROXY=https://proxy.golang.org,direct`.
 
 ## Dockerfile
 
-Multi-stage (`Dockerfile`, 67 lines):
+Multi-stage (`Dockerfile`):
 
 1. `golang:1.26-bookworm` — compiles `drive9-csi` (CGO_ENABLED=0)
 2. `debian:bookworm-slim` — downloads `drive9` CLI from
@@ -65,15 +65,17 @@ The binary URLs are mutable and contain no version. Local image builds either
 resolve a complete release from `version` plus `checksums.txt`, or pin
 `DRIVE9_CLI_VERSION` together with the target platform checksum. CI reads the
 version before and after the checksums to reject mixed releases, then records
-the resolved CLI version and source commit in the image tag and labels. Use an
-immutable CSI image digest for deployment.
+the resolved CLI version and source commit in the image tag and labels. The
+workflow publishes validation images, not release-admitted production images.
 
 ## Docker Image Tags
 
-**No `:latest` tag.** Image tags follow the pattern:
+**No `:latest` tag.** Validation image tags follow the pattern:
 `drive9-<drive9-cli-version>-csi-<sha7>`. Example: `drive9-aff1023-csi-ef5fab2`.
-The CI publishes only these traceable tags. Use an immutable tag or digest for
-production.
+The CI publishes only these traceable tags. A tag or digest proves artifact
+identity, not release admission. The N/N-1 cache/writeback compatibility gate
+in the mount-survival design must pass before a fallback-capable image is
+promoted to production.
 
 ## Tests
 
@@ -107,8 +109,8 @@ Tests use:
 - Tests are in-package (`package driver`, not `package driver_test`) — they
   access unexported symbols directly
 - `fakeDrive9` — `httptest.Server`-based HTTP handler simulating the Drive9 API
-  (defined in `driver_test.go:1324`, supports dirs, files, marker JSON, and
-  transient error injection via `failDeleteOnce`)
+  (defined in `internal/driver/driver_test.go`; supports dirs, files, marker
+  JSON, and transient error injection via `failDeleteOnce`)
 - `k8sfake.NewSimpleClientset` — fake K8s API for Secret/PVC/PV operations
 - `createPVForVolume` helper — simulates what `csi-provisioner` does after
   `CreateVolume`
@@ -135,28 +137,34 @@ e2e/prepare.sh --image-tag drive9-a53e497-csi-d91bfe3
 
 e2e/basic-lifecycle.sh
 e2e/mount-survival.sh
+e2e/multi-node-rwx.sh
 ```
 
 Run `prepare.sh` to create or update the persistent Driver environment, then run
-either case repeatedly against it. Pass the completed publishing workflow's
-bare trace tag literally through `--image-tag`. Cases reuse the pre-provisioned
+any case repeatedly against it. Pass the completed publishing workflow's bare
+trace tag literally through `--image-tag`. Cases reuse the pre-provisioned
 namespace and Secret and create and clean only their own StorageClass, VAC, PVC,
-and Pod resources. Every command requires explicit context and Driver namespace
+and Pod resources. `multi-node-rwx.sh` requires two eligible nodes and separate
+command approval. Every command requires explicit context and Driver namespace
 values. Read `e2e/AGENTS.md` before modifying or running E2E.
 
 ## Architecture
 
-The driver implements three CSI gRPC services in one binary:
+The binary implements three CSI gRPC services. `--service-mode=controller`
+registers Identity plus Controller; `--service-mode=node` registers Identity
+plus Node:
 
-| Service    | Implemented operations                                                                                                   |
+| Service    | RPC handlers                                                                                                              |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------ |
 | Identity   | `GetPluginInfo`, `GetPluginCapabilities`, `Probe`                                                                        |
-| Controller | `CreateVolume`, `DeleteVolume`, `ControllerGetCapabilities`, `ValidateVolumeCapabilities`                                |
+| Controller | `CreateVolume`, `DeleteVolume`, `ControllerGetCapabilities`, `ValidateVolumeCapabilities`, `ControllerModifyVolume`      |
 | Node       | `NodeStageVolume`, `NodeUnstageVolume`, `NodePublishVolume`, `NodeUnpublishVolume`, `NodeGetInfo`, `NodeGetCapabilities` |
 
 ### Volume Modes
 
-Two volume types, determined by StorageClass parameters:
+Two provisioning modes are selected by StorageClass identity parameters and PVC
+annotations. Mount behavior parameters may come from a VolumeAttributesClass at
+volume creation time:
 
 **Workspace-root** (default, no `remoteRootPrefix`):
 
@@ -172,6 +180,30 @@ Two volume types, determined by StorageClass parameters:
 - Writes CSI metadata: marker file (`.drive9-csi-volume.json`), index at
   `/k8s/.drive9-csi/volumes/`, name-index at `/k8s/.drive9-csi/volumes/by-name/`
 - `DeleteVolume` removes only CSI metadata — never deletes user data
+
+### Access Modes
+
+- `SINGLE_NODE_WRITER`, `SINGLE_NODE_SINGLE_WRITER`, and
+  `SINGLE_NODE_MULTI_WRITER` are supported for single-node volumes.
+- `MULTI_NODE_MULTI_WRITER` backs Kubernetes `ReadWriteMany` volumes.
+- RWX adds no `profile` or `durability` default or restriction. Explicit mount
+  parameters are validated and forwarded to `drive9 mount`.
+- A request cannot mix single-node and multi-node writer capabilities. Active
+  publish targets for one volume must use the same multi-writer mode.
+
+### VolumeAttributesClass
+
+The external provisioner sends VolumeAttributesClass parameters through
+`CreateVolumeRequest.mutable_parameters`. Supported create-time keys are
+`profile`, `durability`, the three TTLs, `perfEnabled`, and the five tuning
+parameters. They override matching legacy StorageClass parameters. Identity
+parameters such as `remoteRoot` and `remoteRootPrefix` are not mutable.
+
+The driver advertises `MODIFY_VOLUME` so external-provisioner can provision a
+PVC that references a VAC, but `ControllerModifyVolume` returns `Unimplemented`
+for a valid update request after validating its keys and values.
+Changing an existing PVC's VAC is unsupported; recreate the volume to apply new
+mount parameters.
 
 ### Credential Flow
 
@@ -190,47 +222,56 @@ DeleteVolume: look up PV by volumeHandle → read secretName/secretNamespace fro
 implement FUSE mount observation and direct kernel unmount. New mounts always
 use `--direct-mount-strict --allow-other`; Drive9 calls `mount(2)` and must not
 fall back to a FUSE helper. The Go binaries use `CGO_ENABLED=0`. Root,
-`SYS_ADMIN`, and `/dev/fuse` remain required; `fuse3`, `fusermount3`, and
-`/etc/fuse.conf` do not.
+`SYS_ADMIN`, `/dev/fuse`, host `/proc`, host systemd, and writable host state and
+runtime directories remain required; `fuse3`, `fusermount3`, and
+`/etc/fuse.conf` do not. Mount processes run in host-managed transient systemd
+services and survive CSI node Pod replacement.
 
 ### Unsupported Features
 
 Rejected with explicit gRPC errors:
 
 - Block volumes, fs_type, mount flags
-- RWX/MultiNode access modes
+- Reader-only and writer access modes outside the four supported modes above
 - Volume content sources (cloning/snapshots)
 - Volume expansion
-- Mutable parameters
+- Dynamic VolumeAttributesClass updates after volume creation
 
 ## Deploy
 
 ```sh
-kubectl apply -f deploy/kubernetes/namespace.yaml
-kubectl apply -k deploy/kubernetes      # install CSI driver
-kubectl apply -k deploy/sidecar         # sidecar fallback (non-CSI)
+make image IMAGE=ghcr.io/drive9-ai/drive9-csi:local
+kubectl apply -k deploy/overlays/local  # local/preloaded validation image
 ```
+
+`deploy/kubernetes` and `deploy/sidecar` are fail-closed bases containing
+`registry.invalid/drive9-csi:unpublished`; do not apply either as a runnable
+installation without an environment-specific image override. Production must
+use a release-admitted immutable image selected by the release process.
 
 Deploy resources:
 
 | Path                          | Purpose                                                                                         |
 | ----------------------------- | ----------------------------------------------------------------------------------------------- |
-| `deploy/kubernetes/`          | Production CSI: namespace, CSIDriver, controller Deployment, node DaemonSet, RBAC, StorageClass |
-| `deploy/sidecar/`             | Fallback sidecar Deployment (privileged, hostPath mount propagation)                            |
-| `deploy/examples/kubernetes/` | Example Secret, PVC, Pod (apply separately, not via kustomize)                                  |
-| `deploy/examples/sidecar/`    | Example Secret for sidecar                                                                      |
+| `deploy/kubernetes/`          | Fail-closed CSI base: namespace, CSIDriver, controller, node, RBAC, two StorageClasses, VAC |
+| `deploy/overlays/local/`      | Local image override for the CSI base                                                     |
+| `deploy/sidecar/`             | Fail-closed fallback sidecar base (privileged, hostPath mount propagation)                |
+| `deploy/examples/kubernetes/` | Separate SC, VAC, Secret, PVC and Pod examples plus a self-contained RWX bundle            |
+| `deploy/examples/sidecar/`    | Example Secret for sidecar                                                               |
 
 Key deploy details:
 
 - `csi-provisioner:v6.3.0` sidecar with `--extra-create-metadata` (required for
-  PVC name/namespace injection)
+  PVC name/namespace injection) and `VolumeAttributesClass=true`
 - `node-driver-registrar:v2.13.0` sidecar
 - Node DaemonSet needs `privileged: true`, `SYS_ADMIN`, `BIDIRECTIONAL` mount
   propagation
 - Controller RBAC needs `secrets: [get]` (ClusterRole) for credential resolution
 - Node RBAC also needs `secrets: [get]`
-- Default StorageClass: `drive9-rwo`, `Retain`, `WaitForFirstConsumer`,
-  `profile=coding-agent`
+- StorageClasses `drive9-rwo` and `drive9-rwx` both use empty parameters,
+  `Retain`, and `WaitForFirstConsumer`
+- Optional default VAC `drive9-coding-agent` provides `profile=coding-agent`,
+  30-second TTLs, and `perfEnabled=false`; PVCs opt into it explicitly
 - Examples are intentionally separate from kustomization so
   `kubectl apply -k deploy/kubernetes` doesn't create placeholder credentials
 - The fallback sidecar uses a fail-closed image placeholder and the compiled
@@ -254,7 +295,10 @@ Key deploy details:
 
 Stored under `$DRIVE9_CSI_STATE_DIR` (default `/var/lib/drive9-csi`):
 
-- `{volumeID}.json` — mount state (PID, PIDStartTime, staging target)
+- `{volumeID}.json` — strict schema-v2 mount transaction state with
+  `starting`/`active`/`stopping` phase, mount attempt, systemd unit,
+  content-addressed binary, argv, process identity, and staging target. Pre-v2
+  mount state is rejected and preserved for operator inspection.
 - `published-{sha256(target)}.json` — publish state with required status field
   (`pending`/`published`/`unpublishing`); missing or unknown status fails
   closed. Legacy files may omit only `accessMode`, which defaults to
@@ -263,9 +307,9 @@ Stored under `$DRIVE9_CSI_STATE_DIR` (default `/var/lib/drive9-csi`):
 ## CI
 
 `.github/workflows/publish-image.yml` is manually triggered. It resolves the
-latest complete Drive9 CLI release, builds amd64 and arm64 images, publishes a
-multi-architecture manifest to GHCR, and outputs the tag and digest. It does not
-run E2E or deploy to a cluster.
+latest complete Drive9 CLI release, builds amd64 and arm64 validation images,
+publishes a multi-architecture manifest to GHCR, and outputs the tag and digest.
+It does not run tests, run E2E, deploy to a cluster, or grant release admission.
 
 ## Notes & Planning Files
 
@@ -274,3 +318,5 @@ run E2E or deploy to a cluster.
 - `TODO.md` — completed task history (production review passes, E2E tests)
 - `dat9-dev-csi-smoke-test-20260607.md` — internal test report (may not be
   relevant to all agents)
+- `docs/design/` — dated design records; use each file's frontmatter `status`
+  and supersession note before treating it as current

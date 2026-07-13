@@ -221,6 +221,7 @@ Clean up the examples:
 ```sh
 kubectl -n default delete pod drive9-workspace-smoke
 kubectl -n default delete pvc drive9-workspace-tuned
+kubectl delete -f deploy/examples/kubernetes/volumeattributesclass.example.yaml
 kubectl delete -f deploy/examples/kubernetes/shared-pvc.example.yaml
 ```
 
@@ -238,82 +239,35 @@ after replacing the API key. Each PVC references its Secret via the
 `drive9.ai/secret-name` annotation — multiple PVCs can share a Secret or use
 different ones.
 
-## StorageClass
+## StorageClass and VolumeAttributesClass
 
-Default example:
+The checked-in manifests separate provisioning identity from mount behavior.
+The `drive9-rwo` and `drive9-rwx` StorageClasses have empty parameters:
 
 ```yaml
 provisioner: csi.drive9.ai
-parameters:
-  profile: coding-agent
-  attrTTL: 30s
-  entryTTL: 30s
-  dirTTL: 30s
-  perfEnabled: "false"
+parameters: {}
 reclaimPolicy: Retain
 volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: false
 ```
 
-The StorageClass does **not** contain any secret template parameters.
-Credentials are resolved from PVC annotations, not StorageClass templates. This
-avoids the implicit `drive9-csi-${pvc.name}` naming convention and makes the
-Secret binding explicit and auditable.
-
-`Retain` is the default example because this is customer data. If a customer
-wants a PVC to mount a CSI-managed subdirectory instead of the Drive9 workspace
-root, create a separate `StorageClass` with `remoteRootPrefix`:
+PVCs opt into mount behavior with `spec.volumeAttributesClassName`. The base
+installs the optional `drive9-coding-agent` VolumeAttributesClass; the separate
+tuned example installs `drive9-coding-agent-tuned`:
 
 ```yaml
+apiVersion: storage.k8s.io/v1
+kind: VolumeAttributesClass
+metadata:
+  name: drive9-coding-agent-tuned
+driverName: csi.drive9.ai
 parameters:
-  remoteRootPrefix: /k8s/pvc
   profile: coding-agent
   attrTTL: 30s
   entryTTL: 30s
   dirTTL: 30s
   perfEnabled: "false"
-```
-
-In managed directory mode, `CreateVolume` creates a unique child directory under
-that prefix and writes CSI metadata. If that separate `StorageClass` uses
-`reclaimPolicy: Delete`, the driver still refuses to delete paths without both a
-matching metadata index entry and a matching `.drive9-csi-volume.json` marker.
-
-The optional `attrTTL`, `entryTTL`, and `dirTTL` parameters control the matching
-`drive9 mount --attr-ttl`, `--entry-ttl`, and `--dir-ttl` flags. Each value uses
-Go duration syntax, for example `500ms`, `1s`, `30s`, or `2m`. If omitted, the
-CSI driver defaults each value to `30s`.
-
-The optional `perfEnabled` parameter defaults to `"false"`. When set to
-`"true"`, `NodeStageVolume` passes `--perf-dir` with a driver-generated path
-under `/var/lib/drive9-csi/perf/<volume-id>`. The driver does not accept a
-user-provided perf path and does not automatically delete perf output. Remove
-the perf directory manually after collecting support data.
-
-The following optional tuning parameters have no CSI defaults. The driver passes
-only values explicitly set in the `StorageClass`:
-
-| StorageClass parameter        | `drive9 mount` flag                 |
-| ----------------------------- | ----------------------------------- |
-| `readdirPrefetch`             | `--readdir-prefetch`                |
-| `readdirPrefetchMaxFiles`     | `--readdir-prefetch-max-files`      |
-| `readdirPrefetchMaxFileBytes` | `--readdir-prefetch-max-file-bytes` |
-| `readdirPrefetchMaxBytes`     | `--readdir-prefetch-max-bytes`      |
-| `writebackBatchWindow`        | `--writeback-batch-window`          |
-
-`readdirPrefetch` accepts `"true"` or `"false"`. The integer values must be
-positive. `writebackBatchWindow` uses Go duration syntax, for example `20ms`.
-The `--writeback-batch-window` flag requires a `drive9` CLI version that
-supports it.
-
-Example with explicit tuning enabled:
-
-```yaml
-parameters:
-  profile: coding-agent
-  attrTTL: 30s
-  entryTTL: 30s
-  dirTTL: 30s
-  perfEnabled: "true"
   readdirPrefetch: "true"
   readdirPrefetchMaxFiles: "64"
   readdirPrefetchMaxFileBytes: "50000"
@@ -321,10 +275,78 @@ parameters:
   writebackBatchWindow: 20ms
 ```
 
+```yaml
+spec:
+  storageClassName: drive9-rwo
+  volumeAttributesClassName: drive9-coding-agent-tuned
+```
+
+StorageClass mount parameters remain supported for compatibility. At volume
+creation, VolumeAttributesClass parameters override matching StorageClass
+parameters. The driver stores the effective values in PV `volumeAttributes` so
+the node uses a fixed mount configuration for that volume.
+
+This VAC support is creation-time only. The driver advertises CSI
+`MODIFY_VOLUME` because external-provisioner requires that capability when
+provisioning a PVC with a VAC. After validating the requested keys and values,
+`ControllerModifyVolume` returns `Unimplemented` for a valid dynamic update.
+Changing `spec.volumeAttributesClassName` on an existing PVC does not remount or
+reconfigure it; recreate the volume to apply different mount parameters.
+
+Parameter ownership is:
+
+| Parameter | Preferred source | Behavior |
+| --------- | ---------------- | -------- |
+| `remoteRootPrefix` | StorageClass | Creates a CSI-managed directory and affects volume identity |
+| `remoteRoot` | PVC annotation; legacy StorageClass fallback | Selects an existing workspace path and affects volume identity |
+| `profile`, `durability` | VolumeAttributesClass | Forwarded to `drive9 mount` when explicitly set |
+| `attrTTL`, `entryTTL`, `dirTTL` | VolumeAttributesClass | Positive Go durations; each defaults to `30s` |
+| `perfEnabled` | VolumeAttributesClass | Boolean; defaults to `false` |
+| Read-directory and writeback tuning | VolumeAttributesClass | Optional; no CSI defaults |
+
+Credentials are not valid StorageClass or VolumeAttributesClass parameters.
+They are resolved from the PVC's `drive9.ai/secret-name` annotation, which
+keeps Secret binding explicit and auditable.
+
+`Retain` is the default because this is customer data. To use managed-directory
+mode, create a separate StorageClass containing only the identity parameter:
+
+```yaml
+parameters:
+  remoteRootPrefix: /k8s/pvc
+```
+
+In managed-directory mode, `CreateVolume` creates a unique child directory
+under that prefix and writes CSI metadata. Even with `reclaimPolicy: Delete`,
+the driver removes only the metadata and refuses cleanup without both a matching
+index entry and `.drive9-csi-volume.json` marker. It never deletes user data.
+
+The optional `attrTTL`, `entryTTL`, and `dirTTL` values control the matching
+`drive9 mount --attr-ttl`, `--entry-ttl`, and `--dir-ttl` flags. Each uses Go
+duration syntax, for example `500ms`, `1s`, `30s`, or `2m`.
+
+When `perfEnabled` is `"true"`, `NodeStageVolume` passes `--perf-dir` with a
+driver-generated path under `/var/lib/drive9-csi/perf/<volume-id>`. The driver
+does not accept a user-provided perf path or automatically delete perf output.
+
+The optional tuning parameters have no CSI defaults:
+
+| Parameter                     | `drive9 mount` flag                 |
+| ----------------------------- | ----------------------------------- |
+| `readdirPrefetch`             | `--readdir-prefetch`                |
+| `readdirPrefetchMaxFiles`     | `--readdir-prefetch-max-files`      |
+| `readdirPrefetchMaxFileBytes` | `--readdir-prefetch-max-file-bytes` |
+| `readdirPrefetchMaxBytes`     | `--readdir-prefetch-max-bytes`      |
+| `writebackBatchWindow`        | `--writeback-batch-window`          |
+
+`readdirPrefetch` accepts `"true"` or `"false"`. Integer values must be
+positive. `writebackBatchWindow` uses a positive Go duration such as `20ms` and
+requires a compatible Drive9 CLI.
+
 If you use `reclaimPolicy: Delete`, keep the per-PVC workload namespace Secret
-in place until Kubernetes has deleted the PV. If the Secret is removed first,
-`DeleteVolume` cannot resolve credentials and backend cleanup will require
-manual intervention.
+until Kubernetes has deleted the PV. If the Secret is removed first,
+`DeleteVolume` cannot resolve credentials and metadata cleanup requires manual
+intervention.
 
 ## Sidecar Fallback
 

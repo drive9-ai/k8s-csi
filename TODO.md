@@ -1,3 +1,15 @@
+---
+title: Drive9 CSI Historical Task Log
+status: historical
+---
+
+## Historical Status
+
+This is a dated record of completed early implementation and validation work,
+not the current backlog or feature contract. In particular, the RWO-only scope
+near the end predates RWX, VolumeAttributesClass, and host-systemd mount
+survival. Use `README.md` and `AGENTS.md` for current behavior.
+
 # Task: Publish Full CSI Image To 1252 ECR
 
 ## Objective
