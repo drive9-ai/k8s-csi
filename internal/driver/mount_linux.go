@@ -72,6 +72,14 @@ func isMountPoint(target string) (bool, error) {
 	return false, nil
 }
 
+func observeMountPoint(target string) (mountPointObservation, error) {
+	body, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return mountPointObservation{}, err
+	}
+	return parseMountPointObservation(body, target)
+}
+
 func unescapeMountInfo(s string) string {
 	for {
 		idx := strings.IndexByte(s, '\\')

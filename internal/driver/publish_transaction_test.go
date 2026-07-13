@@ -82,6 +82,158 @@ func TestNodePublishVolumeNoStateMatrix(t *testing.T) {
 	}
 }
 
+func TestNodePublishVolumeReadonlyMountedStateMatrix(t *testing.T) {
+	tests := []struct {
+		name            string
+		status          string
+		actualReadonly  bool
+		wantCode        codes.Code
+		wantFinalStatus string
+		wantUnchanged   bool
+	}{
+		{
+			name:            "pending-writable",
+			status:          publishStatusPending,
+			wantCode:        codes.FailedPrecondition,
+			wantFinalStatus: publishStatusPending,
+			wantUnchanged:   true,
+		},
+		{
+			name:            "pending-readonly",
+			status:          publishStatusPending,
+			actualReadonly:  true,
+			wantFinalStatus: publishStatusPublished,
+		},
+		{
+			name:            "published-writable",
+			status:          publishStatusPublished,
+			wantCode:        codes.FailedPrecondition,
+			wantFinalStatus: publishStatusPublished,
+			wantUnchanged:   true,
+		},
+		{
+			name:            "published-readonly",
+			status:          publishStatusPublished,
+			actualReadonly:  true,
+			wantFinalStatus: publishStatusPublished,
+			wantUnchanged:   true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newNodeStateFirstFixture(t, true)
+			fixture.runtimeMounted[fixture.publishTarget] = true
+			fixture.runtimeReadonly[fixture.publishTarget] = test.actualReadonly
+			writeMatchingReadonlyPublishState(t, fixture, test.status)
+			before := readPublishStateBody(t, fixture)
+
+			_, err := fixture.driver.NodePublishVolume(context.Background(), readonlyPublishRequest(fixture))
+			if status.Code(err) != test.wantCode {
+				t.Fatalf("NodePublishVolume() status = %s, want %s (err=%v)", status.Code(err), test.wantCode, err)
+			}
+			assertNoPublishMountMutations(t, fixture)
+			assertReadonlyTargetObservation(t, fixture)
+
+			after := readPublishStateBody(t, fixture)
+			if test.wantUnchanged && string(after) != string(before) {
+				t.Fatalf("publish state changed: before=%q after=%q", before, after)
+			}
+			state, readErr := fixture.driver.readPublishState(fixture.publishTarget)
+			if readErr != nil || state.Status != test.wantFinalStatus {
+				t.Fatalf("publish state = %#v, %v; want status %q", state, readErr, test.wantFinalStatus)
+			}
+		})
+	}
+}
+
+func TestNodePublishVolumeReadonlyObservationFailurePreservesState(t *testing.T) {
+	for _, statusValue := range []string{publishStatusPending, publishStatusPublished} {
+		t.Run(statusValue, func(t *testing.T) {
+			fixture := newNodeStateFirstFixture(t, true)
+			fixture.runtimeMounted[fixture.publishTarget] = true
+			writeMatchingReadonlyPublishState(t, fixture, statusValue)
+			before := readPublishStateBody(t, fixture)
+			fixture.runtime.observeMountFn = func(string) (mountPointObservation, error) {
+				return mountPointObservation{}, errors.New("injected mount observation failure")
+			}
+
+			_, err := fixture.driver.NodePublishVolume(context.Background(), readonlyPublishRequest(fixture))
+			if status.Code(err) != codes.Internal {
+				t.Fatalf("NodePublishVolume() status = %s, want Internal (err=%v)", status.Code(err), err)
+			}
+			assertNoPublishMountMutations(t, fixture)
+			assertReadonlyTargetObservation(t, fixture)
+			after := readPublishStateBody(t, fixture)
+			if string(after) != string(before) {
+				t.Fatalf("publish state changed: before=%q after=%q", before, after)
+			}
+		})
+	}
+}
+
+func TestNodePublishVolumeReadonlyPendingAbsentBindsReadonly(t *testing.T) {
+	fixture := newNodeStateFirstFixture(t, true)
+	writeMatchingReadonlyPublishState(t, fixture, publishStatusPending)
+	var bindReadonly bool
+	fixture.mountOps.bindFn = func(_, _ string, readonly bool) error {
+		bindReadonly = readonly
+		return nil
+	}
+
+	_, err := fixture.driver.NodePublishVolume(context.Background(), readonlyPublishRequest(fixture))
+	if err != nil {
+		t.Fatalf("NodePublishVolume(): %v", err)
+	}
+	if fixture.mountOps.bindCalls != 1 || !bindReadonly {
+		t.Fatalf("bind calls = %d, readonly = %t; want 1, true", fixture.mountOps.bindCalls, bindReadonly)
+	}
+	assertReadonlyTargetObservation(t, fixture)
+	state, readErr := fixture.driver.readPublishState(fixture.publishTarget)
+	if readErr != nil || state.Status != publishStatusPublished || !state.Readonly {
+		t.Fatalf("publish state = %#v, %v; want published readonly", state, readErr)
+	}
+}
+
+func TestNodePublishVolumeReadonlyNoStateMountedFailsClosed(t *testing.T) {
+	fixture := newNodeStateFirstFixture(t, true)
+	fixture.runtimeMounted[fixture.publishTarget] = true
+	fixture.runtimeReadonly[fixture.publishTarget] = true
+
+	_, err := fixture.driver.NodePublishVolume(context.Background(), readonlyPublishRequest(fixture))
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("NodePublishVolume() status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
+	}
+	assertNoPublishMountMutations(t, fixture)
+	assertReadonlyTargetObservation(t, fixture)
+	if _, statErr := os.Stat(fixture.driver.publishStatePath(fixture.publishTarget)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("publish state exists after rejection: %v", statErr)
+	}
+}
+
+func TestNodePublishVolumeWritableRequestsDoNotObserveReadonly(t *testing.T) {
+	for _, statusValue := range []string{publishStatusPending, publishStatusPublished} {
+		t.Run(statusValue, func(t *testing.T) {
+			fixture := newNodeStateFirstFixture(t, true)
+			fixture.runtimeMounted[fixture.publishTarget] = true
+			fixture.runtimeReadonly[fixture.publishTarget] = true
+			writeMatchingPublishState(t, fixture, statusValue)
+
+			_, err := fixture.driver.NodePublishVolume(context.Background(), publishRequest(fixture))
+			if err != nil {
+				t.Fatalf("NodePublishVolume(): %v", err)
+			}
+			calls := fixture.runtime.Calls()
+			if got := countHostOperations(calls, "observe-mount", fixture.publishTarget); got != 0 {
+				t.Fatalf("mount observations = %d, want 0", got)
+			}
+			if got := countHostOperations(calls, "mount", fixture.publishTarget); got != 1 {
+				t.Fatalf("target mount checks = %d, want 1", got)
+			}
+		})
+	}
+}
+
 func TestNodePublishVolumeRejectsInvalidExistingState(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -409,6 +561,12 @@ func publishRequest(fixture *nodeStateFirstFixture) *csi.NodePublishVolumeReques
 	}
 }
 
+func readonlyPublishRequest(fixture *nodeStateFirstFixture) *csi.NodePublishVolumeRequest {
+	request := publishRequest(fixture)
+	request.Readonly = true
+	return request
+}
+
 func unpublishRequest(fixture *nodeStateFirstFixture) *csi.NodeUnpublishVolumeRequest {
 	return &csi.NodeUnpublishVolumeRequest{
 		VolumeId:   fixture.active.VolumeID,
@@ -432,6 +590,53 @@ func writeMatchingPublishState(t *testing.T, fixture *nodeStateFirstFixture, sta
 	if err := fixture.driver.writePublishState(matchingPublishState(fixture, statusValue)); err != nil {
 		t.Fatalf("write publish state: %v", err)
 	}
+}
+
+func writeMatchingReadonlyPublishState(t *testing.T, fixture *nodeStateFirstFixture, statusValue string) {
+	t.Helper()
+	state := matchingPublishState(fixture, statusValue)
+	state.Readonly = true
+	if err := fixture.driver.writePublishState(state); err != nil {
+		t.Fatalf("write readonly publish state: %v", err)
+	}
+}
+
+func readPublishStateBody(t *testing.T, fixture *nodeStateFirstFixture) []byte {
+	t.Helper()
+	body, err := os.ReadFile(fixture.driver.publishStatePath(fixture.publishTarget))
+	if err != nil {
+		t.Fatalf("read publish state: %v", err)
+	}
+	return body
+}
+
+func assertNoPublishMountMutations(t *testing.T, fixture *nodeStateFirstFixture) {
+	t.Helper()
+	if fixture.mountOps.bindCalls != 0 || fixture.mountOps.unmountCalls != 0 || fixture.mountOps.lazyUnmountCalls != 0 {
+		t.Fatalf("publish mount mutations = bind:%d unmount:%d lazy:%d, want 0/0/0",
+			fixture.mountOps.bindCalls, fixture.mountOps.unmountCalls, fixture.mountOps.lazyUnmountCalls)
+	}
+}
+
+func assertReadonlyTargetObservation(t *testing.T, fixture *nodeStateFirstFixture) {
+	t.Helper()
+	calls := fixture.runtime.Calls()
+	if got := countHostOperations(calls, "observe-mount", fixture.publishTarget); got != 1 {
+		t.Fatalf("target mount observations = %d, want 1", got)
+	}
+	if got := countHostOperations(calls, "mount", fixture.publishTarget); got != 0 {
+		t.Fatalf("legacy target mount checks = %d, want 0", got)
+	}
+}
+
+func countHostOperations(calls []fakeHostCall, operation string, paths ...string) int {
+	count := 0
+	for _, call := range calls {
+		if call.Operation == operation && (len(paths) == 0 || call.Path == paths[0]) {
+			count++
+		}
+	}
+	return count
 }
 
 func mustJSON(t *testing.T, value any) []byte {

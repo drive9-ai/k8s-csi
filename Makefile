@@ -147,6 +147,8 @@ e2e-check:
 	@rg -Fq 'registry\.invalid\/drive9-csi:unpublished' e2e/lib/manifests.sh
 	@rg -Fq 'using Drive9 workspace root mode' e2e/basic-lifecycle.sh
 	@rg -Fq 'read after PVC recreation' e2e/basic-lifecycle.sh
+	@rg -Fq 'Readonly publish smoke' e2e/basic-lifecycle.sh
+	@rg -Fq 'if printf "%s\n" readonly > "$$1"; then' e2e/basic-lifecycle.sh
 	@rg -Fq '/tmp/drive9-survival-stop' e2e/mount-survival.sh
 	@rg -Fq '/tmp/drive9-survival-stopped' e2e/mount-survival.sh
 	@if rg -n 'drive9-survival-pid|kill -9' e2e/mount-survival.sh; then \
