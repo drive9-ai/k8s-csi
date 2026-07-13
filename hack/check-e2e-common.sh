@@ -422,6 +422,54 @@ secret_refs=$(awk -v secret="$secret_name" '
 [[ ! -e "$tmp_dir/namespace.yaml" ]] ||
 	fail "case rendered a namespace manifest"
 
+check_rwx_manifests() {
+	local case_key="$1"
+	local profile="$2"
+	local durability="$3"
+	local case_dir="$tmp_dir/rwx-$case_key"
+	local pvc_name="drive9-rwx-e2e-$case_key"
+	local pod_a_name="$pvc_name-a"
+	local pod_b_name="$pvc_name-b"
+
+	manifest_dir="$case_dir/manifests"
+	case_run_id="drive9-test-$case_key"
+	storage_class="drive9-rwx-e2e-$case_key"
+	volume_attributes_class="drive9-rwx-e2e-$case_key"
+	DRIVE9_PROFILE="$profile"
+	mkdir -p "$manifest_dir" || fail "create $case_key manifest directory"
+
+	e2e_render_case_manifests "$durability"
+	e2e_write_rwx_workload "$case_dir/workload.yaml" "$pvc_name"
+	e2e_write_rwx_pod \
+		"$pod_a_name" "$case_dir/pod-a.yaml" rwx-a false "$pvc_name"
+	e2e_write_rwx_pod \
+		"$pod_b_name" "$case_dir/pod-b.yaml" rwx-b true "$pvc_name"
+	e2e_validate_case_manifests
+
+	grep -Fq "    $profile" "$manifest_dir/volumeattributesclass.yaml" ||
+		fail "$case_key VAC lost profile"
+	if [[ -n "$durability" ]]; then
+		grep -Fq '  durability: |-' \
+			"$manifest_dir/volumeattributesclass.yaml" ||
+			fail "$case_key VAC lost durability"
+		grep -Fq "    $durability" \
+			"$manifest_dir/volumeattributesclass.yaml" ||
+			fail "$case_key VAC has wrong durability"
+	elif grep -Fq '  durability:' \
+		"$manifest_dir/volumeattributesclass.yaml"; then
+		fail "$case_key VAC unexpectedly renders durability"
+	fi
+	grep -Fq "  name: $pvc_name" "$case_dir/workload.yaml" ||
+		fail "$case_key workload lost PVC name"
+	grep -Fq "        claimName: $pvc_name" "$case_dir/pod-a.yaml" ||
+		fail "$case_key Pod A lost PVC claim"
+	grep -Fq "        claimName: $pvc_name" "$case_dir/pod-b.yaml" ||
+		fail "$case_key Pod B lost PVC claim"
+}
+
+check_rwx_manifests remote-sync none close-sync
+check_rwx_manifests coding-agent coding-agent ""
+
 stop_function="$tmp_dir/stop-io-loop.sh"
 awk '
 	/^stop_io_loop\(\) \{/ { capture = 1 }

@@ -90,9 +90,9 @@ e2e-check:
 		rg -Fq 'e2e_cleanup_owned_resource' "$$script" || { echo "E2E case cleanup is not ownership-aware: $$script" >&2; exit 1; }; \
 		rg -Fq 'e2e_delete_owned_namespaced_resource' "$$script" || { echo "E2E case does not clean owned namespaced resources: $$script" >&2; exit 1; }; \
 		rg -Fq 'e2e_delete_owned_pvc' "$$script" || { echo "E2E case does not clean owned PVCs: $$script" >&2; exit 1; }; \
-		owned_creates="$$(rg -c '^e2e_create_owned_resource' "$$script")"; \
+		owned_creates="$$(rg -c '^[[:space:]]*e2e_create_owned_resource' "$$script")"; \
 		test "$$owned_creates" = 2 || { echo "E2E case must create only its SC and VAC as cluster resources: $$script" >&2; exit 1; }; \
-		namespaced_creates="$$(rg -c '^e2e_create_owned_namespaced_resource' "$$script")"; \
+		namespaced_creates="$$(rg -c '^[[:space:]]*e2e_create_owned_namespaced_resource' "$$script")"; \
 		test "$$namespaced_creates" -ge 2 || { echo "E2E case does not create namespaced resources safely: $$script" >&2; exit 1; }; \
 		rg -Fq '"$$manifest_dir/storageclass.yaml"' "$$script" || { echo "E2E case does not create its StorageClass safely: $$script" >&2; exit 1; }; \
 		rg -Fq '"$$manifest_dir/volumeattributesclass.yaml"' "$$script" || { echo "E2E case does not create its VAC safely: $$script" >&2; exit 1; }; \
@@ -163,12 +163,17 @@ e2e-check:
 		e2e/lib/manifests.sh
 	@rg -Fq 'kubernetes.io/hostname' e2e/lib/manifests.sh
 	@rg -Fq 'for attempt in {1..60}' e2e/multi-node-rwx.sh
-	@rg -Fq 'DRIVE9_PROFILE="coding-agent"' e2e/multi-node-rwx.sh
-	@rg -Fq 'case_durability=""' e2e/multi-node-rwx.sh
+	@rg -Fq 'run_rwx_case remote-sync none close-sync' \
+		e2e/multi-node-rwx.sh
+	@rg -Fq 'run_rwx_case coding-agent coding-agent ""' \
+		e2e/multi-node-rwx.sh
+	@rg -Fq 'cleanup_case_resources' e2e/multi-node-rwx.sh
 	@rg -Fq 'local started_at="$$SECONDS"' e2e/multi-node-rwx.sh
 	@rg -Fq 'cross-node visibility latency' e2e/multi-node-rwx.sh
-	@rg -Fq 'e2e_render_case_manifests "$$case_durability"' \
+	@rg -Fq 'e2e_render_case_manifests "$$durability"' \
 		e2e/multi-node-rwx.sh
+	@rg -Fq 'local pvc_name="$$2"' e2e/lib/manifests.sh
+	@rg -Fq 'claimName: $$pvc_name' e2e/lib/manifests.sh
 	@rg -Fq 'Pods were scheduled on the same node' e2e/multi-node-rwx.sh
 	@rg -Fq 'read after Pod A deletion' e2e/multi-node-rwx.sh
 	@rg -Fq 'write after Pod A deletion' e2e/multi-node-rwx.sh
