@@ -3,6 +3,8 @@ package driver
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -148,6 +150,51 @@ func resolveVolumeContextFromPV(ctx context.Context, k8s kubernetes.Interface, d
 		return attrs, nil
 	}
 	return nil, status.Errorf(codes.FailedPrecondition, "no PV with CSI volumeHandle %q found", volumeID)
+}
+
+func resolveRecoveryVolumeContextFromPV(ctx context.Context, k8s kubernetes.Interface, driverName string, volumeID string) (map[string]string, bool, error) {
+	pvList, err := k8s.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, false, status.Errorf(codes.Internal, "list PVs for volume %s: %v", volumeID, err)
+	}
+	var matched *corev1.PersistentVolume
+	for i := range pvList.Items {
+		pv := &pvList.Items[i]
+		if pv.Spec.CSI == nil || pv.Spec.CSI.VolumeHandle != volumeID ||
+			pv.Spec.CSI.Driver != driverName {
+			continue
+		}
+		if matched != nil {
+			return nil, false, status.Errorf(codes.FailedPrecondition,
+				"multiple %s PVs have volumeHandle %q", driverName, volumeID)
+		}
+		matched = pv
+	}
+	if matched == nil {
+		return nil, false, status.Errorf(codes.FailedPrecondition,
+			"no %s PV with volumeHandle %q found", driverName, volumeID)
+	}
+	mnmw, err := classifyRecoveryPVAccessModes(matched.Spec.AccessModes)
+	if err != nil {
+		return nil, false, status.Errorf(codes.FailedPrecondition,
+			"PV %s access modes: %v", matched.Name, err)
+	}
+	return maps.Clone(matched.Spec.CSI.VolumeAttributes), mnmw, nil
+}
+
+func classifyRecoveryPVAccessModes(modes []corev1.PersistentVolumeAccessMode) (bool, error) {
+	if len(modes) == 0 {
+		return false, fmt.Errorf("must contain a supported writer mode")
+	}
+	if slices.Contains(modes, corev1.ReadWriteMany) {
+		return true, nil
+	}
+	for _, mode := range modes {
+		if mode != corev1.ReadWriteOnce && mode != corev1.ReadWriteOncePod {
+			return false, fmt.Errorf("unsupported writer mode %q", mode)
+		}
+	}
+	return false, nil
 }
 
 // validateNoAPIKeyInAttributes checks that volumeAttributes do not

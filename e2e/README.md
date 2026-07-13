@@ -71,6 +71,18 @@ Run the CSI node Pod mount-survival case:
 e2e/mount-survival.sh
 ```
 
+Run the two-node RWX case on a cluster with at least two eligible nodes:
+
+```sh
+e2e/multi-node-rwx.sh
+```
+
+The RWX case creates two Pods with required hostname anti-affinity and fails if
+they cannot become Ready on distinct nodes. It writes a uniquely named file in
+each Pod, polls with a bounded timeout until the other Pod reads it, deletes Pod
+A, and verifies Pod B can still read and write. Cleanup removes only the case's
+labeled StorageClass, VolumeAttributesClass, PVC, and Pods.
+
 Cases verify that the prepared controller, node, RBAC bindings, and CSIDriver
 are ready. The controller, node, and host-binary installer must all use the
 same accepted validation image reference. A case never updates or deletes the
@@ -78,8 +90,8 @@ prepared Driver.
 
 Each case creates labeled StorageClass, VolumeAttributesClass, PVC, and Pod
 resources. It cleans up only resources confirmed to belong to that run and
-never deletes the reusable namespace or Secret. Prepare once, then run either
-case repeatedly or in any order.
+never deletes the reusable namespace or Secret. Prepare once, then run any case
+repeatedly or in any order.
 
 The shared Kubernetes wrapper retries only recognized client and API transport
 failures, such as EOF, TLS handshake timeout, connection reset, and temporary
@@ -104,6 +116,11 @@ I/O continued, and confirms the mount PID, PID start time, mount ID, systemd
 unit, and Drive9 binary path did not change. Its background I/O loop stops
 through explicit stop and stopped markers; expected case teardown does not use
 signals or treat a forced process exit as a test failure.
+
+`multi-node-rwx.sh` uses `profile=none`, `durability=close-sync`, and
+`ReadWriteMany`. It validates observed cross-node visibility for separate files;
+it does not claim distributed locking, concurrent same-file merge, or immediate
+cache coherence.
 
 Set `DRIVE9_REMOTE_ROOT_PREFIX=/k8s/pvc-e2e` only when testing managed-directory
 mode. The default is workspace-root mode. The lifecycle case requires

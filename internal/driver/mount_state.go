@@ -302,6 +302,47 @@ func validateMountStateArgs(args []string, remoteRoot string, stagingTarget stri
 	return nil
 }
 
+func validatePersistedMNMWMountArgs(state mountState, profile string, durability string) error {
+	for _, persisted := range []struct {
+		name string
+		args []string
+	}{
+		{name: "primary", args: state.MountArgs},
+		{name: "fallback", args: state.FallbackMountArgs},
+	} {
+		if persisted.name == "fallback" && len(persisted.args) == 0 {
+			continue
+		}
+		for _, option := range [][2]string{{"--profile", profile}, {"--durability", durability}} {
+			if err := validateCanonicalMountOption(persisted.args, option[0], option[1]); err != nil {
+				return fmt.Errorf("persisted %s argv: %w", persisted.name, err)
+			}
+		}
+	}
+	return nil
+}
+
+func validateCanonicalMountOption(args []string, option string, expected string) error {
+	found := false
+	alias := strings.TrimPrefix(option, "-")
+	for i, arg := range args {
+		if strings.HasPrefix(arg, option+"=") || arg == alias || strings.HasPrefix(arg, alias+"=") {
+			return fmt.Errorf("%s must be exactly one two-token %s %s option", option, option, expected)
+		}
+		if arg != option {
+			continue
+		}
+		if found || i+1 >= len(args) || args[i+1] != expected {
+			return fmt.Errorf("%s must be exactly one two-token %s %s option", option, option, expected)
+		}
+		found = true
+	}
+	if !found {
+		return fmt.Errorf("%s must be exactly one two-token %s %s option", option, option, expected)
+	}
+	return nil
+}
+
 func argumentMayContainCredential(arg string) bool {
 	lower := strings.ToLower(strings.TrimSpace(arg))
 	if strings.HasPrefix(lower, "bearer ") || strings.Contains(lower, "drive9_api_key_") {

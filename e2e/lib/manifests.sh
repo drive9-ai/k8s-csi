@@ -103,7 +103,10 @@ e2e_write_storageclass() {
 }
 
 e2e_write_volume_attributes_class() {
+	local durability="${1:-}"
+
 	awk \
+		-v durability="$durability" \
 		-v volume_attributes_class="$volume_attributes_class" \
 		-v profile="$DRIVE9_PROFILE" \
 		-v run_id="$case_run_id" '
@@ -120,6 +123,10 @@ e2e_write_volume_attributes_class() {
 		$0 ~ /^  profile:/ {
 			print "  profile: |-"
 			print "    " profile
+			if (durability != "") {
+				print "  durability: |-"
+				print "    " durability
+			}
 			next
 		}
 		{ print }
@@ -181,8 +188,10 @@ e2e_validate_driver_manifests() {
 }
 
 e2e_render_case_manifests() {
+	local durability="${1:-}"
+
 	e2e_write_storageclass
-	e2e_write_volume_attributes_class
+	e2e_write_volume_attributes_class "$durability"
 }
 
 e2e_validate_case_manifests() {
@@ -231,6 +240,85 @@ spec:
       storage: 1Gi
 EOF
 	[[ "$?" == "0" ]] || e2e_fail "write primary workload"
+}
+
+e2e_write_rwx_workload() {
+	local target="$1"
+
+	cat > "$target" <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: drive9-rwx-e2e
+  namespace: $test_namespace
+  labels:
+    drive9.ai/e2e-run: $case_run_id
+  annotations:
+    drive9.ai/secret-name: $secret_name
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: $storage_class
+  volumeAttributesClassName: $volume_attributes_class
+  resources:
+    requests:
+      storage: 1Gi
+EOF
+	[[ "$?" == "0" ]] || e2e_fail "write RWX workload"
+}
+
+e2e_write_rwx_pod() {
+	local pod_name="$1"
+	local target="$2"
+	local role="$3"
+	local require_distinct_node="$4"
+
+	[[ "$require_distinct_node" == "true" ||
+		"$require_distinct_node" == "false" ]] ||
+		e2e_fail "RWX Pod distinct-node value must be true or false"
+
+	cat > "$target" <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $pod_name
+  namespace: $test_namespace
+  labels:
+    drive9.ai/e2e-run: $case_run_id
+    drive9.ai/e2e-role: $role
+spec:
+EOF
+	[[ "$?" == "0" ]] || e2e_fail "write RWX Pod metadata"
+
+	if [[ "$require_distinct_node" == "true" ]]; then
+		cat >> "$target" <<EOF
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              drive9.ai/e2e-run: $case_run_id
+              drive9.ai/e2e-role: rwx-a
+          topologyKey: kubernetes.io/hostname
+EOF
+		[[ "$?" == "0" ]] || e2e_fail "write RWX Pod anti-affinity"
+	fi
+
+	cat >> "$target" <<EOF
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["/bin/sh", "-c", "sleep 3600"]
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+  volumes:
+    - name: workspace
+      persistentVolumeClaim:
+        claimName: drive9-rwx-e2e
+EOF
+	[[ "$?" == "0" ]] || e2e_fail "write RWX Pod workload"
 }
 
 e2e_write_test_pod() {

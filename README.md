@@ -12,6 +12,8 @@ It intentionally ships a small stable surface first:
 - Optional managed directory volumes backed by Drive9 remote paths.
 - `ReadWriteOnce` by default. `SINGLE_NODE_MULTI_WRITER` supported for same-node
   multi-pod access.
+- `ReadWriteMany` requires `profile=none` and
+  `durability=close-sync` or `durability=write-sync`.
 - Credentials are resolved from PVC annotation `drive9.ai/secret-name` →
   Kubernetes Secret.
 - Default workspace-root volumes do not create or delete Drive9 workspace data.
@@ -21,7 +23,7 @@ It intentionally ships a small stable surface first:
 - `NodeStageVolume` runs `drive9 mount --mode=fuse --direct-mount-strict`
   through a host systemd service.
 - `NodePublishVolume` bind-mounts the staged path into the pod.
-- No snapshots, expansion, RWX, or automatic tenant provisioning.
+- No snapshots, expansion, or automatic tenant provisioning.
 
 ## Why CSI Lite
 
@@ -155,7 +157,8 @@ kubectl -n default create secret generic drive9-workspace-secret \
 Create a PVC with the `drive9.ai/secret-name` annotation pointing to the Secret:
 
 ```sh
-kubectl apply -f deploy/examples/kubernetes/pvc.example.yaml
+kubectl apply -f deploy/examples/kubernetes/volumeattributesclass.example.yaml
+kubectl -n default apply -f deploy/examples/kubernetes/pvc.example.yaml
 ```
 
 Because the default `StorageClass` uses `WaitForFirstConsumer`, a PVC can remain
@@ -164,10 +167,11 @@ Because the default `StorageClass` uses `WaitForFirstConsumer`, a PVC can remain
 Mount the PVC in a normal workload Pod:
 
 ```sh
-kubectl apply -f deploy/examples/kubernetes/pod.example.yaml
-kubectl wait --for=condition=Ready pod/drive9-workspace-smoke --timeout=180s
-kubectl logs drive9-workspace-smoke
-kubectl exec drive9-workspace-smoke -- cat /workspace/hello.txt
+kubectl -n default apply -f deploy/examples/kubernetes/pod.example.yaml
+kubectl -n default wait --for=condition=Ready \
+  pod/drive9-workspace-smoke --timeout=180s
+kubectl -n default logs drive9-workspace-smoke
+kubectl -n default exec drive9-workspace-smoke -- cat /workspace/hello.txt
 ```
 
 Expected output:
@@ -175,6 +179,32 @@ Expected output:
 ```text
 hello-drive9
 ```
+
+The shared-PVC example is a single-file application bundle containing its own
+Namespace, StorageClass, VolumeAttributesClass, Secret, PVC, writer Deployment,
+and two writer replicas. Replace `replace-with-drive9-api-key` in the file, then
+apply it once:
+
+```sh
+kubectl apply -f deploy/examples/kubernetes/shared-pvc.example.yaml
+kubectl -n drive9-shared-pvc-example rollout status \
+  deployment/drive9-workspace-writer --timeout=180s
+kubectl -n drive9-shared-pvc-example exec \
+  deployment/drive9-workspace-writer -- ls -1 /workspace
+```
+
+Both writer replicas update a file named after their Pod every five seconds.
+Kubernetes may place the replicas on the same node or different nodes. The PVC
+uses `ReadWriteMany` with
+`profile=none` and `durability=close-sync`; each replica can see both files
+through the shared read-write mount. See
+`deploy/examples/kubernetes/README.md` for the scenario, resource roles,
+credential flow, verification steps, consistency limits, and retention
+behavior.
+
+RWX does not provide distributed file locks.
+It does not merge concurrent writes to the same file. Applications that require
+those semantics must supply their own coordination.
 
 Use the PVC from application Pods the same way:
 
@@ -188,21 +218,23 @@ volumes:
       claimName: drive9-workspace
 ```
 
-Clean up the smoke workload:
+Clean up the examples:
 
 ```sh
-kubectl delete pod drive9-workspace-smoke
-kubectl delete pvc drive9-workspace
+kubectl -n default delete pod drive9-workspace-smoke
+kubectl -n default delete pvc drive9-workspace-tuned
+kubectl delete -f deploy/examples/kubernetes/shared-pvc.example.yaml
 ```
 
 The default example `StorageClass` uses `Retain`, so deleting the PVC keeps the
 PV and Drive9 workspace data for safety. Even with `reclaimPolicy: Delete`, the
 default workspace-root mode does not delete Drive9 workspace data.
 
-Example StorageClass, Secret, PVC, and smoke Pod manifests live under
-`deploy/examples/kubernetes/` so that applying `deploy/kubernetes/` does not
-create placeholder credentials or demo workloads in production clusters. Apply
-the example Secret with
+Example StorageClass, VolumeAttributesClass, Secret, PVC, and workload manifests
+live under `deploy/examples/kubernetes/` so that applying `deploy/kubernetes/`
+does not create placeholder credentials or demo workloads in production
+clusters.
+Apply the example Secret with
 `kubectl -n <workload-namespace> apply -f deploy/examples/kubernetes/secret.example.yaml`
 after replacing the API key. Each PVC references its Secret via the
 `drive9.ai/secret-name` annotation — multiple PVCs can share a Secret or use
@@ -466,9 +498,13 @@ kubectl -n drive9-csi exec <drive9-csi-node-pod> -c drive9-csi -- \
 - Linux only.
 - `ReadWriteOnce` by default. `SINGLE_NODE_MULTI_WRITER` supported for same-node
   multi-pod access.
+- `ReadWriteMany` requires `profile=none` and
+  `durability=close-sync` or `durability=write-sync`.
 - One Drive9 principal per mounted volume lifecycle.
 - No volume expansion or quota enforcement.
-- No cross-node cache-consistency guarantee.
+- RWX does not provide distributed file locks, same-file merge, byte-range
+  write ordering, or a strong POSIX/database-workload guarantee.
+- Cross-node visibility may require bounded polling.
 - `drive9 mount` must be present in the driver image.
 
 ## Tests
@@ -497,6 +533,7 @@ e2e/prepare.sh --image-tag drive9-a53e497-csi-d91bfe3
 
 e2e/basic-lifecycle.sh
 e2e/mount-survival.sh
+e2e/multi-node-rwx.sh
 ```
 
 `prepare.sh` idempotently creates or updates the persistent Driver environment
@@ -505,7 +542,7 @@ repeatedly against that environment. They reuse a pre-provisioned namespace and
 Secret, create and clean only their own StorageClass, VolumeAttributesClass,
 PVC, and Pod resources, and never delete the prepared Driver.
 
-All three scripts require explicit context and Driver namespace values. The
+All four scripts require explicit context and Driver namespace values. The
 current kubectl context is never used implicitly, and production-like context
 names are rejected.
 
@@ -514,8 +551,10 @@ where reads succeed and writes are denied, workload Pod remount, same-node
 multi-Pod access, one-Pod multi-PVC behavior, unpublish, unstage, and deletion.
 `mount-survival.sh` keeps workload I/O active while
 replacing the matching CSI node Pod and verifies the host mount identity does
-not change. See `e2e/README.md` and `e2e/AGENTS.md` for the complete safety and
-execution contract.
+not change. `multi-node-rwx.sh` requires two eligible nodes, schedules one
+writer on each, verifies cross-node visibility through one RWX PVC, and checks
+that deleting one writer does not interrupt the other. See `e2e/README.md` and
+`e2e/AGENTS.md` for the complete safety and execution contract.
 
 ## Multiple Workspaces per Namespace
 

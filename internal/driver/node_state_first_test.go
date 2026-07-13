@@ -40,6 +40,193 @@ func TestNodeStageStateFirstHealthySkipsDeniedSecretAndAPIs(t *testing.T) {
 	}
 }
 
+func TestNodeStageStateFirstHealthyMNMWRequiresCanonicalArgv(t *testing.T) {
+	fixture := newNodeStateFirstFixtureWithActive(t, true, func(state *mountState) {
+		state.MountArgs = append(
+			state.MountArgs[:len(state.MountArgs)-2],
+			"--profile", profileNone,
+			"--durability", durabilityCloseSync,
+			state.MountArgs[len(state.MountArgs)-2],
+			state.MountArgs[len(state.MountArgs)-1],
+		)
+	})
+	fixture.stageRequest.VolumeCapability = multiNodeMultiWriterMountCapability()
+	fixture.stageRequest.VolumeContext[paramProfile] = profileNone
+	fixture.stageRequest.VolumeContext[paramDurability] = durabilityCloseSync
+
+	if _, err := fixture.driver.NodeStageVolume(context.Background(), fixture.stageRequest); err != nil {
+		t.Fatalf("healthy MNMW NodeStageVolume(): %v", err)
+	}
+	if got := atomic.LoadInt32(&fixture.k8sActions); got != 0 {
+		t.Fatalf("healthy MNMW stage made %d Kubernetes API calls", got)
+	}
+}
+
+func TestNodeStageStateFirstRejectsMNMWArgvMismatchBeforeSideEffects(t *testing.T) {
+	fixture := newNodeStateFirstFixtureWithActive(t, true, func(state *mountState) {
+		state.MountArgs = append(
+			state.MountArgs[:len(state.MountArgs)-2],
+			"--profile", profileNone,
+			"--durability", durabilityWriteSync,
+			state.MountArgs[len(state.MountArgs)-2],
+			state.MountArgs[len(state.MountArgs)-1],
+		)
+	})
+	fixture.stageRequest.VolumeCapability = multiNodeMultiWriterMountCapability()
+	fixture.stageRequest.VolumeContext[paramProfile] = profileNone
+	fixture.stageRequest.VolumeContext[paramDurability] = durabilityCloseSync
+	before, err := fixture.driver.readMountState(fixture.active.VolumeID)
+	if err != nil {
+		t.Fatalf("read before: %v", err)
+	}
+
+	_, err = fixture.driver.NodeStageVolume(context.Background(), fixture.stageRequest)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
+	}
+	if got := atomic.LoadInt32(&fixture.k8sActions); got != 0 {
+		t.Fatalf("MNMW mismatch made %d Kubernetes API calls", got)
+	}
+	if calls := fixture.runtime.Calls(); len(calls) != 0 {
+		t.Fatalf("MNMW mismatch touched host runtime: %#v", calls)
+	}
+	after, readErr := fixture.driver.readMountState(fixture.active.VolumeID)
+	if readErr != nil || !reflectMountStatesEqual(before, after) {
+		t.Fatalf("MNMW mismatch changed state: before=%#v after=%#v err=%v", before, after, readErr)
+	}
+}
+
+func TestNodeStageStateFirstRejectsStartingMNMWMismatchBeforeReconcile(t *testing.T) {
+	fixture := newNodeStateFirstFixture(t, true)
+	starting := validStartingState(t)
+	starting.VolumeID = fixture.active.VolumeID
+	starting.RemoteRoot = fixture.active.RemoteRoot
+	starting.StagingTarget = fixture.active.StagingTarget
+	names, err := newVolumeHostNames(starting.VolumeID, starting.AttemptID)
+	if err != nil {
+		t.Fatalf("newVolumeHostNames(): %v", err)
+	}
+	starting.SystemdUnit = names.SystemdUnit
+	starting.EnvPath = names.EnvPath
+	starting.ArgsPath = names.ArgsPath
+	starting.MountArgs = append(
+		starting.MountArgs[:len(starting.MountArgs)-2],
+		"--profile", profileNone,
+		"--durability", durabilityWriteSync,
+		starting.MountArgs[len(starting.MountArgs)-2],
+		starting.MountArgs[len(starting.MountArgs)-1],
+	)
+	if err := os.Remove(fixture.driver.mountStatePath(starting.VolumeID)); err != nil {
+		t.Fatalf("remove active fixture state: %v", err)
+	}
+	store := newMountStateStore(fixture.driver.cfg.StateDir, newHostRuntime())
+	if err := store.Write(starting); err != nil {
+		t.Fatalf("write starting state: %v", err)
+	}
+	fixture.stageRequest.VolumeCapability = multiNodeMultiWriterMountCapability()
+	fixture.stageRequest.VolumeContext[paramProfile] = profileNone
+	fixture.stageRequest.VolumeContext[paramDurability] = durabilityCloseSync
+
+	_, err = fixture.driver.NodeStageVolume(context.Background(), fixture.stageRequest)
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("status = %s, want FailedPrecondition (err=%v)", status.Code(err), err)
+	}
+	if got := atomic.LoadInt32(&fixture.k8sActions); got != 0 {
+		t.Fatalf("starting MNMW mismatch made %d Kubernetes API calls", got)
+	}
+	if calls := fixture.runtime.Calls(); len(calls) != 0 {
+		t.Fatalf("starting MNMW mismatch touched host runtime: %#v", calls)
+	}
+	after, readErr := store.Read(starting.VolumeID)
+	if readErr != nil || !reflectMountStatesEqual(starting, after) {
+		t.Fatalf("starting mismatch changed state: before=%#v after=%#v err=%v", starting, after, readErr)
+	}
+}
+
+func TestNodeStageMNMWStoppingCleanupIgnoresPersistedArgvMismatch(t *testing.T) {
+	fixture := newMountStopFixture(t)
+	active := fixture.state
+	active.VolumeID = volumeIDForRemoteRoot(active.RemoteRoot)
+	names, err := newVolumeHostNames(active.VolumeID, active.AttemptID)
+	if err != nil {
+		t.Fatalf("newVolumeHostNames(): %v", err)
+	}
+	active.SystemdUnit = names.SystemdUnit
+	stopping := stoppingFromActiveForTest(t, active)
+	fixture.state = stopping
+	fixture.states.states = []mountState{stopping}
+	fixture.service = systemdUnitNotFound
+	fixture.mounted = false
+	fixture.pidAlive = false
+	fixture.mainPIDAlive = false
+	fixture.processStatePIDAlive = false
+	fixture.processStatePresent = false
+	fixture.controlSocketPresent = false
+	fixture.installCallbacks()
+
+	stateDir := t.TempDir()
+	store := newMountStateStore(stateDir, newHostRuntime())
+	starting := validStartingState(t)
+	starting.VolumeID = active.VolumeID
+	starting.SystemdUnit, starting.EnvPath, starting.ArgsPath = names.SystemdUnit, names.EnvPath, names.ArgsPath
+	if err := store.Write(starting); err != nil {
+		t.Fatalf("write starting state: %v", err)
+	}
+	if err := store.Write(active); err != nil {
+		t.Fatalf("write active state: %v", err)
+	}
+	if err := store.Write(stopping); err != nil {
+		t.Fatalf("write stopping state: %v", err)
+	}
+	driver := &Driver{
+		cfg: Config{StateDir: stateDir, DriverName: "csi.drive9.ai"},
+		k8s: k8sfake.NewSimpleClientset(), nodeRuntime: fixture.runtime,
+		nodeCapabilities: availableNodeCapabilities(), nodePreflightSet: true,
+	}
+	_, _ = driver.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+		VolumeId: stopping.VolumeID, StagingTargetPath: stopping.StagingTarget,
+		VolumeCapability: multiNodeMultiWriterMountCapability(),
+		VolumeContext: map[string]string{
+			"remoteRoot": stopping.RemoteRoot, paramProfile: profileNone,
+			paramDurability: durabilityCloseSync,
+			attrSecretName:  "missing", attrSecretNamespace: "default",
+		},
+	})
+	if _, err := store.Read(stopping.VolumeID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stopping cleanup retained state after argv mismatch: %v", err)
+	}
+}
+
+func TestNodeStageMNMWUsesIndependentPerNodeState(t *testing.T) {
+	var first *nodeStateFirstFixture
+	for i := range 2 {
+		fixture := newNodeStateFirstFixtureWithActive(t, true, func(state *mountState) {
+			state.MountArgs = append(
+				state.MountArgs[:len(state.MountArgs)-2],
+				"--profile", profileNone,
+				"--durability", durabilityCloseSync,
+				state.MountArgs[len(state.MountArgs)-2],
+				state.MountArgs[len(state.MountArgs)-1],
+			)
+		})
+		fixture.stageRequest.VolumeCapability = multiNodeMultiWriterMountCapability()
+		fixture.stageRequest.VolumeContext[paramProfile] = profileNone
+		fixture.stageRequest.VolumeContext[paramDurability] = durabilityCloseSync
+		if _, err := fixture.driver.NodeStageVolume(context.Background(), fixture.stageRequest); err != nil {
+			t.Fatalf("node %d stage: %v", i, err)
+		}
+		if first != nil {
+			if fixture.active.VolumeID != first.active.VolumeID {
+				t.Fatalf("node volumes differ: %q != %q", fixture.active.VolumeID, first.active.VolumeID)
+			}
+			if fixture.driver.cfg.StateDir == first.driver.cfg.StateDir {
+				t.Fatal("two node Drivers share a state directory")
+			}
+		}
+		first = fixture
+	}
+}
+
 func TestNodeStageStateFirstUnhealthyCredentialFailurePrecedesSideEffects(t *testing.T) {
 	fixture := newNodeStateFirstFixture(t, false)
 	before, err := fixture.driver.readMountState(fixture.active.VolumeID)
@@ -660,6 +847,14 @@ type nodeStateFirstFixture struct {
 }
 
 func newNodeStateFirstFixture(t *testing.T, healthy bool) *nodeStateFirstFixture {
+	return newNodeStateFirstFixtureWithActive(t, healthy, nil)
+}
+
+func newNodeStateFirstFixtureWithActive(
+	t *testing.T,
+	healthy bool,
+	mutate func(*mountState),
+) *nodeStateFirstFixture {
 	t.Helper()
 	stateDir := t.TempDir()
 	starting := validStartingState(t)
@@ -675,6 +870,10 @@ func newNodeStateFirstFixture(t *testing.T, healthy bool) *nodeStateFirstFixture
 	starting.ArgsPath = names.ArgsPath
 	active.VolumeID = volumeID
 	active.SystemdUnit = names.SystemdUnit
+	if mutate != nil {
+		mutate(&starting)
+		mutate(&active)
+	}
 	store := newMountStateStore(stateDir, newHostRuntime())
 	if err := store.Write(starting); err != nil {
 		t.Fatalf("write starting state: %v", err)
