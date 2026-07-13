@@ -1,4 +1,14 @@
-# Dat9 Dev CSI Smoke Test - 2026-06-07
+---
+title: Dat9 Dev CSI Smoke Test - 2026-06-07
+status: historical
+---
+
+## Historical Status
+
+This report is a point-in-time record of the June 2026 implementation. Image
+names, deployment commands, unsupported features, and cleanup behavior below
+must not be treated as the current contract. Use `README.md`, `AGENTS.md`, and
+the current `deploy/` manifests for current behavior.
 
 ## Scope
 

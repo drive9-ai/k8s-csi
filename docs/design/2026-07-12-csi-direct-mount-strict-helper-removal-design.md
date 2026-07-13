@@ -1,18 +1,16 @@
 ---
 title: CSI Direct Mount Strict and Host FUSE Helper Removal Design
-status: accepted
+status: implemented
 date: 2026-07-12
 ---
 
 ## Status
 
-The selected direction is to make Drive9 direct mounting mandatory and remove
-the CSI dependency on `fusermount3` completely. There is no runtime switch and
-no helper fallback in the new path.
-
-This design is accepted for implementation. Local implementation acceptance does
-not authorize deployment, workflow dispatch, commit, or push. The design is not
-complete until the separate targeted runtime gates also pass.
+Implemented by `92b52a8`. Drive9 direct mounting is mandatory and the CSI
+dependency on `fusermount3` is removed completely. There is no runtime switch or
+helper fallback. Validation artifacts remain subject to the release-admission
+gate in the mount-survival design; implementation does not itself authorize
+production deployment.
 
 This design narrowly supersedes the host FUSE-helper requirements in
 `docs/design/csi-rolling-upgrade-mount-survival-v2.md`. All mount-survival,
@@ -20,10 +18,10 @@ ownership, state-machine, recovery, secret, and release-admission invariants in
 that document remain authoritative unless this document explicitly replaces a
 helper-specific step.
 
-## Problem
+## Pre-change Problem
 
-The current CSI node path installs an image-provided `fusermount3` binary into
-the host filesystem and makes it part of node startup readiness:
+The pre-change CSI node path installed an image-provided `fusermount3` binary
+into the host filesystem and made it part of node startup readiness:
 
 ```text
 CSI image
