@@ -318,6 +318,13 @@ func (d *Driver) ValidateVolumeCapabilities(_ context.Context, req *csi.Validate
 			Message: err.Error(),
 		}, nil
 	}
+	if hasMNMW(caps) {
+		if err := validateMNMWVolumeContext(req.GetVolumeContext()); err != nil {
+			return &csi.ValidateVolumeCapabilitiesResponse{
+				Message: err.Error(),
+			}, nil
+		}
+	}
 	return &csi.ValidateVolumeCapabilitiesResponse{
 		Confirmed: &csi.ValidateVolumeCapabilitiesResponse_Confirmed{
 			VolumeCapabilities: caps,
@@ -672,7 +679,8 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 	if err := validateDurabilityTuning(durability, tuning); err != nil {
 		return nil, status.Error(codes.FailedPrecondition, status.Convert(err).Message())
 	}
-	if hasMNMW([]*csi.VolumeCapability{req.GetVolumeCapability()}) {
+	mnmwRequested := hasMNMW([]*csi.VolumeCapability{req.GetVolumeCapability()})
+	if mnmwRequested {
 		if err := validateMNMWMountParameters(profile, durability); err != nil {
 			return nil, status.Error(codes.FailedPrecondition, status.Convert(err).Message())
 		}
@@ -698,7 +706,7 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		stateExists = false
 	}
 	if stateExists && (state.Phase == mountStatePhaseActive || state.Phase == mountStatePhaseStarting) &&
-		hasMNMW([]*csi.VolumeCapability{req.GetVolumeCapability()}) {
+		(mnmwRequested || mountStateMayUseMNMWContract(state)) {
 		if err := validatePersistedMNMWMountArgs(state, profile, durability); err != nil {
 			return nil, status.Errorf(codes.FailedPrecondition,
 				"persisted MULTI_NODE_MULTI_WRITER mount contract: %v", err)

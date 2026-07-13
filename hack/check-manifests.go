@@ -163,6 +163,8 @@ func checkTextContracts() {
 				"FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS runtime",
 				"/usr/local/bin/drive9 mount --direct-mount-strict \\\n" +
 					"  --profile=none --durability=close-sync --help",
+				"/usr/local/bin/drive9 mount --direct-mount-strict \\\n" +
+					"  --profile=none --durability=write-sync --help",
 				"grep -F 'close-sync'", "grep -F 'write-sync'",
 				"COPY hack/drive9-csi-upload-perf.sh ",
 				"/usr/local/bin/drive9-csi-upload-perf",

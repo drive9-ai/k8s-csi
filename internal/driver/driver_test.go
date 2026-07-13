@@ -2275,7 +2275,11 @@ func TestValidateVolumeCapabilitiesRPC(t *testing.T) {
 
 	// MULTI_NODE_MULTI_WRITER is confirmed without adding an RPC capability.
 	resp, err = d.ValidateVolumeCapabilities(context.Background(), &csi.ValidateVolumeCapabilitiesRequest{
-		VolumeId:           "vol-1",
+		VolumeId: "vol-1",
+		VolumeContext: map[string]string{
+			paramProfile:    profileNone,
+			paramDurability: durabilityCloseSync,
+		},
 		VolumeCapabilities: []*csi.VolumeCapability{multiNodeMultiWriterMountCapability()},
 	})
 	if err != nil {
@@ -2283,6 +2287,21 @@ func TestValidateVolumeCapabilitiesRPC(t *testing.T) {
 	}
 	if resp.GetConfirmed() == nil {
 		t.Fatal("MULTI_NODE_MULTI_WRITER should be confirmed")
+	}
+
+	// MULTI_NODE_MULTI_WRITER with a default RWO context must not be confirmed.
+	resp, err = d.ValidateVolumeCapabilities(context.Background(), &csi.ValidateVolumeCapabilitiesRequest{
+		VolumeId: "vol-1",
+		VolumeContext: map[string]string{
+			paramProfile: "coding-agent",
+		},
+		VolumeCapabilities: []*csi.VolumeCapability{multiNodeMultiWriterMountCapability()},
+	})
+	if err != nil {
+		t.Fatalf("ValidateVolumeCapabilities error = %v", err)
+	}
+	if resp.GetConfirmed() != nil || resp.GetMessage() == "" {
+		t.Fatalf("unsafe MULTI_NODE_MULTI_WRITER response = %+v", resp)
 	}
 
 	// Unsupported read-only capability — should not confirm.
