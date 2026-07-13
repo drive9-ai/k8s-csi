@@ -66,12 +66,17 @@ wait_for_file_value() {
 	local file_name="$2"
 	local value="$3"
 	local description="$4"
+	local direction="$5"
 	local attempt
+	local elapsed_seconds
+	local started_at="$SECONDS"
 
 	for attempt in {1..60}; do
 		if kube -n "$test_namespace" exec "$pod_name" -- sh -c '
 			test "$(cat "$1")" = "$2"
 		' sh "/workspace/$file_name" "$value" >/dev/null 2>&1; then
+			elapsed_seconds=$((SECONDS - started_at))
+			e2e_info "$direction cross-node visibility latency: ${elapsed_seconds}s"
 			return 0
 		fi
 		sleep 5
@@ -101,8 +106,8 @@ e2e_init
 e2e_configure_case
 
 DRIVE9_REMOTE_ROOT_PREFIX="${DRIVE9_REMOTE_ROOT_PREFIX:-}"
-DRIVE9_PROFILE="none"
-case_durability="close-sync"
+DRIVE9_PROFILE="coding-agent"
+case_durability=""
 e2e_require_single_line \
 	"DRIVE9_REMOTE_ROOT_PREFIX" "$DRIVE9_REMOTE_ROOT_PREFIX"
 e2e_require_dns_label "case run ID" "$case_run_id"
@@ -183,11 +188,11 @@ value_survival="survival-$case_run_id"
 write_file_value drive9-rwx-e2e-a "$file_a" "$value_a" \
 	"write unique file in Pod A"
 wait_for_file_value drive9-rwx-e2e-b "$file_a" "$value_a" \
-	"Pod B did not observe Pod A's closed file within 300 seconds"
+	"Pod B did not observe Pod A's closed file within 300 seconds" A-to-B
 write_file_value drive9-rwx-e2e-b "$file_b" "$value_b" \
 	"write unique file in Pod B"
 wait_for_file_value drive9-rwx-e2e-a "$file_b" "$value_b" \
-	"Pod A did not observe Pod B's closed file within 300 seconds"
+	"Pod A did not observe Pod B's closed file within 300 seconds" B-to-A
 
 e2e_delete_owned_namespaced_resource "pod/drive9-rwx-e2e-a" \
 	"$test_namespace" pod drive9-rwx-e2e-a "$case_run_id" ||
