@@ -1,0 +1,91 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: drive9-shared-pvc-example
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: drive9-shared-pvc-example
+provisioner: csi.drive9.ai
+parameters: {}
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: false
+---
+apiVersion: storage.k8s.io/v1
+kind: VolumeAttributesClass
+metadata:
+  name: drive9-shared-pvc-example
+driverName: csi.drive9.ai
+parameters:
+  profile: none
+  durability: close-sync
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: drive9-workspace-secret
+  namespace: drive9-shared-pvc-example
+type: Opaque
+stringData:
+  server: https://api.drive9.ai
+  apiKey: replace-with-drive9-api-key
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: drive9-workspace-shared
+  namespace: drive9-shared-pvc-example
+  annotations:
+    drive9.ai/secret-name: drive9-workspace-secret
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: drive9-shared-pvc-example
+  volumeAttributesClassName: drive9-shared-pvc-example
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drive9-workspace-writer
+  namespace: drive9-shared-pvc-example
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: drive9-shared-pvc-example
+      app.kubernetes.io/component: writer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: drive9-shared-pvc-example
+        app.kubernetes.io/component: writer
+    spec:
+      containers:
+        - name: writer
+          image: public.ecr.aws/docker/library/busybox:1.36
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              while true; do
+                date -u > "/workspace/${POD_NAME}.txt"
+                sleep 5
+              done
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+      volumes:
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: drive9-workspace-shared

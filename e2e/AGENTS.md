@@ -54,9 +54,11 @@ includes the non-mutating `e2e-check` static validation.
    multi-PVC, unpublish, unstage, and delete behavior.
 3. `mount-survival.sh`: live mount identity and workload I/O across CSI node
    Pod replacement.
-4. `lib/common.sh`: safety gates, prepared-Driver checks, ownership-aware
+4. `multi-node-rwx.sh`: two-node RWX visibility and surviving-node I/O with
+   required hostname anti-affinity.
+5. `lib/common.sh`: safety gates, prepared-Driver checks, ownership-aware
    cleanup, explicit-context kubectl wrapper, and polling helpers.
-5. `lib/manifests.sh`: separate Driver and case manifest rendering; no cluster
+6. `lib/manifests.sh`: separate Driver and case manifest rendering; no cluster
    operations.
 
 ## Resource Ownership
@@ -91,6 +93,7 @@ includes the non-mutating `e2e-check` static validation.
    e2e/prepare.sh --image-tag drive9-a53e497-csi-d91bfe3
    e2e/basic-lifecycle.sh
    e2e/mount-survival.sh
+   e2e/multi-node-rwx.sh
    ```
 
 3. Copy the completed publishing workflow's bare trace tag into `--image-tag`
@@ -103,9 +106,10 @@ includes the non-mutating `e2e-check` static validation.
    before they reach command subprocesses. User authorization to run a real E2E
    does not authorize alternate shell forms or an execution-rule change.
 6. `.codex/rules/e2e.rules` removes repeated command-execution approval only for
-   `prepare.sh --image-tag <literal-tag>` and the two direct case entrypoints. It
-   does not waive required environment values, explicit real-cluster
-   authorization, or any Hard Safety Rule above.
+   `prepare.sh --image-tag <literal-tag>`, `basic-lifecycle.sh`, and
+   `mount-survival.sh`. It does not include `multi-node-rwx.sh`; that case needs
+   separate command approval as well as explicit real-cluster authorization.
+   No approval waives required environment values or any Hard Safety Rule above.
 7. Never request Secret values or print or persist Secret data in a prompt,
    command line, approval rule, log, or Codex configuration.
 

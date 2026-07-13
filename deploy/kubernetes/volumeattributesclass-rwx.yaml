@@ -1,0 +1,8 @@
+apiVersion: storage.k8s.io/v1
+kind: VolumeAttributesClass
+metadata:
+  name: drive9-rwx
+driverName: csi.drive9.ai
+parameters:
+  profile: none
+  durability: close-sync

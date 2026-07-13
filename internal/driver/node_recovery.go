@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,6 +104,19 @@ func (d *Driver) recoverOneNodeMount(ctx context.Context, state mountState) {
 			state.VolumeID, state.StagingTarget, defaultKubeletRoot)
 		return
 	}
+	var recoveryAttrs map[string]string
+	if state.Phase == mountStatePhaseStarting || state.Phase == mountStatePhaseActive {
+		attrs, mnmw, err := resolveRecoveryVolumeContextFromPV(ctx, d.k8s, d.cfg.DriverName, state.VolumeID)
+		if err != nil {
+			log.Printf("drive9-csi: warning: cannot resolve recovery PV for %s: %v", state.VolumeID, err)
+			return
+		}
+		if err := d.validateRecoveryVolumeContext(state, attrs, mnmw); err != nil {
+			log.Printf("drive9-csi: warning: unsafe recovery input for %s: %v", state.VolumeID, err)
+			return
+		}
+		recoveryAttrs = attrs
+	}
 
 	switch state.Phase {
 	case mountStatePhaseStopping:
@@ -141,7 +155,7 @@ func (d *Driver) recoverOneNodeMount(ctx context.Context, state mountState) {
 			log.Printf("drive9-csi: warning: cannot resume starting mount %s: %v", state.VolumeID, err)
 			return
 		}
-		attrs, creds, resolveErr := d.resolveRecoveryCredentials(ctx, state)
+		creds, resolveErr := credentialsFromVolumeAttributes(ctx, d.k8s, recoveryAttrs)
 		if resolveErr != nil {
 			log.Printf("drive9-csi: warning: cannot resolve starting recovery credentials for %s: %v",
 				state.VolumeID, resolveErr)
@@ -157,7 +171,6 @@ func (d *Driver) recoverOneNodeMount(ctx context.Context, state mountState) {
 			log.Printf("drive9-csi: warning: cannot validate starting recovery remote for %s: %v", state.VolumeID, err)
 			return
 		}
-		_ = attrs
 		result, err = reconciler.Reconcile(ctx, state, &mountLaunchCredentials{
 			Server: creds.Server,
 			APIKey: creds.APIKey,
@@ -193,7 +206,7 @@ func (d *Driver) recoverOneNodeMount(ctx context.Context, state mountState) {
 			log.Printf("drive9-csi: warning: cannot recover active mount %s: %v", state.VolumeID, err)
 			return
 		}
-		attrs, creds, err := d.resolveRecoveryCredentials(ctx, state)
+		creds, err := credentialsFromVolumeAttributes(ctx, d.k8s, recoveryAttrs)
 		if err != nil {
 			log.Printf("drive9-csi: warning: cannot resolve active recovery inputs for %s: %v", state.VolumeID, err)
 			return
@@ -208,7 +221,7 @@ func (d *Driver) recoverOneNodeMount(ctx context.Context, state mountState) {
 			log.Printf("drive9-csi: warning: cannot validate active recovery remote for %s: %v", state.VolumeID, err)
 			return
 		}
-		request, err := d.drive9MountRequestFromAttributes(state.VolumeID, state.StagingTarget, attrs, creds)
+		request, err := d.drive9MountRequestFromAttributes(state.VolumeID, state.StagingTarget, recoveryAttrs, creds)
 		if err != nil {
 			log.Printf("drive9-csi: warning: build active recovery request for %s: %v", state.VolumeID, err)
 			return
@@ -237,23 +250,27 @@ func (d *Driver) recoverOneNodeMount(ctx context.Context, state mountState) {
 	}
 }
 
-func (d *Driver) resolveRecoveryCredentials(
-	ctx context.Context,
-	state mountState,
-) (map[string]string, drive9Credentials, error) {
-	attrs, err := resolveVolumeContextFromPV(ctx, d.k8s, d.cfg.DriverName, state.VolumeID)
+func (d *Driver) validateRecoveryVolumeContext(state mountState, attrs map[string]string, mnmw bool) error {
+	contractAttrs := maps.Clone(attrs)
+	for _, key := range []string{paramAttrTTL, paramEntryTTL, paramDirTTL, paramPerfEnabled} {
+		delete(contractAttrs, key)
+	}
+	request, err := d.drive9MountRequestFromAttributes(state.VolumeID, state.StagingTarget, contractAttrs, drive9Credentials{})
 	if err != nil {
-		return nil, drive9Credentials{}, err
+		return err
 	}
-	creds, err := credentialsFromVolumeAttributes(ctx, d.k8s, attrs)
-	if err != nil {
-		return nil, drive9Credentials{}, err
+	if request.RemoteRoot != state.RemoteRoot {
+		return fmt.Errorf("PV remote root does not match durable state")
 	}
-	remoteRoot, err := normalizeRemotePath(attrs["remoteRoot"])
-	if err != nil || remoteRoot != state.RemoteRoot {
-		return nil, drive9Credentials{}, fmt.Errorf("PV remote root does not match durable state")
+	if mnmw {
+		if err := validateMNMWMountParameters(request.Profile, request.Durability); err != nil {
+			return err
+		}
 	}
-	return attrs, creds, nil
+	if mnmw || mountStateMayUseMNMWContract(state) {
+		return validatePersistedMNMWMountArgs(state, request.Profile, request.Durability)
+	}
+	return nil
 }
 
 func (d *Driver) drive9MountRequestFromAttributes(volumeID string, stagingTarget string, attrs map[string]string, creds drive9Credentials) (drive9MountRequest, error) {
@@ -280,6 +297,13 @@ func (d *Driver) drive9MountRequestFromAttributes(volumeID string, stagingTarget
 	if err != nil {
 		return drive9MountRequest{}, err
 	}
+	durability, err := effectiveMountDurability(attrs)
+	if err != nil {
+		return drive9MountRequest{}, err
+	}
+	if err := validateDurabilityTuning(durability, tuning); err != nil {
+		return drive9MountRequest{}, err
+	}
 	return drive9MountRequest{
 		VolumeID:      volumeID,
 		Server:        creds.Server,
@@ -287,6 +311,7 @@ func (d *Driver) drive9MountRequestFromAttributes(volumeID string, stagingTarget
 		RemoteRoot:    remoteRoot,
 		StagingTarget: filepath.Clean(stagingTarget),
 		Profile:       strings.TrimSpace(attrs["profile"]),
+		Durability:    durability,
 		AttrTTL:       ttls.AttrTTL,
 		EntryTTL:      ttls.EntryTTL,
 		DirTTL:        ttls.DirTTL,
