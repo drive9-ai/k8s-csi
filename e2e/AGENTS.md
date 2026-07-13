@@ -54,8 +54,9 @@ includes the non-mutating `e2e-check` static validation.
    multi-PVC, unpublish, unstage, and delete behavior.
 3. `mount-survival.sh`: live mount identity and workload I/O across CSI node
    Pod replacement.
-4. `multi-node-rwx.sh`: two-node RWX visibility and surviving-node I/O with
-   required hostname anti-affinity.
+4. `multi-node-rwx.sh`: sequential two-node RWX visibility and surviving-node
+   I/O subcases for `none` plus `close-sync`, and `coding-agent` without
+   durability, with required hostname anti-affinity.
 5. `lib/common.sh`: safety gates, prepared-Driver checks, ownership-aware
    cleanup, explicit-context kubectl wrapper, and polling helpers.
 6. `lib/manifests.sh`: separate Driver and case manifest rendering; no cluster

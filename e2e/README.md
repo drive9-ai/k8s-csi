@@ -77,11 +77,13 @@ Run the two-node RWX case on a cluster with at least two eligible nodes:
 e2e/multi-node-rwx.sh
 ```
 
-The RWX case creates two Pods with required hostname anti-affinity and fails if
-they cannot become Ready on distinct nodes. It writes a uniquely named file in
-each Pod, polls with a bounded timeout until the other Pod reads it, deletes Pod
-A, and verifies Pod B can still read and write. Cleanup removes only the case's
-labeled StorageClass, VolumeAttributesClass, PVC, and Pods.
+The RWX entrypoint sequentially runs two parameter subcases. Each subcase
+creates two Pods with required hostname anti-affinity and fails if they cannot
+become Ready on distinct nodes. It writes a uniquely named file in each Pod,
+polls with a bounded timeout until the other Pod reads it, deletes Pod A, and
+verifies Pod B can still read and write. A subcase is cleaned before the next
+one starts. Cleanup removes only labeled StorageClasses,
+VolumeAttributesClasses, PVCs, and Pods owned by that subcase.
 
 Cases verify that the prepared controller, node, RBAC bindings, and CSIDriver
 are ready. The controller, node, and host-binary installer must all use the
@@ -117,14 +119,18 @@ unit, and Drive9 binary path did not change. Its background I/O loop stops
 through explicit stop and stopped markers; expected case teardown does not use
 signals or treat a forced process exit as a test failure.
 
-`multi-node-rwx.sh` explicitly supplies `profile=coding-agent`, omits
-`durability`, and uses `ReadWriteMany`. After each closed write, it reports the
-observed A-to-B or B-to-A cross-node visibility latency. Measurement starts
-after the writer command succeeds and ends on the first matching read from the
-other Pod. It includes Kubernetes exec overhead and up to five seconds of
-polling delay. The reported latency is informational only and has no performance
-threshold; the existing 300-second visibility timeout remains a functional
-gate. The case does not claim broader consistency semantics.
+`multi-node-rwx.sh` runs these `ReadWriteMany` subcases in order:
+
+1. `remote-sync`: `profile=none` and `durability=close-sync`.
+2. `coding-agent`: `profile=coding-agent` with `durability` omitted.
+
+Each subcase reports its observed A-to-B and B-to-A cross-node visibility
+latency. Measurement starts after the writer command succeeds and ends on the
+first matching read from the other Pod. It includes Kubernetes exec overhead
+and up to five seconds of polling delay. The latency is informational only; it
+has no performance threshold. Each subcase retains the existing 300-second
+functional visibility timeout. The case does not claim broader consistency
+semantics.
 
 Set `DRIVE9_REMOTE_ROOT_PREFIX=/k8s/pvc-e2e` only when testing managed-directory
 mode. The default is workspace-root mode. The lifecycle case requires

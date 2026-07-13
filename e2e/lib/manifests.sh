@@ -244,12 +244,13 @@ EOF
 
 e2e_write_rwx_workload() {
 	local target="$1"
+	local pvc_name="$2"
 
 	cat > "$target" <<EOF
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: drive9-rwx-e2e
+  name: $pvc_name
   namespace: $test_namespace
   labels:
     drive9.ai/e2e-run: $case_run_id
@@ -272,6 +273,7 @@ e2e_write_rwx_pod() {
 	local target="$2"
 	local role="$3"
 	local require_distinct_node="$4"
+	local pvc_name="$5"
 
 	[[ "$require_distinct_node" == "true" ||
 		"$require_distinct_node" == "false" ]] ||
@@ -316,7 +318,7 @@ EOF
   volumes:
     - name: workspace
       persistentVolumeClaim:
-        claimName: drive9-rwx-e2e
+        claimName: $pvc_name
 EOF
 	[[ "$?" == "0" ]] || e2e_fail "write RWX Pod workload"
 }
