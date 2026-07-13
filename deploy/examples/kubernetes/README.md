@@ -92,7 +92,7 @@ For production, copy that overlay pattern and replace `:local` with the
 published immutable image reference selected by your release process. Do not
 apply the fail-closed base directly.
 
-After replacing the placeholder API key, apply all six example resources with
+After replacing the placeholder API key, apply all five example resources with
 one command:
 
 ```sh

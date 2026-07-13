@@ -149,7 +149,8 @@ func checkTextContracts() {
 			path: "Dockerfile",
 			required: []string{
 				"FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS runtime",
-				"/usr/local/bin/drive9 mount --direct-mount-strict --help",
+				"mount_help=\"$(/usr/local/bin/drive9 mount --direct-mount-strict --help 2>&1)\"",
+				"grep -F -- '-profile '", "grep -F -- '-durability '",
 				"COPY hack/drive9-csi-upload-perf.sh ",
 				"/usr/local/bin/drive9-csi-upload-perf",
 				"chmod +x /usr/local/bin/drive9-csi-upload-perf",
