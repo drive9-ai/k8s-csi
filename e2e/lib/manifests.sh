@@ -236,6 +236,10 @@ EOF
 e2e_write_test_pod() {
 	local pod_name="$1"
 	local target="$2"
+	local readonly="${3:-false}"
+
+	[[ "$readonly" == "true" || "$readonly" == "false" ]] ||
+		e2e_fail "test Pod readonly value must be true or false"
 
 	cat > "$target" <<EOF
 apiVersion: v1
@@ -254,10 +258,12 @@ spec:
       volumeMounts:
         - name: workspace
           mountPath: /workspace
+          readOnly: $readonly
   volumes:
     - name: workspace
       persistentVolumeClaim:
         claimName: drive9-workspace-e2e
+        readOnly: $readonly
 EOF
 	[[ "$?" == "0" ]] || e2e_fail "write test Pod"
 }

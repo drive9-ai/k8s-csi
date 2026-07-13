@@ -10,6 +10,7 @@ cleanup() {
 	local pod_name
 	local pod_names=(
 		drive9-csi-e2e-write
+		drive9-csi-e2e-readonly
 		drive9-csi-e2e-read
 		drive9-csi-e2e-multi
 		drive9-csi-e2e-multi-pvc
@@ -112,6 +113,8 @@ fi
 e2e_render_case_manifests
 e2e_write_primary_workload
 e2e_write_test_pod drive9-csi-e2e-write "$tmp_dir/pod-write.yaml"
+e2e_write_test_pod drive9-csi-e2e-readonly \
+	"$tmp_dir/pod-readonly.yaml" true
 e2e_write_test_pod drive9-csi-e2e-read "$tmp_dir/pod-read.yaml"
 e2e_write_test_pod drive9-csi-e2e-recreate-read \
 	"$tmp_dir/pod-recreate-read.yaml"
@@ -156,6 +159,30 @@ pv_name="$(kube_retry -n "$test_namespace" get pvc drive9-workspace-e2e \
 e2e_delete_owned_namespaced_resource "pod/drive9-csi-e2e-write" \
 	"$test_namespace" pod drive9-csi-e2e-write "$case_run_id" ||
 	e2e_fail "delete write pod"
+e2e_create_owned_namespaced_resource \
+	"pod/drive9-csi-e2e-readonly" "$test_namespace" \
+	pod drive9-csi-e2e-readonly "$case_run_id" \
+	"$tmp_dir/pod-readonly.yaml" || e2e_fail "create readonly Pod"
+kube_retry -n "$test_namespace" wait pod/drive9-csi-e2e-readonly \
+	--for=condition=Ready --timeout=300s || e2e_fail "readonly pod ready"
+kube_retry -n "$test_namespace" exec drive9-csi-e2e-readonly -- \
+	sh -c "test \"\$(cat '/workspace/$e2e_file')\" = '$e2e_token'" ||
+	e2e_fail "read through readonly mount"
+
+# Readonly publish smoke: a successful write must fail the case.
+readonly_file=".drive9-csi-readonly-$(date +%s).txt"
+readonly_probe='if printf "%s\n" readonly > "$1"; then
+	rm -f "$1"
+	exit 1
+fi
+test ! -e "$1"'
+kube_retry -n "$test_namespace" exec drive9-csi-e2e-readonly -- \
+	sh -c "$readonly_probe" sh "/workspace/$readonly_file" ||
+	e2e_fail "readonly mount accepted a write or could not be verified"
+e2e_delete_owned_namespaced_resource "pod/drive9-csi-e2e-readonly" \
+	"$test_namespace" pod drive9-csi-e2e-readonly "$case_run_id" ||
+	e2e_fail "delete readonly pod"
+
 e2e_create_owned_namespaced_resource \
 	"pod/drive9-csi-e2e-read" "$test_namespace" \
 	pod drive9-csi-e2e-read "$case_run_id" "$tmp_dir/pod-read.yaml" ||
