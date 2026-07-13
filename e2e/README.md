@@ -93,9 +93,10 @@ retry and ownership checks.
 manifests for debugging. The pre-provisioned Secret remains environment-owned
 regardless of this setting.
 
-`basic-lifecycle.sh` validates provisioning, write/read, workload Pod remount,
-same-node multi-Pod access, one-Pod multi-PVC behavior, unpublish, unstage, and
-PV deletion.
+`basic-lifecycle.sh` validates provisioning, write/read, readonly Pod access
+where reads succeed and writes are denied, workload Pod remount, same-node
+multi-Pod access, one-Pod multi-PVC behavior, unpublish, unstage, and PV
+deletion.
 
 `mount-survival.sh` creates a live workload, records its host mount identity,
 deletes the matching CSI node Pod, waits for the replacement, verifies workload

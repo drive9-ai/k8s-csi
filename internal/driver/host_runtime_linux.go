@@ -12,6 +12,10 @@ func (realHostRuntime) IsMountPoint(path string) (bool, error) {
 	return isMountPoint(path)
 }
 
+func (realHostRuntime) ObserveMountPoint(path string) (mountPointObservation, error) {
+	return observeMountPoint(path)
+}
+
 func (realHostRuntime) Signal(pid int, signal os.Signal) error {
 	value, ok := signal.(syscall.Signal)
 	if !ok {

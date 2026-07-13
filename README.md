@@ -509,9 +509,10 @@ All three scripts require explicit context and Driver namespace values. The
 current kubectl context is never used implicitly, and production-like context
 names are rejected.
 
-`basic-lifecycle.sh` covers provisioning, mount/write/read, workload Pod
-remount, same-node multi-Pod access, one-Pod multi-PVC behavior, unpublish,
-unstage, and deletion. `mount-survival.sh` keeps workload I/O active while
+`basic-lifecycle.sh` covers provisioning, mount/write/read, readonly Pod access
+where reads succeed and writes are denied, workload Pod remount, same-node
+multi-Pod access, one-Pod multi-PVC behavior, unpublish, unstage, and deletion.
+`mount-survival.sh` keeps workload I/O active while
 replacing the matching CSI node Pod and verifies the host mount identity does
 not change. See `e2e/README.md` and `e2e/AGENTS.md` for the complete safety and
 execution contract.

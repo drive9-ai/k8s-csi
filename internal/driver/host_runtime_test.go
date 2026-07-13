@@ -43,6 +43,7 @@ type fakeHostRuntime struct {
 	linkFn         func(string, string) error
 	execFn         func(context.Context, hostCommand) (hostCommandResult, error)
 	isMountPointFn func(string) (bool, error)
+	observeMountFn func(string) (mountPointObservation, error)
 	signalFn       func(int, os.Signal) error
 	nowFn          func() time.Time
 	waitFn         func(context.Context, time.Duration) error
@@ -188,6 +189,14 @@ func (f *fakeHostRuntime) IsMountPoint(path string) (bool, error) {
 		return f.isMountPointFn(path)
 	}
 	return false, nil
+}
+
+func (f *fakeHostRuntime) ObserveMountPoint(path string) (mountPointObservation, error) {
+	f.record(fakeHostCall{Operation: "observe-mount", Path: path})
+	if f.observeMountFn != nil {
+		return f.observeMountFn(path)
+	}
+	return mountPointObservation{}, nil
 }
 
 func (f *fakeHostRuntime) Signal(pid int, signal os.Signal) error {

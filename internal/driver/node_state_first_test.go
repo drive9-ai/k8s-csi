@@ -648,14 +648,15 @@ func TestNodeRPCStateFirstVolumeLocking(t *testing.T) {
 }
 
 type nodeStateFirstFixture struct {
-	driver         *Driver
-	runtime        *fakeHostRuntime
-	mountOps       *fakeNodeMountOperations
-	active         mountState
-	stageRequest   *csi.NodeStageVolumeRequest
-	publishTarget  string
-	runtimeMounted map[string]bool
-	k8sActions     int32
+	driver          *Driver
+	runtime         *fakeHostRuntime
+	mountOps        *fakeNodeMountOperations
+	active          mountState
+	stageRequest    *csi.NodeStageVolumeRequest
+	publishTarget   string
+	runtimeMounted  map[string]bool
+	runtimeReadonly map[string]bool
+	k8sActions      int32
 }
 
 func newNodeStateFirstFixture(t *testing.T, healthy bool) *nodeStateFirstFixture {
@@ -683,11 +684,12 @@ func newNodeStateFirstFixture(t *testing.T, healthy bool) *nodeStateFirstFixture
 	}
 	k8s := k8sfake.NewSimpleClientset()
 	fixture := &nodeStateFirstFixture{
-		runtime:        &fakeHostRuntime{},
-		mountOps:       &fakeNodeMountOperations{},
-		active:         active,
-		publishTarget:  "/var/lib/kubelet/pods/pod/volumes/kubernetes.io~csi/volume/mount",
-		runtimeMounted: map[string]bool{active.StagingTarget: healthy},
+		runtime:         &fakeHostRuntime{},
+		mountOps:        &fakeNodeMountOperations{},
+		active:          active,
+		publishTarget:   "/var/lib/kubelet/pods/pod/volumes/kubernetes.io~csi/volume/mount",
+		runtimeMounted:  map[string]bool{active.StagingTarget: healthy},
+		runtimeReadonly: map[string]bool{},
 	}
 	k8s.PrependReactor("*", "*", func(k8stesting.Action) (bool, kruntime.Object, error) {
 		atomic.AddInt32(&fixture.k8sActions, 1)
@@ -721,6 +723,12 @@ func newNodeStateFirstFixture(t *testing.T, healthy bool) *nodeStateFirstFixture
 func (f *nodeStateFirstFixture) installRuntime() {
 	f.runtime.isMountPointFn = func(path string) (bool, error) {
 		return f.runtimeMounted[path], nil
+	}
+	f.runtime.observeMountFn = func(path string) (mountPointObservation, error) {
+		return mountPointObservation{
+			Mounted:  f.runtimeMounted[path],
+			Readonly: f.runtimeReadonly[path],
+		}, nil
 	}
 	f.runtime.lstatFn = func(path string) (os.FileInfo, error) {
 		switch path {

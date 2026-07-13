@@ -50,6 +50,7 @@ type hostRuntime interface {
 	Link(string, string) error
 	Exec(context.Context, hostCommand) (hostCommandResult, error)
 	IsMountPoint(string) (bool, error)
+	ObserveMountPoint(string) (mountPointObservation, error)
 	Signal(int, os.Signal) error
 	Now() time.Time
 	Wait(context.Context, time.Duration) error

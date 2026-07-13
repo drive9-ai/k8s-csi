@@ -380,6 +380,7 @@ e2e_render_case_manifests
 e2e_write_primary_workload
 e2e_write_second_pvc
 e2e_write_test_pod drive9-test-pod "$tmp_dir/pod.yaml"
+e2e_write_test_pod drive9-test-readonly "$tmp_dir/pod-readonly.yaml" true
 e2e_write_test_pod_on_node drive9-test-node-pod \
 	"$tmp_dir/pod-node.yaml" node-a
 e2e_write_multi_pvc_pod drive9-test-multi-pvc \
@@ -390,8 +391,8 @@ if grep -Eq 'kind: Secret|apiKey:|DRIVE9_API_KEY|DRIVE9_SERVER' \
 	"$tmp_dir"/*.yaml; then
 	fail "case manifests contain inline credentials or a Secret"
 fi
-for file in workload.yaml workload-b.yaml pod.yaml pod-node.yaml \
-	pod-multi.yaml; do
+for file in workload.yaml workload-b.yaml pod.yaml pod-readonly.yaml \
+	pod-node.yaml pod-multi.yaml; do
 	grep -Fq "drive9.ai/e2e-run: $case_run_id" "$tmp_dir/$file" ||
 		fail "case manifest lacks ownership: $file"
 done
@@ -400,6 +401,16 @@ grep -Fq 'command: ["/bin/sleep", "3600"]' "$tmp_dir/pod.yaml" ||
 if grep -Fq 'command: ["/bin/sh", "-c", "sleep 3600"]' \
 	"$tmp_dir/pod.yaml"; then
 	fail "test Pod runs sleep through a shell"
+fi
+[[ "$(grep -Fc 'readOnly: false' "$tmp_dir/pod.yaml")" == "2" ]] ||
+	fail "default test Pod is not explicitly writable"
+if grep -Fq 'readOnly: true' "$tmp_dir/pod.yaml"; then
+	fail "default test Pod unexpectedly renders readonly"
+fi
+[[ "$(grep -Fc 'readOnly: true' "$tmp_dir/pod-readonly.yaml")" == "2" ]] ||
+	fail "readonly test Pod does not set both readonly fields"
+if grep -Fq 'readOnly: false' "$tmp_dir/pod-readonly.yaml"; then
+	fail "readonly test Pod renders a writable field"
 fi
 secret_refs=$(awk -v secret="$secret_name" '
 	$0 == "    drive9.ai/secret-name: " secret { count += 1 }

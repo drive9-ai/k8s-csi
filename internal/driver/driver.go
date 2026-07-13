@@ -1021,8 +1021,14 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 			"publish target state belongs to a different Drive9 volume or access mode")
 	}
 
-	mounted, err := d.hostRuntime().IsMountPoint(target)
-	if err != nil {
+	var mounted, mountReadonly bool
+	if req.GetReadonly() {
+		observation, observeErr := d.hostRuntime().ObserveMountPoint(target)
+		if observeErr != nil {
+			return nil, status.Errorf(codes.Internal, "observe readonly target mount %q: %v", target, observeErr)
+		}
+		mounted, mountReadonly = observation.Mounted, observation.Readonly
+	} else if mounted, err = d.hostRuntime().IsMountPoint(target); err != nil {
 		return nil, status.Errorf(codes.Internal, "check target mount: %v", err)
 	}
 
@@ -1067,6 +1073,9 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 			); err != nil {
 				return nil, err
 			}
+			if req.GetReadonly() && !mountReadonly {
+				return nil, status.Error(codes.FailedPrecondition, "readonly publish target is mounted read-write")
+			}
 		} else if err := d.mountOperations().Bind(stagingTarget, target, req.GetReadonly()); err != nil {
 			return nil, status.Errorf(codes.Internal, "bind mount publish target: %v", err)
 		}
@@ -1092,6 +1101,9 @@ func (d *Driver) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolu
 			requestedMode.String(),
 		); err != nil {
 			return nil, err
+		}
+		if req.GetReadonly() && !mountReadonly {
+			return nil, status.Error(codes.FailedPrecondition, "readonly publish target is mounted read-write")
 		}
 		return &csi.NodePublishVolumeResponse{}, nil
 
