@@ -8,5 +8,6 @@ resources:
   - controller.yaml
   - node.yaml
   - storageclass.yaml
+  - storageclass-immediate.yaml
   - volumeattributesclass.yaml
   - storageclass-rwx.yaml

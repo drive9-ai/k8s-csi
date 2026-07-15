@@ -59,6 +59,24 @@ func checkTextContracts() {
 			},
 		},
 		{
+			path: "deploy/kubernetes/storageclass-immediate.yaml",
+			required: []string{
+				"kind: StorageClass", "  name: drive9-rwo-immediate",
+				"provisioner: csi.drive9.ai", "parameters: {}",
+				"reclaimPolicy: Retain", "volumeBindingMode: Immediate",
+				"allowVolumeExpansion: false",
+			},
+			forbidden: []string{
+				"apiKey", "server:", "secret", "remoteRootPrefix:",
+				"remoteRoot:", "profile:", "durability:",
+				"attrTTL:", "entryTTL:", "dirTTL:",
+				"perfEnabled:", "readdirPrefetch:",
+				"readdirPrefetchMaxFiles:",
+				"readdirPrefetchMaxFileBytes:",
+				"readdirPrefetchMaxBytes:", "writebackBatchWindow:",
+			},
+		},
+		{
 			path: "deploy/kubernetes/volumeattributesclass.yaml",
 			required: []string{
 				"  name: drive9-coding-agent", "driverName: csi.drive9.ai",
@@ -89,8 +107,8 @@ func checkTextContracts() {
 		{
 			path: "deploy/kubernetes/kustomization.yaml",
 			required: []string{
-				"storageclass.yaml", "volumeattributesclass.yaml",
-				"storageclass-rwx.yaml",
+				"storageclass.yaml", "storageclass-immediate.yaml",
+				"volumeattributesclass.yaml", "storageclass-rwx.yaml",
 			},
 			forbidden: []string{
 				"volumeattributesclass-rwx.yaml",

@@ -252,6 +252,22 @@ volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: false
 ```
 
+For workloads that can create their PVC before the Pod, the base also installs
+the opt-in `drive9-rwo-immediate` class. Set
+`spec.storageClassName: drive9-rwo-immediate`, wait for the PVC to become
+`Bound`, and only then create the workload Pod. This moves dynamic provisioning
+out of the Pod startup path; it does not make provisioning itself faster.
+
+```sh
+kubectl -n default wait --for=jsonpath='{.status.phase}'=Bound \
+  pvc/drive9-workspace-tuned --timeout=180s
+```
+
+The existing `drive9-rwo` and `drive9-rwx` classes remain
+`WaitForFirstConsumer`. The Immediate class is not a default and retains the
+same `Retain` policy, so an unused PVC can still leave a PV that requires
+operator cleanup.
+
 PVCs opt into mount behavior with `spec.volumeAttributesClassName`. The base
 installs the optional `drive9-coding-agent` VolumeAttributesClass; the separate
 tuned example installs `drive9-coding-agent-tuned`:
