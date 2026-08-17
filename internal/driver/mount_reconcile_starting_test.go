@@ -627,13 +627,12 @@ func (f *startingReconcileFixture) installCallbacks() {
 		controlSocket, _ := drive9ControlSocketPath(current.StagingTarget, "0")
 		switch path {
 		case processStatePath:
-			return json.Marshal(map[string]any{
-				"pid":            4242,
-				"component":      "drive9-fuse",
-				"mount_kind":     "fuse",
-				"mount_point":    current.StagingTarget,
-				"control_socket": controlSocket,
-			})
+			return json.Marshal(supervisorProcessStateFixture(
+				4242,
+				"777",
+				current.StagingTarget,
+				controlSocket,
+			))
 		case hostProcPIDPath(4242, "stat"):
 			if f.process == "dead" || !f.pidAlive {
 				return nil, os.ErrNotExist

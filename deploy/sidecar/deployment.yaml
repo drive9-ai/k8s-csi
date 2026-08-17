@@ -121,9 +121,9 @@ spec:
                 done
               fi
 
-              exec /usr/local/bin/drive9-csi supervise-sidecar-mount -- \
-                /usr/local/bin/drive9 mount \
-                --foreground \
+              exec /usr/local/bin/drive9 mount \
+                --supervise-foreground \
+                --stop-timeout=30s \
                 --mode=fuse \
                 --direct-mount-strict \
                 --allow-other \

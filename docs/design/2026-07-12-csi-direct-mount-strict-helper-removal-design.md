@@ -12,6 +12,10 @@ helper fallback. Validation artifacts remain subject to the release-admission
 gate in the mount-survival design; implementation does not itself authorize
 production deployment.
 
+The foreground-worker and custom fallback-sidecar supervisor details in this
+document are superseded by
+`2026-08-17-csi-in-binary-mount-supervisor-design.md`.
+
 This design narrowly supersedes the host FUSE-helper requirements in
 `docs/design/csi-rolling-upgrade-mount-survival-v2.md`. All mount-survival,
 ownership, state-machine, recovery, secret, and release-admission invariants in

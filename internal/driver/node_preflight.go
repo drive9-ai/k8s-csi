@@ -374,6 +374,7 @@ func checkHostDrive9Execution(ctx context.Context, runtime hostRuntime, drive9Pa
 		true,
 		drive9Path,
 		"mount",
+		superviseForegroundFlag,
 		directMountStrictFlag,
 		"--help",
 	)

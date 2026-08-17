@@ -22,7 +22,7 @@ func TestDrive9MountArgsIncludesMountTTLs(t *testing.T) {
 
 	want := []string{
 		"mount",
-		"--foreground",
+		"--supervise-foreground",
 		"--mode=fuse",
 		"--direct-mount-strict",
 		"--allow-other",
@@ -50,7 +50,7 @@ func TestDrive9MountArgsDefaultsMountTTLs(t *testing.T) {
 
 	want := []string{
 		"mount",
-		"--foreground",
+		"--supervise-foreground",
 		"--mode=fuse",
 		"--direct-mount-strict",
 		"--allow-other",
@@ -78,7 +78,7 @@ func TestDrive9MountArgsPassesThroughProfileAndDurability(t *testing.T) {
 
 	want := []string{
 		"mount",
-		"--foreground",
+		"--supervise-foreground",
 		"--mode=fuse",
 		"--direct-mount-strict",
 		"--allow-other",
@@ -109,7 +109,7 @@ func TestDrive9MountArgsIncludesPerfDir(t *testing.T) {
 
 	want := []string{
 		"mount",
-		"--foreground",
+		"--supervise-foreground",
 		"--mode=fuse",
 		"--direct-mount-strict",
 		"--allow-other",
@@ -144,7 +144,7 @@ func TestDrive9MountArgsIncludesExplicitMountTuning(t *testing.T) {
 
 	want := []string{
 		"mount",
-		"--foreground",
+		"--supervise-foreground",
 		"--mode=fuse",
 		"--direct-mount-strict",
 		"--allow-other",

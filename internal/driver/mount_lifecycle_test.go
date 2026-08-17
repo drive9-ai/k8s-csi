@@ -87,7 +87,7 @@ func TestMountLaunchPreservesAllDrive9MountArgs(t *testing.T) {
 	request := validMountLaunchRequest(t)
 	want := []string{
 		"mount",
-		"--foreground",
+		"--supervise-foreground",
 		"--mode=fuse",
 		"--direct-mount-strict",
 		"--server", "https://api.drive9.ai",
@@ -391,13 +391,12 @@ func (f *mountLaunchFixture) installCallbacks() {
 			if f.failure == "socket-mismatch" {
 				controlSocket = filepath.Join(hostRuntimeDir, "drive9-mount-ffffffffffffffff.sock")
 			}
-			return json.Marshal(map[string]any{
-				"pid":            f.pid,
-				"component":      "drive9-fuse",
-				"mount_kind":     "fuse",
-				"mount_point":    request.StagingTarget,
-				"control_socket": controlSocket,
-			})
+			return json.Marshal(supervisorProcessStateFixture(
+				f.pid,
+				"777",
+				request.StagingTarget,
+				controlSocket,
+			))
 		case hostProcPIDPath(f.pid, "stat"):
 			if !f.pidAlive {
 				return nil, os.ErrNotExist

@@ -20,7 +20,8 @@ It intentionally ships a small stable surface first:
 - Managed directory volumes write a marker file.
 - `DeleteVolume` detaches CSI ownership only: it removes CSI metadata (marker,
   index, name index) but never deletes Drive9 workspace data.
-- `NodeStageVolume` runs `drive9 mount --mode=fuse --direct-mount-strict`
+- `NodeStageVolume` runs
+  `drive9 mount --supervise-foreground --mode=fuse --direct-mount-strict`
   through a host systemd service.
 - `NodePublishVolume` bind-mounts the staged path into the pod.
 - No snapshots, expansion, or automatic tenant provisioning.
@@ -35,7 +36,8 @@ The driver does not reimplement Drive9 FUSE. It installs the official `drive9`
 CLI from the node-plugin image to a content-addressed host path and keeps CSI
 focused on Kubernetes lifecycle, idempotency, mount orchestration, and secret
 handling. New mounts require Drive9's direct `mount(2)` path and never fall back
-to `fusermount3` or `fusermount`.
+to `fusermount3` or `fusermount`. The Drive9 process owned by systemd is the
+in-binary supervisor; its replaceable child owns the FUSE connection.
 
 ## Security Model
 
@@ -101,9 +103,11 @@ run an older, incompatible driver. The manually triggered validation-image
 workflow resolves the latest complete Drive9 CLI release, builds and pushes the
 image, then reports its trace tag, manifest-list digest, and immutable reference
 in the workflow summary. It does not generate deployment manifests. Each target
-architecture must execute `drive9 mount --direct-mount-strict --help`
-successfully during the image build; the runtime image contains no `fuse3`
-package or `/etc/fuse.conf` dependency. Non-production validation must inject
+architecture must execute
+`drive9 mount --supervise-foreground --direct-mount-strict --help`
+successfully during the image build. This requires Drive9 CLI `dac2d62` or
+newer; the runtime image installs neither `fuse3` nor an `/etc/fuse.conf`
+dependency. Non-production validation must inject
 that immutable reference through a local, environment-specific overlay.
 
 Validation images have a traceable tag:
@@ -362,10 +366,11 @@ mount propagation. Use it for pilots or constrained clusters, not as the default
 production path. The fallback example also mounts the Drive9 workspace root by
 default; set `DRIVE9_REMOTE_ROOT` only when a subpath is intentional.
 
-The sidecar uses the same fixed `--direct-mount-strict --allow-other` contract.
-Its compiled supervisor owns the Drive9 child process and performs bounded
-drain, TERM/KILL escalation, and direct normal/lazy kernel unmount so deleting
-the Pod cannot leave a propagated host mount behind.
+The sidecar uses the same fixed
+`--supervise-foreground --direct-mount-strict --allow-other` contract. Drive9's
+in-binary supervisor restarts an unhealthy FUSE worker and performs bounded
+TERM/KILL escalation and mount cleanup. Its 30-second stop timeout leaves
+cleanup headroom inside the Pod's 60-second termination grace period.
 
 The sidecar fallback exposes the same mount TTL behavior through
 `DRIVE9_ATTR_TTL`, `DRIVE9_ENTRY_TTL`, and `DRIVE9_DIR_TTL`. Each defaults to

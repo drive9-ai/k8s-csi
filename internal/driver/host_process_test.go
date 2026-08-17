@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -215,6 +216,21 @@ func TestProcessOwnershipValidRecordedIdentity(t *testing.T) {
 	}
 }
 
+func TestProcessOwnershipAllowsWorkerReplacement(t *testing.T) {
+	fixture := newProcessOwnershipFixture(t)
+	for _, workerPID := range []int{0, 4343, 5353} {
+		fixture.stateWorkerPID = workerPID
+		fixture.installRuntimeCallbacks()
+		verified, err := verifyProcessOwnership(fixture.runtime, fixture.expectation)
+		if err != nil {
+			t.Fatalf("verifyProcessOwnership(worker PID %d): %v", workerPID, err)
+		}
+		if verified.PID != fixture.pid {
+			t.Fatalf("verified PID = %d, want supervisor %d", verified.PID, fixture.pid)
+		}
+	}
+}
+
 func TestProcessOwnershipRejectsIndependentMismatch(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -231,6 +247,42 @@ func TestProcessOwnershipRejectsIndependentMismatch(t *testing.T) {
 			name: "process state component",
 			mutate: func(f *processOwnershipFixture) {
 				f.stateComponent = "drive9-other"
+			},
+		},
+		{
+			name: "process state role",
+			mutate: func(f *processOwnershipFixture) {
+				f.stateRole = "worker"
+			},
+		},
+		{
+			name: "process state supervise marker",
+			mutate: func(f *processOwnershipFixture) {
+				f.stateSupervise = false
+			},
+		},
+		{
+			name: "process state supervisor pid",
+			mutate: func(f *processOwnershipFixture) {
+				f.stateSupervisorPID++
+			},
+		},
+		{
+			name: "process state creation time",
+			mutate: func(f *processOwnershipFixture) {
+				f.stateCreationTime++
+			},
+		},
+		{
+			name: "process state supervisor creation time",
+			mutate: func(f *processOwnershipFixture) {
+				f.stateSupervisorCreationTime++
+			},
+		},
+		{
+			name: "negative worker pid",
+			mutate: func(f *processOwnershipFixture) {
+				f.stateWorkerPID = -1
 			},
 		},
 		{
@@ -323,24 +375,30 @@ func TestProcessOwnershipRejectsIndependentMismatch(t *testing.T) {
 }
 
 type processOwnershipFixture struct {
-	t                  *testing.T
-	runtime            *fakeHostRuntime
-	expectation        processOwnershipExpectation
-	pid                int
-	startTime          string
-	secondStartTime    string
-	stagingTarget      string
-	processStatePath   string
-	controlSocket      string
-	argvTarget         string
-	cgroupUnit         string
-	executablePath     string
-	stateMountPoint    string
-	stateControlSocket string
-	stateComponent     string
-	stateMountKind     string
-	processStateMode   os.FileMode
-	startReads         int
+	t                           *testing.T
+	runtime                     *fakeHostRuntime
+	expectation                 processOwnershipExpectation
+	pid                         int
+	startTime                   string
+	secondStartTime             string
+	stagingTarget               string
+	processStatePath            string
+	controlSocket               string
+	argvTarget                  string
+	cgroupUnit                  string
+	executablePath              string
+	stateMountPoint             string
+	stateControlSocket          string
+	stateComponent              string
+	stateMountKind              string
+	stateRole                   string
+	stateSupervise              bool
+	stateSupervisorPID          int
+	stateCreationTime           uint64
+	stateSupervisorCreationTime uint64
+	stateWorkerPID              int
+	processStateMode            os.FileMode
+	startReads                  int
 }
 
 func newProcessOwnershipFixture(t *testing.T) *processOwnershipFixture {
@@ -360,22 +418,28 @@ func newProcessOwnershipFixture(t *testing.T) *processOwnershipFixture {
 		t.Fatalf("drive9ControlSocketPath(): %v", err)
 	}
 	fixture := &processOwnershipFixture{
-		t:                  t,
-		runtime:            &fakeHostRuntime{},
-		pid:                4242,
-		startTime:          "777",
-		secondStartTime:    "777",
-		stagingTarget:      stagingTarget,
-		processStatePath:   statePath,
-		controlSocket:      controlSocket,
-		argvTarget:         stagingTarget,
-		cgroupUnit:         names.SystemdUnit,
-		executablePath:     "/var/lib/drive9-csi/bin/drive9-" + strings.Repeat("a", 64),
-		stateMountPoint:    stagingTarget,
-		stateControlSocket: controlSocket,
-		stateComponent:     "drive9-fuse",
-		stateMountKind:     "fuse",
-		processStateMode:   0o600,
+		t:                           t,
+		runtime:                     &fakeHostRuntime{},
+		pid:                         4242,
+		startTime:                   "777",
+		secondStartTime:             "777",
+		stagingTarget:               stagingTarget,
+		processStatePath:            statePath,
+		controlSocket:               controlSocket,
+		argvTarget:                  stagingTarget,
+		cgroupUnit:                  names.SystemdUnit,
+		executablePath:              "/var/lib/drive9-csi/bin/drive9-" + strings.Repeat("a", 64),
+		stateMountPoint:             stagingTarget,
+		stateControlSocket:          controlSocket,
+		stateComponent:              "drive9-fuse-supervisor",
+		stateMountKind:              "fuse",
+		stateRole:                   "supervisor",
+		stateSupervise:              true,
+		stateSupervisorPID:          4242,
+		stateCreationTime:           777,
+		stateSupervisorCreationTime: 777,
+		stateWorkerPID:              4343,
+		processStateMode:            0o600,
 		expectation: processOwnershipExpectation{
 			VolumeID:      volumeID,
 			StagingTarget: stagingTarget,
@@ -401,11 +465,17 @@ func (f *processOwnershipFixture) installRuntimeCallbacks() {
 		switch path {
 		case f.processStatePath:
 			body, err := json.Marshal(map[string]any{
-				"pid":            f.pid,
-				"component":      f.stateComponent,
-				"mount_kind":     f.stateMountKind,
-				"mount_point":    f.stateMountPoint,
-				"control_socket": f.stateControlSocket,
+				"pid":                      f.pid,
+				"creation_time":            f.stateCreationTime,
+				"component":                f.stateComponent,
+				"mount_kind":               f.stateMountKind,
+				"mount_point":              f.stateMountPoint,
+				"control_socket":           f.stateControlSocket,
+				"role":                     f.stateRole,
+				"supervisor_pid":           f.stateSupervisorPID,
+				"supervisor_creation_time": f.stateSupervisorCreationTime,
+				"worker_pid":               f.stateWorkerPID,
+				"supervise":                f.stateSupervise,
 			})
 			return body, err
 		case hostProcPIDPath(f.pid, "stat"):
@@ -439,6 +509,30 @@ func hostProcStatLine(pid int, command string, startTime string) string {
 	}
 	fields[19] = startTime
 	return fmt.Sprintf("%d (%s) %s\n", pid, command, strings.Join(fields, " "))
+}
+
+func supervisorProcessStateFixture(
+	pid int,
+	startTime string,
+	mountPoint string,
+	controlSocket string,
+) drive9ProcessState {
+	creationTime, err := strconv.ParseUint(startTime, 10, 64)
+	if err != nil || creationTime == 0 {
+		panic("invalid supervisor process-state fixture start time")
+	}
+	return drive9ProcessState{
+		PID:                    pid,
+		CreationTime:           creationTime,
+		Component:              drive9SupervisorComponent,
+		MountKind:              drive9SupervisorMountKind,
+		MountPoint:             mountPoint,
+		ControlSocket:          controlSocket,
+		Role:                   drive9SupervisorRole,
+		SupervisorPID:          pid,
+		SupervisorCreationTime: creationTime,
+		Supervise:              true,
+	}
 }
 
 func assertNoDestructiveHostCalls(t *testing.T, calls []fakeHostCall) {

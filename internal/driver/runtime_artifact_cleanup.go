@@ -37,11 +37,11 @@ func removeVerifiedDeadRuntimeArtifacts(runtime hostRuntime, state mountState) e
 		if err != nil {
 			return err
 		}
-		if processState.PID <= 0 ||
-			processState.Component != "drive9-fuse" ||
-			processState.MountKind != "fuse" ||
-			processState.MountPoint != state.StagingTarget ||
-			processState.ControlSocket != controlSocketPath {
+		if err := validateDrive9SupervisorProcessState(
+			processState,
+			state.StagingTarget,
+			controlSocketPath,
+		); err != nil {
 			return ownershipError("runtime process-state identity does not match durable state")
 		}
 		if _, err := readHostProcessStartTime(runtime, processState.PID); err == nil {

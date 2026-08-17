@@ -110,11 +110,11 @@ func checkTextContracts() {
 			required: []string{
 				"terminationGracePeriodSeconds: 60",
 				"registry.invalid/drive9-csi:unpublished",
-				"exec /usr/local/bin/drive9-csi supervise-sidecar-mount --",
-				"/usr/local/bin/drive9 mount", "--direct-mount-strict",
+				"exec /usr/local/bin/drive9 mount", "--supervise-foreground",
+				"--stop-timeout=30s", "--direct-mount-strict",
 				"DRIVE9_ATTR_TTL", "DRIVE9_ENTRY_TTL", "DRIVE9_DIR_TTL",
 				"--attr-ttl", "--entry-ttl", "--dir-ttl", "value: 30s",
-				"--foreground", "DRIVE9_PERF_ENABLED",
+				"DRIVE9_PERF_ENABLED",
 				"set -- --perf-dir /perf", "mountPath: /perf",
 				"path: /var/lib/drive9-sidecar/demo/perf",
 				"value: \"false\"", "DRIVE9_READDIR_PREFETCH",
@@ -128,6 +128,7 @@ func checkTextContracts() {
 			},
 			forbidden: []string{
 				"ghcr.io/drive9-ai/drive9-csi:", "exec drive9 mount",
+				"supervise-sidecar-mount", "--foreground",
 				"DRIVE9_PERF_DIR", "- name: DRIVE9_READDIR_PREFETCH",
 				"- name: DRIVE9_READDIR_PREFETCH_MAX_FILES",
 				"- name: DRIVE9_READDIR_PREFETCH_MAX_FILE_BYTES",
@@ -149,7 +150,7 @@ func checkTextContracts() {
 			path: "Dockerfile",
 			required: []string{
 				"FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS runtime",
-				"mount_help=\"$(/usr/local/bin/drive9 mount --direct-mount-strict --help 2>&1)\"",
+				"mount_help=\"$(/usr/local/bin/drive9 mount --supervise-foreground --direct-mount-strict --help 2>&1)\"",
 				"grep -F -- '-profile '", "grep -F -- '-durability '",
 				"COPY hack/drive9-csi-upload-perf.sh ",
 				"/usr/local/bin/drive9-csi-upload-perf",
