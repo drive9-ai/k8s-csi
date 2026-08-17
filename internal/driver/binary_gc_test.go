@@ -128,13 +128,12 @@ func TestBinaryGCRetainsVerifiedLiveOrphan(t *testing.T) {
 	writeGCState(t, fixture.stateDir, state)
 	processPath, _ := drive9ProcessStatePath(state.StagingTarget)
 	controlSocket, _ := drive9ControlSocketPath(state.StagingTarget, "0")
-	body, _ := json.Marshal(map[string]any{
-		"pid":            4242,
-		"component":      "drive9-fuse",
-		"mount_kind":     "fuse",
-		"mount_point":    state.StagingTarget,
-		"control_socket": controlSocket,
-	})
+	body, _ := json.Marshal(supervisorProcessStateFixture(
+		4242,
+		"777",
+		state.StagingTarget,
+		controlSocket,
+	))
 	if err := os.WriteFile(filepath.Join(fixture.runDir, filepath.Base(processPath)), body, 0o600); err != nil {
 		t.Fatalf("write process state: %v", err)
 	}

@@ -582,12 +582,14 @@ func (r startingReconciler) observeStartingProcess(state mountState) (startingPr
 		return startingProcessObservation{State: startingProcessMismatch}, err
 	}
 	controlSocket, err := drive9ControlSocketPath(state.StagingTarget, "0")
-	if err != nil ||
-		processState.PID <= 0 ||
-		processState.Component != "drive9-fuse" ||
-		processState.MountKind != "fuse" ||
-		processState.MountPoint != state.StagingTarget ||
-		processState.ControlSocket != controlSocket {
+	if err != nil {
+		return startingProcessObservation{State: startingProcessMismatch}, errProcessOwnership
+	}
+	if err := validateDrive9SupervisorProcessState(
+		processState,
+		state.StagingTarget,
+		controlSocket,
+	); err != nil {
 		return startingProcessObservation{State: startingProcessMismatch}, errProcessOwnership
 	}
 	_, err = readHostProcessStartTime(r.runtime, processState.PID)

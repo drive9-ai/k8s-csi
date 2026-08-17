@@ -588,13 +588,12 @@ func (f *mountStopFixture) installCallbacks() {
 		}
 		switch path {
 		case processStatePath:
-			return json.Marshal(map[string]any{
-				"pid":            f.processStatePID,
-				"component":      "drive9-fuse",
-				"mount_kind":     "fuse",
-				"mount_point":    current.StagingTarget,
-				"control_socket": controlSocketPath,
-			})
+			return json.Marshal(supervisorProcessStateFixture(
+				f.processStatePID,
+				f.processStateStartTime,
+				current.StagingTarget,
+				controlSocketPath,
+			))
 		case hostProcPIDPath(current.PID, "stat"):
 			alive := f.pidAlive
 			startTime := current.PIDStartTime

@@ -149,13 +149,12 @@ func (f *noStateMountFixture) installCallbacks() {
 	f.runtime.readFileFn = func(path string) ([]byte, error) {
 		switch path {
 		case f.processPath:
-			return json.Marshal(drive9ProcessState{
-				PID:           4242,
-				Component:     "drive9-fuse",
-				MountKind:     "fuse",
-				MountPoint:    f.stagingTarget,
-				ControlSocket: f.socketPath,
-			})
+			return json.Marshal(supervisorProcessStateFixture(
+				4242,
+				"777",
+				f.stagingTarget,
+				f.socketPath,
+			))
 		case hostProcPIDPath(4242, "stat"):
 			if !f.pidAlive {
 				return nil, os.ErrNotExist

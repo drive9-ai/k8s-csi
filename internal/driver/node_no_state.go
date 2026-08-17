@@ -67,11 +67,11 @@ func observeNoStateMount(
 		if err != nil {
 			return noStateMountObservation{}, err
 		}
-		if processState.PID <= 0 ||
-			processState.Component != "drive9-fuse" ||
-			processState.MountKind != "fuse" ||
-			processState.MountPoint != stagingTarget ||
-			processState.ControlSocket != controlSocketPath {
+		if err := validateDrive9SupervisorProcessState(
+			processState,
+			stagingTarget,
+			controlSocketPath,
+		); err != nil {
 			return noStateMountObservation{}, ownershipError("no-state process artifact identity mismatch")
 		}
 		if _, err := readHostProcessStartTime(runtime, processState.PID); err == nil {

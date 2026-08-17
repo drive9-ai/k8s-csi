@@ -126,13 +126,12 @@ func TestRemoveVerifiedDeadRuntimeArtifacts(t *testing.T) {
 					if test.differentDeadPID {
 						pid++
 					}
-					return json.Marshal(drive9ProcessState{
-						PID:           pid,
-						Component:     "drive9-fuse",
-						MountKind:     "fuse",
-						MountPoint:    target,
-						ControlSocket: socketPath,
-					})
+					return json.Marshal(supervisorProcessStateFixture(
+						pid,
+						"777",
+						target,
+						socketPath,
+					))
 				}
 				if path == hostProcPIDPath(state.PID, "stat") && test.livePID {
 					return []byte(hostProcStatLine(state.PID, "drive9 mount", state.PIDStartTime)), nil

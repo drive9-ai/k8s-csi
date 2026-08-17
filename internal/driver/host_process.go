@@ -14,10 +14,13 @@ import (
 )
 
 const (
-	hostRuntimeDir        = "/run/drive9-csi"
-	hostProcRoot          = "/host-proc"
-	hostBinaryDir         = "/var/lib/drive9-csi/bin"
-	maxProcessStateLength = 1 << 20
+	hostRuntimeDir            = "/run/drive9-csi"
+	hostProcRoot              = "/host-proc"
+	hostBinaryDir             = "/var/lib/drive9-csi/bin"
+	maxProcessStateLength     = 1 << 20
+	drive9SupervisorComponent = "drive9-fuse-supervisor"
+	drive9SupervisorRole      = "supervisor"
+	drive9SupervisorMountKind = "fuse"
 )
 
 var (
@@ -63,11 +66,17 @@ type verifiedProcessIdentity struct {
 }
 
 type drive9ProcessState struct {
-	PID           int    `json:"pid"`
-	Component     string `json:"component"`
-	MountKind     string `json:"mount_kind"`
-	MountPoint    string `json:"mount_point"`
-	ControlSocket string `json:"control_socket"`
+	PID                    int    `json:"pid"`
+	CreationTime           uint64 `json:"creation_time"`
+	Component              string `json:"component"`
+	MountKind              string `json:"mount_kind"`
+	MountPoint             string `json:"mount_point"`
+	ControlSocket          string `json:"control_socket"`
+	Role                   string `json:"role"`
+	SupervisorPID          int    `json:"supervisor_pid"`
+	SupervisorCreationTime uint64 `json:"supervisor_creation_time"`
+	WorkerPID              int    `json:"worker_pid"`
+	Supervise              bool   `json:"supervise"`
 }
 
 func newVolumeHostNames(volumeID string, attemptID string) (volumeHostNames, error) {
@@ -232,14 +241,11 @@ func verifyProcessOwnership(runtime hostRuntime, expected processOwnershipExpect
 	if err != nil {
 		return verifiedProcessIdentity{}, err
 	}
-	if state.PID <= 0 || (expected.PID != 0 && state.PID != expected.PID) {
+	if expected.PID != 0 && state.PID != expected.PID {
 		return verifiedProcessIdentity{}, ownershipError("process-state PID does not match")
 	}
-	if state.Component != "drive9-fuse" || state.MountKind != "fuse" {
-		return verifiedProcessIdentity{}, ownershipError("process-state identity does not match Drive9 FUSE")
-	}
-	if state.MountPoint != stagingTarget || state.ControlSocket != controlSocketPath {
-		return verifiedProcessIdentity{}, ownershipError("process-state paths do not match")
+	if err := validateDrive9SupervisorProcessState(state, stagingTarget, controlSocketPath); err != nil {
+		return verifiedProcessIdentity{}, err
 	}
 
 	startTime, err := readHostProcessStartTime(runtime, state.PID)
@@ -248,6 +254,9 @@ func verifyProcessOwnership(runtime hostRuntime, expected processOwnershipExpect
 	}
 	if expected.PIDStartTime != "" && startTime != expected.PIDStartTime {
 		return verifiedProcessIdentity{}, ownershipError("recorded process start time does not match")
+	}
+	if strconv.FormatUint(state.CreationTime, 10) != startTime {
+		return verifiedProcessIdentity{}, ownershipError("process-state creation identity does not match")
 	}
 	concrete := expected
 	concrete.PID = state.PID
@@ -259,6 +268,23 @@ func verifyProcessOwnership(runtime hostRuntime, expected processOwnershipExpect
 	verified.ControlSocketPath = controlSocketPath
 	verified.ProcessStatePath = processStatePath
 	return verified, nil
+}
+
+func validateDrive9SupervisorProcessState(
+	state drive9ProcessState,
+	stagingTarget string,
+	controlSocketPath string,
+) error {
+	if state.PID <= 0 || state.CreationTime == 0 || state.WorkerPID < 0 ||
+		state.Component != drive9SupervisorComponent ||
+		state.MountKind != drive9SupervisorMountKind ||
+		state.MountPoint != stagingTarget || state.ControlSocket != controlSocketPath ||
+		state.Role != drive9SupervisorRole || !state.Supervise ||
+		state.SupervisorPID != state.PID ||
+		state.SupervisorCreationTime != state.CreationTime {
+		return ownershipError("process-state identity does not match Drive9 mount supervisor")
+	}
+	return nil
 }
 
 func verifyHostPIDOwnership(

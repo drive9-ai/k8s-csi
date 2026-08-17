@@ -175,7 +175,7 @@ func TestNodePreflightUsesOnlyCanonicalHostCommands(t *testing.T) {
 	}
 }
 
-func TestNodePreflightIgnoresHelpersAndProbesStrictCapability(t *testing.T) {
+func TestNodePreflightIgnoresHelpersAndProbesSupervisorStrictCapability(t *testing.T) {
 	fixture := newNodePreflightFixture("")
 	capabilities := runNodePreflight(context.Background(), fixture.runtime)
 	for _, name := range allNodeCapabilityNames() {
@@ -190,7 +190,13 @@ func TestNodePreflightIgnoresHelpersAndProbesStrictCapability(t *testing.T) {
 			continue
 		}
 		inner := hostInnerCommand(call.Command)
-		want := []string{fixture.drive9Path, "mount", directMountStrictFlag, "--help"}
+		want := []string{
+			fixture.drive9Path,
+			"mount",
+			superviseForegroundFlag,
+			directMountStrictFlag,
+			"--help",
+		}
 		if len(inner) >= len(want) && reflect.DeepEqual(inner[len(inner)-len(want):], want) {
 			found = true
 		}
@@ -201,7 +207,7 @@ func TestNodePreflightIgnoresHelpersAndProbesStrictCapability(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("preflight did not execute strict capability probe through host systemd")
+		t.Fatalf("preflight did not execute supervisor/strict capability probe through host systemd")
 	}
 }
 
