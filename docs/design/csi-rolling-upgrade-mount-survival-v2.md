@@ -17,8 +17,10 @@ release-admitted.
 The helper-specific image, installer, preflight, PATH, fallback, and cleanup
 requirements in this document are superseded by
 `docs/design/2026-07-12-csi-direct-mount-strict-helper-removal-design.md`.
-Mount-survival, ownership, state-machine, secret, and release-admission
-invariants here remain authoritative.
+The foreground-worker ownership model is superseded by
+`docs/design/2026-08-17-csi-in-binary-mount-supervisor-design.md`.
+The remaining mount-survival, ownership, state-machine, secret, and
+release-admission invariants here remain authoritative.
 
 ## Problem
 

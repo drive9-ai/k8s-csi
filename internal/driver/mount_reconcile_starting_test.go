@@ -138,6 +138,16 @@ func TestReconcileStartingDesignRows(t *testing.T) {
 			wantDeleted: true,
 		},
 		{
+			name: "reused process PID is treated as dead",
+			configure: func(f *startingReconcileFixture) {
+				f.service = systemdUnitNotFound
+				f.process = "ready"
+				f.pidStartTime = "888"
+			},
+			wantResult:  startingReconcileDeleted,
+			wantDeleted: true,
+		},
+		{
 			name: "live ownership mismatch preserves state",
 			configure: func(f *startingReconcileFixture) {
 				f.service = systemdUnitActive
@@ -534,6 +544,7 @@ type startingReconcileFixture struct {
 	attemptNumber       int
 	systemdQueryNumber  int
 	pidAlive            bool
+	pidStartTime        string
 	mainPID             int
 	mainProcess         string
 	launcherDeleted     bool
@@ -560,6 +571,7 @@ func newStartingReconcileFixture(t *testing.T) *startingReconcileFixture {
 		fallbackBinary:      "/var/lib/drive9-csi/bin/drive9-" + strings.Repeat("b", 64),
 		attemptNumber:       1,
 		pidAlive:            true,
+		pidStartTime:        "777",
 		mainPID:             4242,
 		mainProcess:         "drive9",
 		unitIdentityMatches: true,
@@ -637,7 +649,7 @@ func (f *startingReconcileFixture) installCallbacks() {
 			if f.process == "dead" || !f.pidAlive {
 				return nil, os.ErrNotExist
 			}
-			return []byte(hostProcStatLine(4242, "drive9 mount", "777")), nil
+			return []byte(hostProcStatLine(4242, "drive9 mount", f.pidStartTime)), nil
 		case hostProcPIDPath(4242, "cmdline"):
 			target := current.StagingTarget
 			if f.process == "mismatch" {

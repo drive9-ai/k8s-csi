@@ -118,7 +118,7 @@ pin or download an unpublished artifact.
 
 ## Validation
 
-Local acceptance requires:
+Completed validation:
 
 1. Mount argv and durable-state tests for the supervisor-only contract.
 2. Process ownership tests for every required supervisor identity field.
@@ -127,6 +127,12 @@ Local acceptance requires:
 4. Node preflight and Dockerfile capability contracts.
 5. Manifest checks proving direct sidecar use and absence of the old wrapper.
 6. `make test`, `make build-check`, `make manifest-check`, and `make check`.
+7. Validation image
+   `ghcr.io/drive9-ai/drive9-csi:drive9-dac2d62-csi-f78daca` built with
+   Drive9 CLI `dac2d62`.
+8. Basic-lifecycle and mount-survival E2E passed on
+   `dev-drive9-eks-ap-southeast-1`; workload I/O and host mount identity
+   survived CSI node Pod replacement.
 
-Image build and cluster E2E remain deferred until Drive9 CLI `dac2d62` is
-published and separately approved for execution.
+Independent worker-kill restart, multi-node RWX, and fallback-sidecar shutdown
+E2E remain deferred.

@@ -74,10 +74,12 @@ func observeNoStateMount(
 		); err != nil {
 			return noStateMountObservation{}, ownershipError("no-state process artifact identity mismatch")
 		}
-		if _, err := readHostProcessStartTime(runtime, processState.PID); err == nil {
-			return noStateMountObservation{}, ownershipError("live process exists without durable state")
-		} else if !errors.Is(err, os.ErrNotExist) {
+		alive, err := drive9SupervisorIdentityAlive(runtime, processState)
+		if err != nil {
 			return noStateMountObservation{}, ownershipError("cannot prove no-state process is dead")
+		}
+		if alive {
+			return noStateMountObservation{}, ownershipError("live process exists without durable state")
 		}
 		observation.DeadRuntimeArtifacts = true
 	} else if !errors.Is(err, os.ErrNotExist) {

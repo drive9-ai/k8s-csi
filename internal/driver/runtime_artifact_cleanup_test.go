@@ -17,6 +17,7 @@ func TestRemoveVerifiedDeadRuntimeArtifacts(t *testing.T) {
 		socketMode         os.FileMode
 		socketPresent      bool
 		livePID            bool
+		reusedPID          bool
 		wrongProcessTarget bool
 		differentDeadPID   bool
 		wantError          bool
@@ -53,6 +54,16 @@ func TestRemoveVerifiedDeadRuntimeArtifacts(t *testing.T) {
 			socketPresent:  true,
 			livePID:        true,
 			wantError:      true,
+		},
+		{
+			name:           "reused recorded PID",
+			processMode:    0o600,
+			processPresent: true,
+			socketMode:     os.ModeSocket | 0o600,
+			socketPresent:  true,
+			livePID:        true,
+			reusedPID:      true,
+			wantRemoved:    2,
 		},
 		{
 			name:           "process state symlink",
@@ -134,7 +145,11 @@ func TestRemoveVerifiedDeadRuntimeArtifacts(t *testing.T) {
 					))
 				}
 				if path == hostProcPIDPath(state.PID, "stat") && test.livePID {
-					return []byte(hostProcStatLine(state.PID, "drive9 mount", state.PIDStartTime)), nil
+					startTime := state.PIDStartTime
+					if test.reusedPID {
+						startTime = "888"
+					}
+					return []byte(hostProcStatLine(state.PID, "drive9 mount", startTime)), nil
 				}
 				return nil, os.ErrNotExist
 			}
