@@ -73,6 +73,32 @@ func TestReconcileNoStateMountCleansOnlyStableDeadArtifacts(t *testing.T) {
 	}
 }
 
+func TestReconcileNoStateMountCleansReusedPIDArtifacts(t *testing.T) {
+	fixture := newNoStateMountFixture(t)
+	fixture.service = systemdUnitFailed
+	fixture.processPresent = true
+	fixture.socketPresent = true
+	fixture.pidAlive = true
+	fixture.pidStartTime = "888"
+	fixture.installCallbacks()
+
+	observation, err := observeNoStateMount(
+		context.Background(), fixture.runtime, fixture.volumeID, fixture.stagingTarget,
+	)
+	if err != nil || !observation.NeedsCleanup() {
+		t.Fatalf("observeNoStateMount() = %#v, %v", observation, err)
+	}
+	if err := reconcileNoStateMount(
+		context.Background(), fixture.runtime, fixture.volumeID, fixture.stagingTarget, observation,
+	); err != nil {
+		t.Fatalf("reconcileNoStateMount(): %v", err)
+	}
+	if fixture.processPresent || fixture.socketPresent || fixture.service != systemdUnitNotFound {
+		t.Fatalf("reused-PID artifacts remain: process=%t socket=%t service=%s",
+			fixture.processPresent, fixture.socketPresent, fixture.service)
+	}
+}
+
 func TestReconcileNoStateMountRejectsObservationChange(t *testing.T) {
 	fixture := newNoStateMountFixture(t)
 	fixture.installCallbacks()
@@ -104,6 +130,7 @@ type noStateMountFixture struct {
 	processPresent bool
 	socketPresent  bool
 	pidAlive       bool
+	pidStartTime   string
 }
 
 func newNoStateMountFixture(t *testing.T) *noStateMountFixture {
@@ -125,6 +152,7 @@ func newNoStateMountFixture(t *testing.T) *noStateMountFixture {
 		processPath:   processPath,
 		socketPath:    socketPath,
 		service:       systemdUnitNotFound,
+		pidStartTime:  "777",
 	}
 }
 
@@ -159,7 +187,7 @@ func (f *noStateMountFixture) installCallbacks() {
 			if !f.pidAlive {
 				return nil, os.ErrNotExist
 			}
-			return []byte(hostProcStatLine(4242, "drive9 mount", "777")), nil
+			return []byte(hostProcStatLine(4242, "drive9 mount", f.pidStartTime)), nil
 		default:
 			return nil, errors.New("unexpected read")
 		}

@@ -129,6 +129,12 @@ func TestNodePreflightClassifiesEveryFailure(t *testing.T) {
 			capability: nodeCapabilityDrive9Execution,
 			reason:     "host systemd cannot execute Drive9 binary",
 		},
+		{
+			name:       "Drive9 supervisor capability",
+			failure:    "drive9-help-missing-supervisor",
+			capability: nodeCapabilityDrive9Execution,
+			reason:     "host systemd cannot execute Drive9 binary",
+		},
 	}
 
 	for _, test := range tests {
@@ -375,8 +381,14 @@ func (f *nodePreflightFixture) installCallbacks() {
 					return hostCommandResult{ExitCode: 23, Stderr: []byte("unit command exited")}, errors.New("exit status 23")
 				}
 			}
-			if containsArgument(inner, f.drive9Path) && f.failure == "drive9-exec" {
-				return hostCommandResult{ExitCode: 1, Stderr: []byte("Drive9 failed")}, errors.New("exit status 1")
+			if containsArgument(inner, f.drive9Path) {
+				if f.failure == "drive9-exec" {
+					return hostCommandResult{ExitCode: 1, Stderr: []byte("Drive9 failed")}, errors.New("exit status 1")
+				}
+				if f.failure == "drive9-help-missing-supervisor" {
+					return hostCommandResult{Stderr: []byte("  -profile string\n")}, nil
+				}
+				return hostCommandResult{Stderr: []byte("  -supervise-foreground\n")}, nil
 			}
 		case "systemctl":
 			if f.failure == "systemctl" {

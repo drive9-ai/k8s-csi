@@ -592,12 +592,12 @@ func (r startingReconciler) observeStartingProcess(state mountState) (startingPr
 	); err != nil {
 		return startingProcessObservation{State: startingProcessMismatch}, errProcessOwnership
 	}
-	_, err = readHostProcessStartTime(r.runtime, processState.PID)
-	if errors.Is(err, os.ErrNotExist) {
-		return startingProcessObservation{State: startingProcessDead}, nil
-	}
+	alive, err := drive9SupervisorIdentityAlive(r.runtime, processState)
 	if err != nil {
 		return startingProcessObservation{State: startingProcessMismatch}, err
+	}
+	if !alive {
+		return startingProcessObservation{State: startingProcessDead}, nil
 	}
 	verified, err := verifyProcessOwnership(r.runtime, processOwnershipExpectation{
 		VolumeID:      state.VolumeID,

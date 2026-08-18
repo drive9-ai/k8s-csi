@@ -382,7 +382,21 @@ func checkHostDrive9Execution(ctx context.Context, runtime hostRuntime, drive9Pa
 		return false
 	}
 	result, err := runtime.Exec(ctx, command)
-	return err == nil && result.ExitCode == 0
+	return err == nil && result.ExitCode == 0 &&
+		drive9MountHelpContainsFlag(result, "supervise-foreground")
+}
+
+func drive9MountHelpContainsFlag(result hostCommandResult, name string) bool {
+	want := "-" + name
+	for _, output := range [][]byte{result.Stdout, result.Stderr} {
+		for _, line := range strings.Split(string(output), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) > 0 && fields[0] == want {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 var systemdRunUnitPattern = regexp.MustCompile(

@@ -44,10 +44,12 @@ func removeVerifiedDeadRuntimeArtifacts(runtime hostRuntime, state mountState) e
 		); err != nil {
 			return ownershipError("runtime process-state identity does not match durable state")
 		}
-		if _, err := readHostProcessStartTime(runtime, processState.PID); err == nil {
-			return ownershipError("refusing runtime artifact cleanup while recorded PID is live")
-		} else if !errors.Is(err, os.ErrNotExist) {
+		alive, err := drive9SupervisorIdentityAlive(runtime, processState)
+		if err != nil {
 			return ownershipError("cannot prove runtime process-state PID is dead")
+		}
+		if alive {
+			return ownershipError("refusing runtime artifact cleanup while recorded PID is live")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect runtime process-state artifact: %w", err)

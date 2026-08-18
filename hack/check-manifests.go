@@ -151,6 +151,7 @@ func checkTextContracts() {
 			required: []string{
 				"FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS runtime",
 				"mount_help=\"$(/usr/local/bin/drive9 mount --supervise-foreground --direct-mount-strict --help 2>&1)\"",
+				"grep -F -- '-supervise-foreground'",
 				"grep -F -- '-profile '", "grep -F -- '-durability '",
 				"COPY hack/drive9-csi-upload-perf.sh ",
 				"/usr/local/bin/drive9-csi-upload-perf",

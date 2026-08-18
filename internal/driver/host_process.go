@@ -287,6 +287,17 @@ func validateDrive9SupervisorProcessState(
 	return nil
 }
 
+func drive9SupervisorIdentityAlive(runtime hostRuntime, state drive9ProcessState) (bool, error) {
+	startTime, err := readHostProcessStartTime(runtime, state.PID)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return startTime == strconv.FormatUint(state.CreationTime, 10), nil
+}
+
 func verifyHostPIDOwnership(
 	runtime hostRuntime,
 	expected processOwnershipExpectation,
