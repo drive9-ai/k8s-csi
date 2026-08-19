@@ -293,8 +293,8 @@ func validateMountStateArgs(args []string, remoteRoot string, stagingTarget stri
 			return fmt.Errorf("mount argv may contain a credential")
 		}
 	}
-	if args[0] != "mount" || !stringSliceContains(args, "--foreground") {
-		return fmt.Errorf("mount argv does not select foreground mount")
+	if args[0] != "mount" || !mountArgsUseInBinarySupervisor(args) {
+		return fmt.Errorf("mount argv does not select the in-binary foreground supervisor")
 	}
 	if args[len(args)-2] != ":"+remoteRoot || args[len(args)-1] != stagingTarget {
 		return fmt.Errorf("mount argv paths do not match durable identity")
@@ -323,15 +323,6 @@ func argumentMayContainCredential(arg string) bool {
 	}
 	for _, queryKey := range []string{"?token=", "&token=", "?api_key=", "&api_key=", "?api-key=", "&api-key="} {
 		if strings.Contains(lower, queryKey) {
-			return true
-		}
-	}
-	return false
-}
-
-func stringSliceContains(values []string, value string) bool {
-	for _, candidate := range values {
-		if candidate == value {
 			return true
 		}
 	}

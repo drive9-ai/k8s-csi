@@ -1,8 +1,14 @@
 package driver
 
-import "path/filepath"
+import (
+	"path/filepath"
+	"strings"
+)
 
-const directMountStrictFlag = "--direct-mount-strict"
+const (
+	directMountStrictFlag   = "--direct-mount-strict"
+	superviseForegroundFlag = "--supervise-foreground"
+)
 
 type drive9MountRequest struct {
 	VolumeID      string
@@ -23,7 +29,7 @@ func (d *Driver) drive9MountArgs(req drive9MountRequest, cacheDir string) []stri
 	ttls := mountTTLsOrDefault(req.AttrTTL, req.EntryTTL, req.DirTTL)
 	args := []string{
 		"mount",
-		"--foreground",
+		superviseForegroundFlag,
 		"--mode=fuse",
 		directMountStrictFlag,
 	}
@@ -61,6 +67,32 @@ func mountArgsUseDirectMountStrict(args []string) bool {
 		}
 	}
 	return count == 1
+}
+
+func mountArgsUseInBinarySupervisor(args []string) bool {
+	count := 0
+	for _, arg := range args {
+		if arg == superviseForegroundFlag {
+			count++
+			continue
+		}
+		if mountFlagArgument(arg, "supervise-foreground") ||
+			mountFlagArgument(arg, "foreground") ||
+			mountFlagArgument(arg, "supervised") ||
+			mountFlagArgument(arg, "no-supervise") {
+			return false
+		}
+	}
+	return count == 1
+}
+
+func mountFlagArgument(arg string, name string) bool {
+	for _, prefix := range []string{"-" + name, "--" + name} {
+		if arg == prefix || strings.HasPrefix(arg, prefix+"=") {
+			return true
+		}
+	}
+	return false
 }
 
 func appendMountTuningArgs(args []string, tuning mountTuning) []string {

@@ -15,7 +15,7 @@ description: |
 - **Binary**: `cmd/drive9-csi/main.go` → `bin/drive9-csi`
 - **Launcher**: `cmd/drive9-csi-launcher/main.go` → `bin/drive9-csi-launcher`
 - **Driver code**: `internal/driver/` is a single package with no sub-packages
-- **Entrypoint** dispatches installer, verifier, and sidecar-supervisor commands
+- **Entrypoint** dispatches installer and verifier commands
   before creating an in-cluster K8s client and calling `driver.Run()`
 - **No codegen, no protobuf**, no `//go:generate`, no mockgen, no
   controller-gen. CSI spec is consumed as Go module
@@ -44,9 +44,11 @@ Multi-stage (`Dockerfile`):
    `tar`, and `ca-certificates`; entrypoint via `tini`
 
 Both build stages validate target arch and static ELF contracts. The target
-runtime stage executes `drive9 mount --direct-mount-strict --help`; an
-incompatible CLI fails the image build. The runtime image does not contain
-`fuse3` and does not configure `/etc/fuse.conf`.
+runtime stage executes
+`drive9 mount --supervise-foreground --direct-mount-strict --help`; an
+incompatible CLI fails the image build. The minimum compatible Drive9 CLI is
+`dac2d62`. The runtime image does not contain `fuse3` and does not configure
+`/etc/fuse.conf`.
 
 ## Drive9 CLI Release Contract
 
@@ -218,10 +220,11 @@ DeleteVolume: look up PV by volumeHandle → read secretName/secretNamespace fro
 
 ### Platform
 
-**Linux only.** `mount_linux.go` and the sidecar supervisor's Linux adapter
-implement FUSE mount observation and direct kernel unmount. New mounts always
-use `--direct-mount-strict --allow-other`; Drive9 calls `mount(2)` and must not
-fall back to a FUSE helper. The Go binaries use `CGO_ENABLED=0`. Root,
+**Linux only.** `mount_linux.go` implements FUSE mount observation. New mounts
+always use `--supervise-foreground --direct-mount-strict --allow-other`;
+Drive9's in-binary supervisor owns a replaceable FUSE worker, which calls
+`mount(2)` and must not fall back to a FUSE helper. The Go binaries use
+`CGO_ENABLED=0`. Root,
 `SYS_ADMIN`, `/dev/fuse`, host `/proc`, host systemd, and writable host state and
 runtime directories remain required; `fuse3`, `fusermount3`, and
 `/etc/fuse.conf` do not. Mount processes run in host-managed transient systemd
@@ -274,8 +277,8 @@ Key deploy details:
   30-second TTLs, and `perfEnabled=false`; PVCs opt into it explicitly
 - Examples are intentionally separate from kustomization so
   `kubectl apply -k deploy/kubernetes` doesn't create placeholder credentials
-- The fallback sidecar uses a fail-closed image placeholder and the compiled
-  supervisor for bounded process stop plus normal/lazy kernel unmount
+- The fallback sidecar uses a fail-closed image placeholder and Drive9's
+  in-binary supervisor with a 30-second stop timeout
 
 ## Security Constraints
 

@@ -67,17 +67,19 @@ func observeNoStateMount(
 		if err != nil {
 			return noStateMountObservation{}, err
 		}
-		if processState.PID <= 0 ||
-			processState.Component != "drive9-fuse" ||
-			processState.MountKind != "fuse" ||
-			processState.MountPoint != stagingTarget ||
-			processState.ControlSocket != controlSocketPath {
+		if err := validateDrive9SupervisorProcessState(
+			processState,
+			stagingTarget,
+			controlSocketPath,
+		); err != nil {
 			return noStateMountObservation{}, ownershipError("no-state process artifact identity mismatch")
 		}
-		if _, err := readHostProcessStartTime(runtime, processState.PID); err == nil {
-			return noStateMountObservation{}, ownershipError("live process exists without durable state")
-		} else if !errors.Is(err, os.ErrNotExist) {
+		alive, err := drive9SupervisorIdentityAlive(runtime, processState)
+		if err != nil {
 			return noStateMountObservation{}, ownershipError("cannot prove no-state process is dead")
+		}
+		if alive {
+			return noStateMountObservation{}, ownershipError("live process exists without durable state")
 		}
 		observation.DeadRuntimeArtifacts = true
 	} else if !errors.Is(err, os.ErrNotExist) {

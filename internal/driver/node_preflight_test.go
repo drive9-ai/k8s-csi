@@ -129,6 +129,12 @@ func TestNodePreflightClassifiesEveryFailure(t *testing.T) {
 			capability: nodeCapabilityDrive9Execution,
 			reason:     "host systemd cannot execute Drive9 binary",
 		},
+		{
+			name:       "Drive9 supervisor capability",
+			failure:    "drive9-help-missing-supervisor",
+			capability: nodeCapabilityDrive9Execution,
+			reason:     "host systemd cannot execute Drive9 binary",
+		},
 	}
 
 	for _, test := range tests {
@@ -175,7 +181,7 @@ func TestNodePreflightUsesOnlyCanonicalHostCommands(t *testing.T) {
 	}
 }
 
-func TestNodePreflightIgnoresHelpersAndProbesStrictCapability(t *testing.T) {
+func TestNodePreflightIgnoresHelpersAndProbesSupervisorStrictCapability(t *testing.T) {
 	fixture := newNodePreflightFixture("")
 	capabilities := runNodePreflight(context.Background(), fixture.runtime)
 	for _, name := range allNodeCapabilityNames() {
@@ -190,7 +196,13 @@ func TestNodePreflightIgnoresHelpersAndProbesStrictCapability(t *testing.T) {
 			continue
 		}
 		inner := hostInnerCommand(call.Command)
-		want := []string{fixture.drive9Path, "mount", directMountStrictFlag, "--help"}
+		want := []string{
+			fixture.drive9Path,
+			"mount",
+			superviseForegroundFlag,
+			directMountStrictFlag,
+			"--help",
+		}
 		if len(inner) >= len(want) && reflect.DeepEqual(inner[len(inner)-len(want):], want) {
 			found = true
 		}
@@ -201,13 +213,14 @@ func TestNodePreflightIgnoresHelpersAndProbesStrictCapability(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("preflight did not execute strict capability probe through host systemd")
+		t.Fatalf("preflight did not execute supervisor/strict capability probe through host systemd")
 	}
 }
 
 func TestNodePreflightWaitDiffersFromProductionLaunch(t *testing.T) {
 	preflight, err := systemdRunHostCommand(
 		"drive9-preflight-"+strings.Repeat("a", 32),
+		true,
 		true,
 		"/bin/true",
 	)
@@ -216,6 +229,7 @@ func TestNodePreflightWaitDiffersFromProductionLaunch(t *testing.T) {
 	}
 	production, err := systemdRunHostCommand(
 		"drive9-mount-0123456789abcdef.service",
+		false,
 		false,
 		"/var/lib/drive9-csi/bin/drive9-csi-launcher",
 		"/run/drive9-csi/attempt.env",
@@ -227,8 +241,22 @@ func TestNodePreflightWaitDiffersFromProductionLaunch(t *testing.T) {
 	if !containsArgument(preflight.Args, "--wait") {
 		t.Fatal("preflight systemd-run command is missing --wait")
 	}
+	if !containsArgument(preflight.Args, "--pipe") {
+		t.Fatal("preflight systemd-run command is missing --pipe")
+	}
 	if containsArgument(production.Args, "--wait") {
 		t.Fatal("production systemd-run command contains --wait")
+	}
+	if containsArgument(production.Args, "--pipe") {
+		t.Fatal("production systemd-run command contains --pipe")
+	}
+	if _, err := systemdRunHostCommand(
+		"drive9-preflight-"+strings.Repeat("b", 32),
+		false,
+		true,
+		"/bin/true",
+	); err == nil {
+		t.Fatal("systemd-run accepted output capture without wait")
 	}
 	for _, command := range []hostCommand{preflight, production} {
 		if !containsArgument(command.Args, "--service-type=exec") || !containsArgument(command.Args, "--collect") {
@@ -345,13 +373,30 @@ func (f *nodePreflightFixture) installCallbacks() {
 	}
 	f.runtime.execFn = func(_ context.Context, command hostCommand) (hostCommandResult, error) {
 		inner := hostInnerCommand(command)
+		throughSystemd := containsArgument(command.Args, "systemd-run")
 		if len(inner) == 0 {
 			return hostCommandResult{ExitCode: 1}, errors.New("missing host command")
 		}
 		switch inner[0] {
 		case "/bin/true":
-			if f.failure == "namespace" {
+			if !throughSystemd && f.failure == "namespace" {
 				return hostCommandResult{ExitCode: 1, Stderr: []byte("namespace denied\n")}, errors.New("exit status 1")
+			}
+			if throughSystemd {
+				switch f.failure {
+				case "systemd-client":
+					return hostCommandResult{ExitCode: 127, Stderr: []byte("systemd-run: not found")}, errors.New("exit status 127")
+				case "systemd-dbus":
+					return hostCommandResult{ExitCode: 1, Stderr: []byte("Failed to connect to bus: Connection refused")}, errors.New("exit status 1")
+				case "systemd-rejected":
+					return hostCommandResult{ExitCode: 1, Stderr: []byte("Failed to start transient service unit: rejected")}, errors.New("exit status 1")
+				case "systemd-command":
+					return hostCommandResult{ExitCode: 23, Stderr: []byte("unit command exited")}, errors.New("exit status 23")
+				}
+			}
+		case "/bin/kill":
+			if throughSystemd && f.failure == "pid-signal" {
+				return hostCommandResult{ExitCode: 1, Stderr: []byte("host signal denied")}, errors.New("exit status 1")
 			}
 		case "systemd-run":
 			if containsArgument(inner, "/bin/kill") && f.failure == "pid-signal" {
@@ -369,9 +414,14 @@ func (f *nodePreflightFixture) installCallbacks() {
 					return hostCommandResult{ExitCode: 23, Stderr: []byte("unit command exited")}, errors.New("exit status 23")
 				}
 			}
-			if containsArgument(inner, f.drive9Path) && f.failure == "drive9-exec" {
+		case f.drive9Path:
+			if f.failure == "drive9-exec" {
 				return hostCommandResult{ExitCode: 1, Stderr: []byte("Drive9 failed")}, errors.New("exit status 1")
 			}
+			if f.failure == "drive9-help-missing-supervisor" {
+				return hostCommandResult{Stderr: []byte("  -profile string\n")}, nil
+			}
+			return hostCommandResult{Stderr: []byte("  -supervise-foreground\n")}, nil
 		case "systemctl":
 			if f.failure == "systemctl" {
 				return hostCommandResult{ExitCode: 1, Stderr: []byte("systemctl failed")}, errors.New("exit status 1")
