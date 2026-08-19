@@ -69,10 +69,13 @@ write_file_value() {
 	local file_name="$2"
 	local value="$3"
 	local description="$4"
+	local path="/workspace/$file_name"
 
 	kube_retry -n "$test_namespace" exec "$pod_name" -- sh -c '
 		printf "%s\n" "$2" > "$1"
-	' sh "/workspace/$file_name" "$value" || e2e_fail "$description"
+	' sh "$path" "$value" || e2e_fail "$description"
+	e2e_info \
+		"$description: writer=$pod_name path=$path value=$value"
 }
 
 wait_for_file_value() {
@@ -83,13 +86,17 @@ wait_for_file_value() {
 	local direction="$5"
 	local attempt
 	local elapsed_seconds
+	local observed
+	local path="/workspace/$file_name"
 	local started_at="$SECONDS"
 
 	for attempt in {1..60}; do
-		if kube -n "$test_namespace" exec "$pod_name" -- sh -c '
-			test "$(cat "$1")" = "$2"
-		' sh "/workspace/$file_name" "$value" >/dev/null 2>&1; then
+		observed="$(kube -n "$test_namespace" exec "$pod_name" -- \
+			cat "$path" 2>/dev/null)"
+		if [[ "$observed" == "$value" ]]; then
 			elapsed_seconds=$((SECONDS - started_at))
+			e2e_info "$direction shared-file evidence:" \
+				"reader=$pod_name" "path=$path" "value=$observed"
 			e2e_info "$direction cross-node visibility latency: ${elapsed_seconds}s"
 			return 0
 		fi
@@ -97,6 +104,21 @@ wait_for_file_value() {
 	done
 
 	e2e_fail "$description"
+}
+
+verify_file_value() {
+	local pod_name="$1"
+	local file_name="$2"
+	local value="$3"
+	local description="$4"
+	local observed
+	local path="/workspace/$file_name"
+
+	observed="$(kube_retry -n "$test_namespace" exec "$pod_name" -- \
+		cat "$path")" || e2e_fail "$description"
+	[[ "$observed" == "$value" ]] || e2e_fail "$description"
+	e2e_info \
+		"$description: reader=$pod_name path=$path value=$observed"
 }
 
 configure_rwx_case() {
@@ -225,21 +247,18 @@ run_rwx_case() {
 	e2e_delete_owned_namespaced_resource "pod/$pod_a_name" \
 		"$test_namespace" pod "$pod_a_name" "$case_run_id" ||
 		e2e_fail "delete $case_key Pod A"
-	kube_retry -n "$test_namespace" exec "$pod_b_name" -- sh -c '
-		test "$(cat "$1")" = "$2"
-	' sh "/workspace/$file_a" "$value_a" ||
-		e2e_fail "$case_key read after Pod A deletion"
+	verify_file_value "$pod_b_name" "$file_a" "$value_a" \
+		"$case_key read after Pod A deletion"
 	write_file_value "$pod_b_name" "$file_survival" "$value_survival" \
 		"$case_key write after Pod A deletion"
-	kube_retry -n "$test_namespace" exec "$pod_b_name" -- sh -c '
-		test "$(cat "$1")" = "$2"
-	' sh "/workspace/$file_survival" "$value_survival" ||
-		e2e_fail "$case_key read surviving Pod B write"
+	verify_file_value "$pod_b_name" "$file_survival" "$value_survival" \
+		"$case_key read surviving Pod B write"
 	kube_retry -n "$test_namespace" exec "$pod_b_name" -- sh -c '
 		rm -f "$1" "$2" "$3"
 	' sh "/workspace/$file_a" "/workspace/$file_b" \
 		"/workspace/$file_survival" ||
 		e2e_fail "remove $case_key RWX test files"
+	e2e_info "$case_key removed shared-file test data"
 
 	e2e_delete_owned_namespaced_resource "pod/$pod_b_name" \
 		"$test_namespace" pod "$pod_b_name" "$case_run_id" ||
@@ -251,6 +270,7 @@ run_rwx_case() {
 	e2e_info "passed RWX subcase: $case_key"
 	if [[ "${DRIVE9_CSI_E2E_KEEP:-}" != "1" ]]; then
 		cleanup_case_resources || e2e_fail "clean up RWX subcase: $case_key"
+		e2e_info "cleaned RWX subcase resources: $case_key"
 	fi
 }
 
