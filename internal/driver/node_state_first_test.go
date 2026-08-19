@@ -272,13 +272,12 @@ func TestNodeStageStateFirstRejectsRecordedAndProcessStatePIDSplitBeforeAPIs(t *
 	fixture.runtime.readFileFn = func(path string) ([]byte, error) {
 		switch path {
 		case fixture.active.ProcessStatePath:
-			return json.Marshal(drive9ProcessState{
-				PID:           processStatePID,
-				Component:     "drive9-fuse",
-				MountKind:     "fuse",
-				MountPoint:    fixture.active.StagingTarget,
-				ControlSocket: fixture.active.ControlSocketPath,
-			})
+			return json.Marshal(supervisorProcessStateFixture(
+				processStatePID,
+				"888",
+				fixture.active.StagingTarget,
+				fixture.active.ControlSocketPath,
+			))
 		case hostProcPIDPath(processStatePID, "stat"):
 			return []byte(hostProcStatLine(processStatePID, "drive9 mount", "888")), nil
 		case hostProcPIDPath(processStatePID, "cmdline"):
@@ -313,13 +312,12 @@ func TestNodeStageStateFirstRejectsProcessStateAndMainPIDSplitBeforeAPIs(t *test
 	fixture.runtime.readFileFn = func(path string) ([]byte, error) {
 		switch path {
 		case fixture.active.ProcessStatePath:
-			return json.Marshal(drive9ProcessState{
-				PID:           processStatePID,
-				Component:     "drive9-fuse",
-				MountKind:     "fuse",
-				MountPoint:    fixture.active.StagingTarget,
-				ControlSocket: fixture.active.ControlSocketPath,
-			})
+			return json.Marshal(supervisorProcessStateFixture(
+				processStatePID,
+				"888",
+				fixture.active.StagingTarget,
+				fixture.active.ControlSocketPath,
+			))
 		case hostProcPIDPath(fixture.active.PID, "stat"):
 			return nil, os.ErrNotExist
 		case hostProcPIDPath(processStatePID, "stat"):
@@ -377,7 +375,7 @@ func TestNodeStageCleansAbandonedStartingStateBeforeFreshRemoteValidation(t *tes
 	state.EnvPath = names.EnvPath
 	state.ArgsPath = names.ArgsPath
 	state.MountArgs = []string{
-		"mount", "--foreground", "--server", server,
+		"mount", "--supervise-foreground", "--server", server,
 		":" + state.RemoteRoot, state.StagingTarget,
 	}
 	store := newMountStateStore(stateDir, newHostRuntime())
@@ -891,13 +889,12 @@ func (f *nodeStateFirstFixture) installRuntime() {
 	f.runtime.readFileFn = func(path string) ([]byte, error) {
 		switch path {
 		case f.active.ProcessStatePath:
-			return json.Marshal(map[string]any{
-				"pid":            f.active.PID,
-				"component":      "drive9-fuse",
-				"mount_kind":     "fuse",
-				"mount_point":    f.active.StagingTarget,
-				"control_socket": f.active.ControlSocketPath,
-			})
+			return json.Marshal(supervisorProcessStateFixture(
+				f.active.PID,
+				f.active.PIDStartTime,
+				f.active.StagingTarget,
+				f.active.ControlSocketPath,
+			))
 		case hostProcPIDPath(f.active.PID, "stat"):
 			return []byte(hostProcStatLine(f.active.PID, "drive9 mount", f.active.PIDStartTime)), nil
 		case hostProcPIDPath(f.active.PID, "cmdline"):

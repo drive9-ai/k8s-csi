@@ -24,8 +24,6 @@ func run(args []string, stdout io.Writer) error {
 		switch args[0] {
 		case "install-host-binaries":
 			return runInstallHostBinariesCommand(args[1:], stdout)
-		case "supervise-sidecar-mount":
-			return runSuperviseSidecarMountCommand(args[1:])
 		case "verify-host-binary":
 			return runVerifyHostBinaryCommand(args[1:], stdout)
 		}

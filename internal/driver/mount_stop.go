@@ -394,6 +394,7 @@ func hostPIDSignalCommand(runtime hostRuntime, signal string, pid int) (hostComm
 	return systemdRunHostCommand(
 		"drive9-signal-"+attemptID,
 		true,
+		false,
 		"/bin/kill",
 		"-"+signal,
 		"--",

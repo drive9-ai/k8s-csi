@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -55,7 +56,7 @@ func TestDrive9MountRequestFromAttributesPassesThroughMountParameters(t *testing
 
 			args := d.drive9MountArgs(request, "/var/lib/drive9-csi/cache/test")
 			if test.wantProfile == "" {
-				if stringSliceContains(args, "--profile") || stringSliceContains(args, "--durability") {
+				if slices.Contains(args, "--profile") || slices.Contains(args, "--durability") {
 					t.Fatalf("absent mount parameters emitted argv: %q", args)
 				}
 				return
@@ -108,7 +109,7 @@ func TestNodeRecoveryCleansAbandonedStageWithoutRemoteAPI(t *testing.T) {
 	state.EnvPath = names.EnvPath
 	state.ArgsPath = names.ArgsPath
 	state.MountArgs = []string{
-		"mount", "--foreground", "--server", server,
+		"mount", "--supervise-foreground", "--server", server,
 		":" + state.RemoteRoot, state.StagingTarget,
 	}
 	store := newMountStateStore(stateDir, newHostRuntime())
@@ -660,7 +661,7 @@ func TestBootRecoveryRelaunchPublishesConfiguredMountParameters(t *testing.T) {
 				t.Fatalf("published recovery argv = %q, want %q", got, wantArgsBody)
 			}
 			if test.durability == "" {
-				if stringSliceContains(recovered.MountArgs, "--durability") {
+				if slices.Contains(recovered.MountArgs, "--durability") {
 					t.Fatalf("absent RWO durability emitted argv: %q", recovered.MountArgs)
 				}
 			} else {

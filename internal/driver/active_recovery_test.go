@@ -531,13 +531,12 @@ func TestDriverActiveRecoveryCleanupTracksVerifiedSystemdMainPID(t *testing.T) {
 		case hostProcPIDPath(mainPID, "cgroup"):
 			return []byte("0::/system.slice/" + active.SystemdUnit + "\n"), nil
 		case active.ProcessStatePath:
-			return json.Marshal(drive9ProcessState{
-				PID:           mainPID,
-				Component:     "drive9-fuse",
-				MountKind:     "fuse",
-				MountPoint:    active.StagingTarget,
-				ControlSocket: active.ControlSocketPath,
-			})
+			return json.Marshal(supervisorProcessStateFixture(
+				mainPID,
+				"888",
+				active.StagingTarget,
+				active.ControlSocketPath,
+			))
 		default:
 			return nil, os.ErrNotExist
 		}
@@ -658,13 +657,12 @@ func TestDriverActiveRecoveryCleanupRevalidatesPIDInventoryBeforeStop(t *testing
 	fixture.runtime.readFileFn = func(path string) ([]byte, error) {
 		switch path {
 		case fixture.active.ProcessStatePath:
-			return json.Marshal(drive9ProcessState{
-				PID:           processStatePID,
-				Component:     "drive9-fuse",
-				MountKind:     "fuse",
-				MountPoint:    fixture.active.StagingTarget,
-				ControlSocket: fixture.active.ControlSocketPath,
-			})
+			return json.Marshal(supervisorProcessStateFixture(
+				processStatePID,
+				"888",
+				fixture.active.StagingTarget,
+				fixture.active.ControlSocketPath,
+			))
 		case hostProcPIDPath(processStatePID, "stat"):
 			return []byte(hostProcStatLine(processStatePID, "drive9 mount", "888")), nil
 		case hostProcPIDPath(processStatePID, "cmdline"):

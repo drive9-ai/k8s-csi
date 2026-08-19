@@ -238,7 +238,7 @@ func checkTransientSystemd(ctx context.Context, runtime hostRuntime) string {
 	if err != nil || !attemptIDPattern.MatchString(attemptID) {
 		return "host systemd rejected transient unit"
 	}
-	command, err := systemdRunHostCommand("drive9-preflight-"+attemptID, true, "/bin/true")
+	command, err := systemdRunHostCommand("drive9-preflight-"+attemptID, true, false, "/bin/true")
 	if err != nil {
 		return "host systemd rejected transient unit"
 	}
@@ -372,8 +372,10 @@ func checkHostDrive9Execution(ctx context.Context, runtime hostRuntime, drive9Pa
 	command, err := systemdRunHostCommand(
 		"drive9-preflight-"+attemptID,
 		true,
+		true,
 		drive9Path,
 		"mount",
+		superviseForegroundFlag,
 		directMountStrictFlag,
 		"--help",
 	)
@@ -381,23 +383,49 @@ func checkHostDrive9Execution(ctx context.Context, runtime hostRuntime, drive9Pa
 		return false
 	}
 	result, err := runtime.Exec(ctx, command)
-	return err == nil && result.ExitCode == 0
+	return err == nil && result.ExitCode == 0 &&
+		drive9MountHelpContainsFlag(result, "supervise-foreground")
+}
+
+func drive9MountHelpContainsFlag(result hostCommandResult, name string) bool {
+	want := "-" + name
+	for _, output := range [][]byte{result.Stdout, result.Stderr} {
+		for _, line := range strings.Split(string(output), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) > 0 && fields[0] == want {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 var systemdRunUnitPattern = regexp.MustCompile(
 	"^(?:drive9-preflight-[0-9a-f]{32}|drive9-signal-[0-9a-f]{32}|drive9-mount-[0-9a-f]{16}\\.service)$",
 )
 
-func systemdRunHostCommand(unit string, wait bool, executable string, args ...string) (hostCommand, error) {
+func systemdRunHostCommand(
+	unit string,
+	wait bool,
+	captureOutput bool,
+	executable string,
+	args ...string,
+) (hostCommand, error) {
 	if !systemdRunUnitPattern.MatchString(unit) {
 		return hostCommand{}, fmt.Errorf("invalid Drive9 systemd-run unit")
 	}
 	if !filepath.IsAbs(executable) || filepath.Clean(executable) != executable {
 		return hostCommand{}, fmt.Errorf("invalid systemd-run executable")
 	}
+	if captureOutput && !wait {
+		return hostCommand{}, fmt.Errorf("systemd-run output capture requires wait")
+	}
 	systemdArgs := []string{"--service-type=exec"}
 	if wait {
 		systemdArgs = append(systemdArgs, "--wait")
+	}
+	if captureOutput {
+		systemdArgs = append(systemdArgs, "--pipe")
 	}
 	systemdArgs = append(systemdArgs, "--collect", "--unit="+unit, "--", executable)
 	systemdArgs = append(systemdArgs, args...)

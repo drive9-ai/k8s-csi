@@ -25,6 +25,67 @@ func TestMountStateValidPhases(t *testing.T) {
 	}
 }
 
+func TestMountStateRequiresInBinarySupervisor(t *testing.T) {
+	const superviseFlag = "--supervise-foreground"
+	tests := []struct {
+		name   string
+		mutate func([]string) []string
+	}{
+		{
+			name: "worker-only foreground",
+			mutate: func(args []string) []string {
+				return replaceMountArg(args, superviseFlag, "--foreground")
+			},
+		},
+		{
+			name: "single-dash worker foreground",
+			mutate: func(args []string) []string {
+				return append(args, "-foreground")
+			},
+		},
+		{
+			name: "duplicate supervisor flag",
+			mutate: func(args []string) []string {
+				return append(args, superviseFlag)
+			},
+		},
+		{
+			name: "disabled supervisor flag",
+			mutate: func(args []string) []string {
+				return replaceMountArg(args, superviseFlag, superviseFlag+"=false")
+			},
+		},
+		{
+			name: "internal worker flag",
+			mutate: func(args []string) []string {
+				return append(args, "--supervised")
+			},
+		},
+		{
+			name: "single-dash internal worker flag",
+			mutate: func(args []string) []string {
+				return append(args, "-supervised=true")
+			},
+		},
+		{
+			name: "supervision disabled",
+			mutate: func(args []string) []string {
+				return append(args, "--no-supervise")
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := validStartingState(t)
+			state.MountArgs = test.mutate(append([]string(nil), state.MountArgs...))
+			if err := validateMountState(state); err == nil {
+				t.Fatal("validateMountState() accepted non-supervisor mount argv")
+			}
+		})
+	}
+}
+
 func TestMountStateAcceptsLegacyNonStrictArgv(t *testing.T) {
 	state := validStartingState(t)
 	state.MountArgs = withoutMountArg(state.MountArgs, directMountStrictFlag)
@@ -389,7 +450,7 @@ func validStartingState(t *testing.T) mountState {
 		BinaryPath:    "/var/lib/drive9-csi/bin/drive9-" + strings.Repeat("a", 64),
 		MountArgs: []string{
 			"mount",
-			"--foreground",
+			"--supervise-foreground",
 			"--mode=fuse",
 			directMountStrictFlag,
 			"--server",
@@ -412,6 +473,16 @@ func withoutMountArg(args []string, remove string) []string {
 		}
 	}
 	return result
+}
+
+func replaceMountArg(args []string, old string, replacement string) []string {
+	for i := range args {
+		if args[i] == old {
+			args[i] = replacement
+			return args
+		}
+	}
+	return args
 }
 
 func validActiveState(t *testing.T) mountState {
