@@ -87,7 +87,8 @@ func validateMountPolicyPattern(flagPrefix string, pattern string) error {
 			return fmt.Errorf("pattern contains %q segment", segment)
 		}
 	}
-	if argumentMayContainCredential(flagPrefix + pattern) {
+	if argumentMayContainCredential(pattern) ||
+		argumentMayContainCredential(flagPrefix+pattern) {
 		return fmt.Errorf("pattern may contain a credential")
 	}
 	return nil
