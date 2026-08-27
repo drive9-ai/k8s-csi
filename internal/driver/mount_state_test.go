@@ -25,6 +25,33 @@ func TestMountStateValidPhases(t *testing.T) {
 	}
 }
 
+func TestMountStateWriteRejectsUnreadableSize(t *testing.T) {
+	stateDir := t.TempDir()
+	store := newMountStateStore(stateDir, newHostRuntime())
+	state := validStartingState(t)
+	policyArgs := make([]string, 100_000)
+	for index := range policyArgs {
+		policyArgs[index] = "--remote-only=a"
+	}
+	state.MountArgs = append(state.MountArgs[:len(state.MountArgs)-2], policyArgs...)
+	state.MountArgs = append(state.MountArgs, ":"+state.RemoteRoot, state.StagingTarget)
+
+	err := store.Write(state)
+	if err == nil {
+		t.Fatal("Write() accepted state larger than the read limit")
+	}
+	if !strings.Contains(err.Error(), "mount state file size is invalid") {
+		t.Fatalf("Write() error = %q, want size rejection", err)
+	}
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		t.Fatalf("ReadDir(): %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("Write() left artifacts after rejecting oversized state: %v", entries)
+	}
+}
+
 func TestMountStateRequiresInBinarySupervisor(t *testing.T) {
 	const superviseFlag = "--supervise-foreground"
 	tests := []struct {

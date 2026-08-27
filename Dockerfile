@@ -65,6 +65,12 @@ COPY hack/drive9-csi-upload-perf.sh /usr/local/bin/drive9-csi-upload-perf
 RUN chmod +x /usr/local/bin/drive9-csi-upload-perf \
  && mount_help="$(/usr/local/bin/drive9 mount --supervise-foreground --direct-mount-strict --help 2>&1)" \
  && printf '%s\n' "${mount_help}" | grep -F -- '-supervise-foreground' >/dev/null \
+ && printf '%s\n' "${mount_help}" | grep -F -- '-gvisor-compat' >/dev/null \
+ && printf '%s\n' "${mount_help}" | grep -F -- '-local-only ' >/dev/null \
+ && printf '%s\n' "${mount_help}" | grep -F -- '-remote-only ' >/dev/null \
+ && printf '%s\n' "${mount_help}" | grep -F -- 'DRIVE9_MOUNT_GVISOR_COMPAT' >/dev/null \
+ && printf '%s\n' "${mount_help}" | grep -F -- 'DRIVE9_MOUNT_LOCAL_ONLY_PATTERNS' >/dev/null \
+ && printf '%s\n' "${mount_help}" | grep -F -- 'DRIVE9_MOUNT_REMOTE_ONLY_PATTERNS' >/dev/null \
  && printf '%s\n' "${mount_help}" | grep -F -- '-profile ' >/dev/null \
  && printf '%s\n' "${mount_help}" | grep -F -- '-durability ' >/dev/null
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/drive9-csi"]

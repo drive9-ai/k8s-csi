@@ -544,6 +544,9 @@ func (s mountStateStore) Write(state mountState) error {
 		return err
 	}
 	body = append(body, '\n')
+	if len(body) > maxMountStateLength {
+		return fmt.Errorf("mount state file size is invalid")
+	}
 	return writeAtomicStateFile(s.runtime, s.stateDir, path, "mount state", body)
 }
 

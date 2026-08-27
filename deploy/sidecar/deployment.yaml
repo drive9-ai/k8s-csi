@@ -150,6 +150,12 @@ spec:
               value: /
             - name: DRIVE9_PROFILE
               value: coding-agent
+            - name: DRIVE9_MOUNT_GVISOR_COMPAT
+              value: "false"
+            - name: DRIVE9_MOUNT_LOCAL_ONLY_PATTERNS
+              value: ""
+            - name: DRIVE9_MOUNT_REMOTE_ONLY_PATTERNS
+              value: ""
             - name: DRIVE9_ATTR_TTL
               value: 30s
             - name: DRIVE9_ENTRY_TTL

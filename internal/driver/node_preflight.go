@@ -204,8 +204,8 @@ func runNodePreflight(ctx context.Context, runtime hostRuntime) nodeCapabilities
 		capabilities = capabilities.withUnavailable(nodeCapabilityDrive9Execution, drive9ExecutionUnavailable)
 		return capabilities
 	}
-	if !checkHostDrive9Execution(ctx, runtime, drive9Path) {
-		capabilities = capabilities.withUnavailable(nodeCapabilityDrive9Execution, drive9ExecutionUnavailable)
+	if reason := checkHostDrive9Execution(ctx, runtime, drive9Path); reason != "" {
+		capabilities = capabilities.withUnavailable(nodeCapabilityDrive9Execution, reason)
 	}
 
 	return capabilities
@@ -364,10 +364,10 @@ func validateDesiredDrive9Content(runtime hostRuntime) (string, error) {
 	return targetPath, nil
 }
 
-func checkHostDrive9Execution(ctx context.Context, runtime hostRuntime, drive9Path string) bool {
+func checkHostDrive9Execution(ctx context.Context, runtime hostRuntime, drive9Path string) string {
 	attemptID, err := runtime.NewAttemptID()
 	if err != nil || !attemptIDPattern.MatchString(attemptID) {
-		return false
+		return drive9ExecutionUnavailable
 	}
 	command, err := systemdRunHostCommand(
 		"drive9-preflight-"+attemptID,
@@ -380,11 +380,23 @@ func checkHostDrive9Execution(ctx context.Context, runtime hostRuntime, drive9Pa
 		"--help",
 	)
 	if err != nil {
-		return false
+		return drive9ExecutionUnavailable
 	}
 	result, err := runtime.Exec(ctx, command)
-	return err == nil && result.ExitCode == 0 &&
-		drive9MountHelpContainsFlag(result, "supervise-foreground")
+	if err != nil || result.ExitCode != 0 {
+		return drive9ExecutionUnavailable
+	}
+	for _, name := range []string{
+		"supervise-foreground",
+		"gvisor-compat",
+		"local-only",
+		"remote-only",
+	} {
+		if !drive9MountHelpContainsFlag(result, name) {
+			return fmt.Sprintf("host Drive9 mount help missing required flag %q", "--"+name)
+		}
+	}
+	return ""
 }
 
 func drive9MountHelpContainsFlag(result hostCommandResult, name string) bool {

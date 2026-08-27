@@ -797,6 +797,8 @@ func TestCreateVolumeStoresConfiguredMountTTLs(t *testing.T) {
 		EntryTTL: "1m0s",
 		DirTTL:   "2m30s",
 	})
+	assertVolumeContextMountGVisor(t, createResp.GetVolume().GetVolumeContext(), false)
+	assertVolumeContextMountPathPolicy(t, createResp.GetVolume().GetVolumeContext(), mountPathPolicy{})
 }
 
 func TestCreateVolumeStoresConfiguredMountPerf(t *testing.T) {
@@ -980,6 +982,9 @@ func TestCreateVolumeStoresMutableMountParameters(t *testing.T) {
 			paramEntryTTL:                    "1m",
 			paramDirTTL:                      "2m30s",
 			paramPerfEnabled:                 "true",
+			paramGVisorCompat:                "true",
+			paramLocalOnlyPatterns:           " **/.cache/** \n**/tmp/**\n**/.cache/** ",
+			paramRemoteOnlyPatterns:          " **/tmp/**\n**/.tmp/** ",
 			paramReaddirPrefetch:             "true",
 			paramReaddirPrefetchMaxFiles:     "64",
 			paramReaddirPrefetchMaxFileBytes: "50000",
@@ -1004,6 +1009,11 @@ func TestCreateVolumeStoresMutableMountParameters(t *testing.T) {
 		DirTTL:   "2m30s",
 	})
 	assertVolumeContextMountPerf(t, ctx, true)
+	assertVolumeContextMountGVisor(t, ctx, true)
+	assertVolumeContextMountPathPolicy(t, ctx, mountPathPolicy{
+		LocalOnlyPatterns:  []string{"**/.cache/**", "**/tmp/**"},
+		RemoteOnlyPatterns: []string{"**/tmp/**", "**/.tmp/**"},
+	})
 	assertVolumeContextMountTuning(t, ctx, mountTuning{
 		ReaddirPrefetchGiven:        true,
 		ReaddirPrefetch:             true,
@@ -1012,6 +1022,58 @@ func TestCreateVolumeStoresMutableMountParameters(t *testing.T) {
 		ReaddirPrefetchMaxBytes:     "4194304",
 		WritebackBatchWindow:        "20ms",
 	})
+}
+
+func TestCreateVolumeRejectsInvalidProfilePathPolicyBeforePVCResolution(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		profile string
+		policy  string
+	}{
+		{name: "none local-only", profile: "none", policy: paramLocalOnlyPatterns},
+		{name: "interactive remote-only", profile: "interactive", policy: paramRemoteOnlyPatterns},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			k8s := k8sfake.NewSimpleClientset()
+			d := &Driver{
+				cfg: Config{DriverName: "csi.drive9.ai"},
+				k8s: k8s,
+			}
+			_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+				Name: "pvc-invalid-policy-profile",
+				Parameters: pvcParams("pvc-invalid-policy-profile", "default", map[string]string{
+					paramProfile: test.profile,
+					test.policy:  "**/tmp/**",
+				}),
+				VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+			})
+			if status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("CreateVolume status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+			}
+			if len(k8s.Actions()) != 0 {
+				t.Fatalf("CreateVolume accessed Kubernetes before rejecting policy: %v", k8s.Actions())
+			}
+		})
+	}
+}
+
+func TestCreateVolumeRejectsOversizedPathPolicyBeforePVCResolution(t *testing.T) {
+	k8s := k8sfake.NewSimpleClientset()
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+	_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "pvc-oversized-policy",
+		Parameters: pvcParams("pvc-oversized-policy", "default", map[string]string{
+			paramProfile:            "coding-agent",
+			paramRemoteOnlyPatterns: strings.Repeat("a", 1<<20),
+		}),
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("CreateVolume status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+	}
+	if len(k8s.Actions()) != 0 {
+		t.Fatalf("CreateVolume accessed Kubernetes before rejecting policy: %v", k8s.Actions())
+	}
 }
 
 func TestCreateVolumeMutableParametersOverrideStorageClassParameters(t *testing.T) {
@@ -1027,14 +1089,20 @@ func TestCreateVolumeMutableParametersOverrideStorageClassParameters(t *testing.
 	createResp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 		Name: "pvc-vac-override",
 		Parameters: pvcParams("pvc-vac-override", "default", map[string]string{
-			paramProfile:     "legacy-profile",
-			paramAttrTTL:     "30s",
-			paramPerfEnabled: "false",
+			paramProfile:            "legacy-profile",
+			paramAttrTTL:            "30s",
+			paramPerfEnabled:        "false",
+			paramGVisorCompat:       "false",
+			paramLocalOnlyPatterns:  "legacy-local",
+			paramRemoteOnlyPatterns: "legacy-remote",
 		}),
 		MutableParameters: map[string]string{
-			paramProfile:     "coding-agent",
-			paramAttrTTL:     "5s",
-			paramPerfEnabled: "true",
+			paramProfile:            "coding-agent",
+			paramAttrTTL:            "5s",
+			paramPerfEnabled:        "true",
+			paramGVisorCompat:       "true",
+			paramLocalOnlyPatterns:  "vac-local",
+			paramRemoteOnlyPatterns: "",
 		},
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
@@ -1051,6 +1119,10 @@ func TestCreateVolumeMutableParametersOverrideStorageClassParameters(t *testing.
 		DirTTL:   "30s",
 	})
 	assertVolumeContextMountPerf(t, ctx, true)
+	assertVolumeContextMountGVisor(t, ctx, true)
+	assertVolumeContextMountPathPolicy(t, ctx, mountPathPolicy{
+		LocalOnlyPatterns: []string{"vac-local"},
+	})
 }
 
 func TestCreateVolumeRejectsUnsupportedMutableParameters(t *testing.T) {
@@ -1093,7 +1165,10 @@ func TestCreateVolumeUsesStorageClassRemoteRootPrefixWithMutableMountParameters(
 			"remoteRootPrefix": "/k8s/pvc",
 		}),
 		MutableParameters: map[string]string{
-			paramProfile: "coding-agent",
+			paramProfile:            "coding-agent",
+			paramGVisorCompat:       "true",
+			paramLocalOnlyPatterns:  "**/.cache/**",
+			paramRemoteOnlyPatterns: "**/tmp/**",
 		},
 		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
 	})
@@ -1104,6 +1179,11 @@ func TestCreateVolumeUsesStorageClassRemoteRootPrefixWithMutableMountParameters(
 	if got := ctx[paramProfile]; got != "coding-agent" {
 		t.Fatalf("volume context %s = %q, want coding-agent", paramProfile, got)
 	}
+	assertVolumeContextMountGVisor(t, ctx, true)
+	assertVolumeContextMountPathPolicy(t, ctx, mountPathPolicy{
+		LocalOnlyPatterns:  []string{"**/.cache/**"},
+		RemoteOnlyPatterns: []string{"**/tmp/**"},
+	})
 	if got := ctx["remoteRoot"]; !strings.HasPrefix(got, "/k8s/pvc/pvc-vac-managed-") {
 		t.Fatalf("remoteRoot = %q, want generated managed path under /k8s/pvc", got)
 	}
@@ -1158,6 +1238,56 @@ func TestCreateVolumeRejectsInvalidMountPerf(t *testing.T) {
 		if status.Code(err) != codes.InvalidArgument {
 			t.Fatalf("CreateVolume(%q) status = %s, want InvalidArgument (err=%v)", value, status.Code(err), err)
 		}
+	}
+}
+
+func TestCreateVolumeRejectsInvalidGVisorAndPathPolicyBeforeCredentials(t *testing.T) {
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}}
+	tests := []struct {
+		name    string
+		params  map[string]string
+		mutable map[string]string
+	}{
+		{
+			name: "legacy gvisor",
+			params: pvcParams("missing", "default", map[string]string{
+				paramGVisorCompat: "TRUE",
+			}),
+		},
+		{
+			name:   "mutable gvisor",
+			params: pvcParams("missing", "default", nil),
+			mutable: map[string]string{
+				paramGVisorCompat: "",
+			},
+		},
+		{
+			name: "legacy policy",
+			params: pvcParams("missing", "default", map[string]string{
+				paramRemoteOnlyPatterns: "**/../bad/**",
+			}),
+		},
+		{
+			name:   "mutable policy",
+			params: pvcParams("missing", "default", nil),
+			mutable: map[string]string{
+				paramLocalOnlyPatterns: `**\bad\**`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+				Name:               "invalid-mount-options",
+				Parameters:         tt.params,
+				MutableParameters:  tt.mutable,
+				VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+			})
+			if status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("CreateVolume status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+			}
+		})
 	}
 }
 
@@ -1929,6 +2059,36 @@ func assertVolumeContextMountPerf(t *testing.T, ctx map[string]string, want bool
 	}
 }
 
+func assertVolumeContextMountGVisor(t *testing.T, ctx map[string]string, want bool) {
+	t.Helper()
+	wantValue := "false"
+	if want {
+		wantValue = "true"
+	}
+	if got := ctx[paramGVisorCompat]; got != wantValue {
+		t.Fatalf("volume context %s = %q, want %q", paramGVisorCompat, got, wantValue)
+	}
+}
+
+func assertVolumeContextMountPathPolicy(t *testing.T, ctx map[string]string, want mountPathPolicy) {
+	t.Helper()
+	for parameter, patterns := range map[string][]string{
+		paramLocalOnlyPatterns:  want.LocalOnlyPatterns,
+		paramRemoteOnlyPatterns: want.RemoteOnlyPatterns,
+	} {
+		got, ok := ctx[parameter]
+		if len(patterns) == 0 {
+			if ok {
+				t.Fatalf("volume context %s = %q, want absent", parameter, got)
+			}
+			continue
+		}
+		if expected := strings.Join(patterns, "\n"); got != expected {
+			t.Fatalf("volume context %s = %q, want %q", parameter, got, expected)
+		}
+	}
+}
+
 func assertVolumeContextMountTuning(t *testing.T, ctx map[string]string, want mountTuning) {
 	t.Helper()
 	if got := ctx[paramReaddirPrefetch]; got != boolString(want.ReaddirPrefetch) {
@@ -2154,6 +2314,38 @@ func TestControllerModifyVolumeAcceptsArbitraryDurabilityButRemainsUnimplemented
 	})
 	if status.Code(err) != codes.Unimplemented {
 		t.Fatalf("ControllerModifyVolume status = %s, want Unimplemented (err=%v)", status.Code(err), err)
+	}
+}
+
+func TestControllerModifyVolumeAcceptsPerVolumeMountOptionsButRemainsUnimplemented(t *testing.T) {
+	d := &Driver{}
+	_, err := d.ControllerModifyVolume(context.Background(), &csi.ControllerModifyVolumeRequest{
+		VolumeId: "drive9-root-demo",
+		MutableParameters: map[string]string{
+			paramGVisorCompat:       "true",
+			paramLocalOnlyPatterns:  "**/.cache/**",
+			paramRemoteOnlyPatterns: "**/tmp/**",
+		},
+	})
+	if status.Code(err) != codes.Unimplemented {
+		t.Fatalf("ControllerModifyVolume status = %s, want Unimplemented (err=%v)", status.Code(err), err)
+	}
+}
+
+func TestControllerModifyVolumeRejectsInvalidPerVolumeMountOptions(t *testing.T) {
+	d := &Driver{}
+	for _, mutable := range []map[string]string{
+		{paramGVisorCompat: "TRUE"},
+		{paramLocalOnlyPatterns: "**/../bad/**"},
+	} {
+		_, err := d.ControllerModifyVolume(context.Background(), &csi.ControllerModifyVolumeRequest{
+			VolumeId:          "drive9-root-demo",
+			MutableParameters: mutable,
+		})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("ControllerModifyVolume(%v) status = %s, want InvalidArgument (err=%v)",
+				mutable, status.Code(err), err)
+		}
 	}
 }
 

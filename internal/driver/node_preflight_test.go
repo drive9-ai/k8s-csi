@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -133,7 +134,25 @@ func TestNodePreflightClassifiesEveryFailure(t *testing.T) {
 			name:       "Drive9 supervisor capability",
 			failure:    "drive9-help-missing-supervisor",
 			capability: nodeCapabilityDrive9Execution,
-			reason:     "host systemd cannot execute Drive9 binary",
+			reason:     `host Drive9 mount help missing required flag "--supervise-foreground"`,
+		},
+		{
+			name:       "Drive9 gVisor capability",
+			failure:    "drive9-help-missing-gvisor",
+			capability: nodeCapabilityDrive9Execution,
+			reason:     `host Drive9 mount help missing required flag "--gvisor-compat"`,
+		},
+		{
+			name:       "Drive9 local-only capability",
+			failure:    "drive9-help-missing-local-only",
+			capability: nodeCapabilityDrive9Execution,
+			reason:     `host Drive9 mount help missing required flag "--local-only"`,
+		},
+		{
+			name:       "Drive9 remote-only capability",
+			failure:    "drive9-help-missing-remote-only",
+			capability: nodeCapabilityDrive9Execution,
+			reason:     `host Drive9 mount help missing required flag "--remote-only"`,
 		},
 	}
 
@@ -418,10 +437,7 @@ func (f *nodePreflightFixture) installCallbacks() {
 			if f.failure == "drive9-exec" {
 				return hostCommandResult{ExitCode: 1, Stderr: []byte("Drive9 failed")}, errors.New("exit status 1")
 			}
-			if f.failure == "drive9-help-missing-supervisor" {
-				return hostCommandResult{Stderr: []byte("  -profile string\n")}, nil
-			}
-			return hostCommandResult{Stderr: []byte("  -supervise-foreground\n")}, nil
+			return hostCommandResult{Stderr: []byte(drive9MountHelpFixture(f.failure))}, nil
 		case "systemctl":
 			if f.failure == "systemctl" {
 				return hostCommandResult{ExitCode: 1, Stderr: []byte("systemctl failed")}, errors.New("exit status 1")
@@ -438,6 +454,26 @@ func (f *nodePreflightFixture) installCallbacks() {
 		}
 		return hostCommandResult{}, nil
 	}
+}
+
+func drive9MountHelpFixture(failure string) string {
+	flags := []struct {
+		name    string
+		failure string
+	}{
+		{name: "supervise-foreground", failure: "drive9-help-missing-supervisor"},
+		{name: "gvisor-compat", failure: "drive9-help-missing-gvisor"},
+		{name: "local-only", failure: "drive9-help-missing-local-only"},
+		{name: "remote-only", failure: "drive9-help-missing-remote-only"},
+	}
+	var help strings.Builder
+	for _, flag := range flags {
+		if failure == flag.failure {
+			continue
+		}
+		fmt.Fprintf(&help, "  -%s value\n", flag.name)
+	}
+	return help.String()
 }
 
 func hostInnerCommand(command hostCommand) []string {
