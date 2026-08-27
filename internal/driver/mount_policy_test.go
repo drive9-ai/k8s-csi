@@ -74,6 +74,26 @@ func TestEffectiveMountPathPolicyRejectsInvalidPatterns(t *testing.T) {
 	}
 }
 
+func TestEffectiveMountPathPolicyRedactsRejectedPattern(t *testing.T) {
+	const secretPattern = "token=super-secret-value"
+	_, err := effectiveMountPathPolicy(map[string]string{
+		paramRemoteOnlyPatterns: "allowed\n" + secretPattern,
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+	}
+	for _, secret := range []string{secretPattern, "super-secret-value"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("error leaked rejected pattern: %q", err)
+		}
+	}
+	for _, want := range []string{paramRemoteOnlyPatterns, "line 2", "pattern may contain a credential"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
+	}
+}
+
 func TestMountPathPolicyAddToVolumeContextUsesCanonicalNewlines(t *testing.T) {
 	ctx := map[string]string{"preserved": "value"}
 	mountPathPolicy{
