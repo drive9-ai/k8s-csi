@@ -56,9 +56,6 @@ func TestEffectiveMountPathPolicyRejectsInvalidPatterns(t *testing.T) {
 		{name: "dot", param: paramLocalOnlyPatterns, raw: "**/./bad/**", line: "line 1"},
 		{name: "dotdot", param: paramRemoteOnlyPatterns, raw: "**/../bad/**", line: "line 1"},
 		{name: "credential-like", param: paramLocalOnlyPatterns, raw: "**/drive9_api_key_secret/**", line: "line 1"},
-		{name: "raw token", param: paramLocalOnlyPatterns, raw: "token=secret", line: "line 1"},
-		{name: "raw password option", param: paramRemoteOnlyPatterns, raw: "--password=value", line: "line 1"},
-		{name: "raw authorization", param: paramLocalOnlyPatterns, raw: "authorization=bearer", line: "line 1"},
 	}
 
 	for _, tt := range tests {
@@ -74,8 +71,26 @@ func TestEffectiveMountPathPolicyRejectsInvalidPatterns(t *testing.T) {
 	}
 }
 
+func TestEffectiveMountPathPolicyAllowsCredentialShapedPathPatterns(t *testing.T) {
+	want := []string{
+		"token=metadata",
+		"--password value",
+		"authorization: docs/**",
+		"server=production",
+	}
+	got, err := effectiveMountPathPolicy(map[string]string{
+		paramLocalOnlyPatterns: strings.Join(want, "\n"),
+	})
+	if err != nil {
+		t.Fatalf("effectiveMountPathPolicy error = %v", err)
+	}
+	if !reflect.DeepEqual(got.LocalOnlyPatterns, want) {
+		t.Fatalf("local-only patterns = %q, want %q", got.LocalOnlyPatterns, want)
+	}
+}
+
 func TestEffectiveMountPathPolicyRedactsRejectedPattern(t *testing.T) {
-	const secretPattern = "token=super-secret-value"
+	const secretPattern = "token=super-secret-value/../bad"
 	_, err := effectiveMountPathPolicy(map[string]string{
 		paramRemoteOnlyPatterns: "allowed\n" + secretPattern,
 	})
@@ -87,7 +102,7 @@ func TestEffectiveMountPathPolicyRedactsRejectedPattern(t *testing.T) {
 			t.Fatalf("error leaked rejected pattern: %q", err)
 		}
 	}
-	for _, want := range []string{paramRemoteOnlyPatterns, "line 2", "pattern may contain a credential"} {
+	for _, want := range []string{paramRemoteOnlyPatterns, "line 2", `pattern contains ".." segment`} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want %q", err, want)
 		}
