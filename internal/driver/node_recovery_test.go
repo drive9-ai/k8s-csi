@@ -106,6 +106,24 @@ func TestDrive9MountRequestFromAttributesPassesThroughMountParameters(t *testing
 	}
 }
 
+func TestDrive9MountRequestFromAttributesRejectsNonOverlayProfilePolicy(t *testing.T) {
+	remoteRoot := "/k8s/pvc/invalid-policy-profile"
+	d := &Driver{cfg: Config{StateDir: t.TempDir()}}
+	_, err := d.drive9MountRequestFromAttributes(
+		volumeIDForRemoteRoot(remoteRoot),
+		"/var/lib/kubelet/stage",
+		map[string]string{
+			"remoteRoot":           remoteRoot,
+			paramProfile:           "none",
+			paramLocalOnlyPatterns: "**/.cache/**",
+		},
+		drive9Credentials{},
+	)
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+	}
+}
+
 func TestNodeRecoveryRereadsDurableStateAfterVolumeLock(t *testing.T) {
 	stale := validActiveState(t)
 	runtime := &fakeHostRuntime{}

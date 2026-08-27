@@ -344,6 +344,12 @@ PV `volumeAttributes`, then reconstructs deterministic mount arguments during
 staging and recovery. Native CSI users configure these options through a VAC;
 the CSI Node DaemonSet does not forward `DRIVE9_MOUNT_GVISOR_COMPAT`.
 
+Path-policy lists require an overlay profile; `profile: none` and
+`profile: interactive` are rejected when either list is non-empty. The combined
+raw policy values and their expanded mount arguments are each limited to 64
+KiB. Oversized policies are rejected during volume creation before the driver
+accesses the PVC or creates remote volume metadata.
+
 For example, apply
 `deploy/examples/kubernetes/volumeattributesclass-path-policy.example.yaml`
 and reference `drive9-gvisor-persistent-tmp` from a new PVC. Its effective

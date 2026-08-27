@@ -1024,6 +1024,58 @@ func TestCreateVolumeStoresMutableMountParameters(t *testing.T) {
 	})
 }
 
+func TestCreateVolumeRejectsInvalidProfilePathPolicyBeforePVCResolution(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		profile string
+		policy  string
+	}{
+		{name: "none local-only", profile: "none", policy: paramLocalOnlyPatterns},
+		{name: "interactive remote-only", profile: "interactive", policy: paramRemoteOnlyPatterns},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			k8s := k8sfake.NewSimpleClientset()
+			d := &Driver{
+				cfg: Config{DriverName: "csi.drive9.ai"},
+				k8s: k8s,
+			}
+			_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+				Name: "pvc-invalid-policy-profile",
+				Parameters: pvcParams("pvc-invalid-policy-profile", "default", map[string]string{
+					paramProfile: test.profile,
+					test.policy:  "**/tmp/**",
+				}),
+				VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+			})
+			if status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("CreateVolume status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+			}
+			if len(k8s.Actions()) != 0 {
+				t.Fatalf("CreateVolume accessed Kubernetes before rejecting policy: %v", k8s.Actions())
+			}
+		})
+	}
+}
+
+func TestCreateVolumeRejectsOversizedPathPolicyBeforePVCResolution(t *testing.T) {
+	k8s := k8sfake.NewSimpleClientset()
+	d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+	_, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+		Name: "pvc-oversized-policy",
+		Parameters: pvcParams("pvc-oversized-policy", "default", map[string]string{
+			paramProfile:            "coding-agent",
+			paramRemoteOnlyPatterns: strings.Repeat("a", 1<<20),
+		}),
+		VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("CreateVolume status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+	}
+	if len(k8s.Actions()) != 0 {
+		t.Fatalf("CreateVolume accessed Kubernetes before rejecting policy: %v", k8s.Actions())
+	}
+}
+
 func TestCreateVolumeMutableParametersOverrideStorageClassParameters(t *testing.T) {
 	fd := newFakeDrive9(t)
 	defer fd.close()

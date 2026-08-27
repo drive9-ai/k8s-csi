@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -10,8 +11,10 @@ import (
 )
 
 const (
-	paramLocalOnlyPatterns  = "localOnlyPatterns"
-	paramRemoteOnlyPatterns = "remoteOnlyPatterns"
+	paramLocalOnlyPatterns          = "localOnlyPatterns"
+	paramRemoteOnlyPatterns         = "remoteOnlyPatterns"
+	maxMountPathPolicyArgumentBytes = 64 << 10
+	maxMountPathPolicyStateBytes    = maxMountStateLength / 4
 )
 
 type mountPathPolicy struct {
@@ -20,6 +23,9 @@ type mountPathPolicy struct {
 }
 
 func effectiveMountPathPolicy(values map[string]string) (mountPathPolicy, error) {
+	if len(values[paramLocalOnlyPatterns])+len(values[paramRemoteOnlyPatterns]) > maxMountPathPolicyArgumentBytes {
+		return mountPathPolicy{}, status.Error(codes.InvalidArgument, "mount path policy is too large")
+	}
 	local, err := normalizeMountPolicyParameter(
 		paramLocalOnlyPatterns,
 		"--local-only=",
@@ -36,10 +42,44 @@ func effectiveMountPathPolicy(values map[string]string) (mountPathPolicy, error)
 	if err != nil {
 		return mountPathPolicy{}, err
 	}
-	return mountPathPolicy{
+	policy := mountPathPolicy{
 		LocalOnlyPatterns:  local,
 		RemoteOnlyPatterns: remote,
-	}, nil
+	}
+	if err := validateMountPathPolicyContract(profileFromParameters(values), policy); err != nil {
+		return mountPathPolicy{}, err
+	}
+	return policy, nil
+}
+
+func validateMountPathPolicyContract(profile string, policy mountPathPolicy) error {
+	if len(policy.LocalOnlyPatterns) == 0 && len(policy.RemoteOnlyPatterns) == 0 {
+		return nil
+	}
+	if profile == "none" || profile == "interactive" {
+		return status.Errorf(codes.InvalidArgument, "mount path policy requires an overlay profile; profile %q is not supported", profile)
+	}
+
+	args := make([]string, 0, len(policy.LocalOnlyPatterns)+len(policy.RemoteOnlyPatterns))
+	encodedLength := 0
+	for _, pattern := range policy.LocalOnlyPatterns {
+		arg := "--local-only=" + pattern
+		args = append(args, arg)
+		encodedLength += len(arg) + 1
+	}
+	for _, pattern := range policy.RemoteOnlyPatterns {
+		arg := "--remote-only=" + pattern
+		args = append(args, arg)
+		encodedLength += len(arg) + 1
+	}
+	if encodedLength > maxMountPathPolicyArgumentBytes {
+		return status.Error(codes.InvalidArgument, "mount path policy is too large")
+	}
+	serialized, err := json.Marshal(args)
+	if err != nil || len(serialized) > maxMountPathPolicyStateBytes {
+		return status.Error(codes.InvalidArgument, "mount path policy is too large")
+	}
+	return nil
 }
 
 func normalizeMountPolicyParameter(parameter string, flagPrefix string, raw string) ([]string, error) {
