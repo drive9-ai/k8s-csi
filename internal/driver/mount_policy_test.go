@@ -56,6 +56,9 @@ func TestEffectiveMountPathPolicyRejectsInvalidPatterns(t *testing.T) {
 		{name: "dot", param: paramLocalOnlyPatterns, raw: "**/./bad/**", line: "line 1"},
 		{name: "dotdot", param: paramRemoteOnlyPatterns, raw: "**/../bad/**", line: "line 1"},
 		{name: "credential-like", param: paramLocalOnlyPatterns, raw: "**/drive9_api_key_secret/**", line: "line 1"},
+		{name: "raw token", param: paramLocalOnlyPatterns, raw: "token=secret", line: "line 1"},
+		{name: "raw password option", param: paramRemoteOnlyPatterns, raw: "--password=value", line: "line 1"},
+		{name: "raw authorization", param: paramLocalOnlyPatterns, raw: "authorization=bearer", line: "line 1"},
 	}
 
 	for _, tt := range tests {
