@@ -5,6 +5,7 @@ metadata:
 driverName: csi.drive9.ai
 parameters:
   profile: coding-agent
+  gvisorCompat: "false"
   attrTTL: 30s
   entryTTL: 30s
   dirTTL: 30s

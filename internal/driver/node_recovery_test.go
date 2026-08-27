@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -24,10 +25,13 @@ func TestDrive9MountRequestFromAttributesPassesThroughMountParameters(t *testing
 	d := &Driver{cfg: Config{StateDir: t.TempDir()}}
 
 	for _, test := range []struct {
-		name           string
-		attrs          map[string]string
-		wantProfile    string
-		wantDurability string
+		name             string
+		attrs            map[string]string
+		wantProfile      string
+		wantDurability   string
+		wantGVisor       bool
+		wantLocalPolicy  []string
+		wantRemotePolicy []string
 	}{
 		{name: "absent", attrs: map[string]string{"remoteRoot": remoteRoot}},
 		{
@@ -36,10 +40,16 @@ func TestDrive9MountRequestFromAttributesPassesThroughMountParameters(t *testing
 				"remoteRoot":              remoteRoot,
 				paramProfile:              " custom-profile ",
 				paramDurability:           " custom-durability ",
+				paramGVisorCompat:         " true ",
+				paramLocalOnlyPatterns:    " **/.cache/**\n**/tmp/** ",
+				paramRemoteOnlyPatterns:   " **/tmp/**\n**/.tmp/** ",
 				paramWritebackBatchWindow: "20ms",
 			},
-			wantProfile:    "custom-profile",
-			wantDurability: "custom-durability",
+			wantProfile:      "custom-profile",
+			wantDurability:   "custom-durability",
+			wantGVisor:       true,
+			wantLocalPolicy:  []string{"**/.cache/**", "**/tmp/**"},
+			wantRemotePolicy: []string{"**/tmp/**", "**/.tmp/**"},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -53,8 +63,26 @@ func TestDrive9MountRequestFromAttributesPassesThroughMountParameters(t *testing
 				t.Fatalf("profile/durability = %q/%q, want %q/%q",
 					request.Profile, request.Durability, test.wantProfile, test.wantDurability)
 			}
+			if request.GVisorCompat != test.wantGVisor ||
+				!slices.Equal(request.Policy.LocalOnlyPatterns, test.wantLocalPolicy) ||
+				!slices.Equal(request.Policy.RemoteOnlyPatterns, test.wantRemotePolicy) {
+				t.Fatalf("gvisor/policy = %t/%v/%v, want %t/%v/%v",
+					request.GVisorCompat,
+					request.Policy.LocalOnlyPatterns,
+					request.Policy.RemoteOnlyPatterns,
+					test.wantGVisor,
+					test.wantLocalPolicy,
+					test.wantRemotePolicy)
+			}
 
 			args := d.drive9MountArgs(request, "/var/lib/drive9-csi/cache/test")
+			gvisorArg := "--gvisor-compat=false"
+			if test.wantGVisor {
+				gvisorArg = "--gvisor-compat=true"
+			}
+			if !slices.Contains(args, gvisorArg) {
+				t.Fatalf("mount args = %q, want %q", args, gvisorArg)
+			}
 			if test.wantProfile == "" {
 				if slices.Contains(args, "--profile") || slices.Contains(args, "--durability") {
 					t.Fatalf("absent mount parameters emitted argv: %q", args)
@@ -64,6 +92,16 @@ func TestDrive9MountRequestFromAttributesPassesThroughMountParameters(t *testing
 			assertMountOptionValue(t, args, "--profile", test.wantProfile)
 			assertMountOptionValue(t, args, "--durability", test.wantDurability)
 			assertMountOptionValue(t, args, "--writeback-batch-window", "20ms")
+			for _, pattern := range test.wantLocalPolicy {
+				if !slices.Contains(args, "--local-only="+pattern) {
+					t.Fatalf("mount args = %q, want local-only pattern %q", args, pattern)
+				}
+			}
+			for _, pattern := range test.wantRemotePolicy {
+				if !slices.Contains(args, "--remote-only="+pattern) {
+					t.Fatalf("mount args = %q, want remote-only pattern %q", args, pattern)
+				}
+			}
 		})
 	}
 }
@@ -560,14 +598,25 @@ func TestBootRecoveryRejectsUnprovedModeWithoutMutation(t *testing.T) {
 
 func TestBootRecoveryRelaunchPublishesConfiguredMountParameters(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		modes      []corev1.PersistentVolumeAccessMode
-		profile    string
-		durability string
+		name         string
+		modes        []corev1.PersistentVolumeAccessMode
+		profile      string
+		durability   string
+		gvisor       bool
+		localPolicy  []string
+		remotePolicy []string
 	}{
 		{name: "RWO absent", modes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}},
 		{name: "RWO explicit", modes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, durability: "custom-rwo-durability"},
-		{name: "MNMW configured", modes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany}, profile: "custom-rwx-profile", durability: "custom-rwx-durability"},
+		{
+			name:         "MNMW configured",
+			modes:        []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
+			profile:      "custom-rwx-profile",
+			durability:   "custom-rwx-durability",
+			gvisor:       true,
+			localPolicy:  []string{"**/.cache/**", "**/tmp/**"},
+			remotePolicy: []string{"**/tmp/**", "**/.tmp/**"},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fake := newFakeDrive9(t)
@@ -613,6 +662,15 @@ func TestBootRecoveryRelaunchPublishesConfiguredMountParameters(t *testing.T) {
 			}
 			if test.durability != "" {
 				attrs[paramDurability] = test.durability
+			}
+			if test.gvisor {
+				attrs[paramGVisorCompat] = "true"
+			}
+			if len(test.localPolicy) > 0 {
+				attrs[paramLocalOnlyPatterns] = strings.Join(test.localPolicy, "\n")
+			}
+			if len(test.remotePolicy) > 0 {
+				attrs[paramRemoteOnlyPatterns] = strings.Join(test.remotePolicy, "\n")
 			}
 			k8s := k8sfake.NewSimpleClientset(secret, recoveryPV(active, test.modes, attrs))
 			launch := newMountLaunchFixture(t, "")
@@ -669,6 +727,23 @@ func TestBootRecoveryRelaunchPublishesConfiguredMountParameters(t *testing.T) {
 			}
 			if test.profile != "" {
 				assertMountOptionValue(t, recovered.MountArgs, "--profile", test.profile)
+			}
+			gvisorArg := "--gvisor-compat=false"
+			if test.gvisor {
+				gvisorArg = "--gvisor-compat=true"
+			}
+			if !slices.Contains(recovered.MountArgs, gvisorArg) {
+				t.Fatalf("recovered mount args = %q, want %q", recovered.MountArgs, gvisorArg)
+			}
+			for _, pattern := range test.localPolicy {
+				if !slices.Contains(recovered.MountArgs, "--local-only="+pattern) {
+					t.Fatalf("recovered mount args = %q, want local-only %q", recovered.MountArgs, pattern)
+				}
+			}
+			for _, pattern := range test.remotePolicy {
+				if !slices.Contains(recovered.MountArgs, "--remote-only="+pattern) {
+					t.Fatalf("recovered mount args = %q, want remote-only %q", recovered.MountArgs, pattern)
+				}
 			}
 		})
 	}

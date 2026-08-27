@@ -46,9 +46,12 @@ Multi-stage (`Dockerfile`):
 Both build stages validate target arch and static ELF contracts. The target
 runtime stage executes
 `drive9 mount --supervise-foreground --direct-mount-strict --help`; an
-incompatible CLI fails the image build. The minimum compatible Drive9 CLI is
-`dac2d62`. The runtime image does not contain `fuse3` and does not configure
-`/etc/fuse.conf`.
+incompatible CLI fails the image build. The help must expose
+`gvisor-compat`, `local-only`, `remote-only`, and the three corresponding
+`DRIVE9_MOUNT_*` environment names used by the fallback sidecar; the minimum
+compatible version is the first published Drive9 release containing those
+contracts, not the older `dac2d62` supervisor minimum. The runtime image does
+not contain `fuse3` and does not configure `/etc/fuse.conf`.
 
 ## Drive9 CLI Release Contract
 
@@ -197,9 +200,17 @@ volume creation time:
 
 The external provisioner sends VolumeAttributesClass parameters through
 `CreateVolumeRequest.mutable_parameters`. Supported create-time keys are
-`profile`, `durability`, the three TTLs, `perfEnabled`, and the five tuning
-parameters. They override matching legacy StorageClass parameters. Identity
-parameters such as `remoteRoot` and `remoteRootPrefix` are not mutable.
+`profile`, `durability`, `gvisorCompat`, `localOnlyPatterns`,
+`remoteOnlyPatterns`, the three TTLs, `perfEnabled`, and the five tuning
+parameters. They override matching legacy StorageClass parameters by complete
+value. Identity parameters such as `remoteRoot` and `remoteRootPrefix` are not
+mutable.
+
+`gvisorCompat` defaults to `false` and is always emitted as an explicit Drive9
+flag. The policy values contain one pattern per line; the driver trims blanks,
+deduplicates exact values in order, persists the canonical newline-delimited
+form, and emits repeated equals-form flags. Native CSI does not forward the
+matching Drive9 environment variables.
 
 The driver advertises `MODIFY_VOLUME` so external-provisioner can provision a
 PVC that references a VAC, but `ControllerModifyVolume` returns `Unimplemented`
@@ -274,7 +285,8 @@ Key deploy details:
 - StorageClasses `drive9-rwo` and `drive9-rwx` both use empty parameters,
   `Retain`, and `WaitForFirstConsumer`
 - Optional default VAC `drive9-coding-agent` provides `profile=coding-agent`,
-  30-second TTLs, and `perfEnabled=false`; PVCs opt into it explicitly
+  `gvisorCompat=false`, 30-second TTLs, and `perfEnabled=false`; PVCs opt into
+  it explicitly
 - Examples are intentionally separate from kustomization so
   `kubectl apply -k deploy/kubernetes` doesn't create placeholder credentials
 - The fallback sidecar uses a fail-closed image placeholder and Drive9's
