@@ -354,6 +354,14 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	if err != nil {
 		return nil, err
 	}
+	gvisor, err := effectiveMountGVisor(mountParams)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := effectiveMountPathPolicy(mountParams)
+	if err != nil {
+		return nil, err
+	}
 
 	// Resolve credentials from PVC annotation → Secret.
 	pvcName, pvcNamespace, err := extractPVCRef(params)
@@ -393,7 +401,10 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 		return nil, err
 	}
 	if managedVolume {
-		return d.createManagedDirectoryVolume(ctx, req, creds, ref, name, remoteRoot, profile, durability, ttls, perf, tuning)
+		return d.createManagedDirectoryVolume(
+			ctx, req, creds, ref, name, remoteRoot, profile, durability,
+			gvisor, policy, ttls, perf, tuning,
+		)
 	}
 
 	client := newDrive9Client(creds)
@@ -411,6 +422,8 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	}
 	ttls.addToVolumeContext(volumeContext)
 	perf.addToVolumeContext(volumeContext)
+	gvisor.addToVolumeContext(volumeContext)
+	policy.addToVolumeContext(volumeContext)
 	tuning.addToVolumeContext(volumeContext)
 	addDurabilityToVolumeContext(volumeContext, durability)
 	return &csi.CreateVolumeResponse{
@@ -422,7 +435,21 @@ func (d *Driver) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest)
 	}, nil
 }
 
-func (d *Driver) createManagedDirectoryVolume(ctx context.Context, req *csi.CreateVolumeRequest, creds drive9Credentials, ref pvcSecretRef, name string, remoteRoot string, profile string, durability string, ttls mountTTLs, perf mountPerf, tuning mountTuning) (*csi.CreateVolumeResponse, error) {
+func (d *Driver) createManagedDirectoryVolume(
+	ctx context.Context,
+	req *csi.CreateVolumeRequest,
+	creds drive9Credentials,
+	ref pvcSecretRef,
+	name string,
+	remoteRoot string,
+	profile string,
+	durability string,
+	gvisor mountGVisor,
+	policy mountPathPolicy,
+	ttls mountTTLs,
+	perf mountPerf,
+	tuning mountTuning,
+) (*csi.CreateVolumeResponse, error) {
 	volumeID := volumeIDForRemoteRoot(remoteRoot)
 	marker := volumeMarker{
 		Version:    1,
@@ -484,6 +511,8 @@ func (d *Driver) createManagedDirectoryVolume(ctx context.Context, req *csi.Crea
 	}
 	ttls.addToVolumeContext(volumeContext)
 	perf.addToVolumeContext(volumeContext)
+	gvisor.addToVolumeContext(volumeContext)
+	policy.addToVolumeContext(volumeContext)
 	tuning.addToVolumeContext(volumeContext)
 	addDurabilityToVolumeContext(volumeContext, durability)
 	return &csi.CreateVolumeResponse{
@@ -646,6 +675,12 @@ func (d *Driver) NodeStageVolume(ctx context.Context, req *csi.NodeStageVolumeRe
 		return nil, err
 	}
 	if _, err := effectiveMountPerf(req.GetVolumeContext()); err != nil {
+		return nil, err
+	}
+	if _, err := effectiveMountGVisor(req.GetVolumeContext()); err != nil {
+		return nil, err
+	}
+	if _, err := effectiveMountPathPolicy(req.GetVolumeContext()); err != nil {
 		return nil, err
 	}
 	if _, err := effectiveMountTuning(req.GetVolumeContext()); err != nil {

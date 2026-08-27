@@ -19,6 +19,9 @@ var supportedMutableMountParameters = map[string]struct{}{
 	paramEntryTTL:                    {},
 	paramDirTTL:                      {},
 	paramPerfEnabled:                 {},
+	paramGVisorCompat:                {},
+	paramLocalOnlyPatterns:           {},
+	paramRemoteOnlyPatterns:          {},
 	paramReaddirPrefetch:             {},
 	paramReaddirPrefetchMaxFiles:     {},
 	paramReaddirPrefetchMaxFileBytes: {},
@@ -48,6 +51,12 @@ func validateMutableMountParameterValues(values map[string]string) error {
 		return err
 	}
 	if _, err := effectiveMountPerf(values); err != nil {
+		return err
+	}
+	if _, err := effectiveMountGVisor(values); err != nil {
+		return err
+	}
+	if _, err := effectiveMountPathPolicy(values); err != nil {
 		return err
 	}
 	if _, err := effectiveMountTuning(values); err != nil {

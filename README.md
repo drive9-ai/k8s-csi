@@ -105,9 +105,13 @@ image, then reports its trace tag, manifest-list digest, and immutable reference
 in the workflow summary. It does not generate deployment manifests. Each target
 architecture must execute
 `drive9 mount --supervise-foreground --direct-mount-strict --help`
-successfully during the image build. This requires Drive9 CLI `dac2d62` or
-newer; the runtime image installs neither `fuse3` nor an `/etc/fuse.conf`
-dependency. Non-production validation must inject
+successfully during the image build, and its help must expose
+`--gvisor-compat`, `--local-only`, `--remote-only`, and the corresponding
+`DRIVE9_MOUNT_*` environment names used by the fallback sidecar. The minimum
+compatible version is the first published Drive9 release containing those
+contracts; do not use the older `dac2d62` minimum for this driver version. The
+runtime image installs neither `fuse3` nor an `/etc/fuse.conf` dependency.
+Non-production validation must inject
 that immutable reference through a local, environment-specific overlay.
 
 Validation images have a traceable tag:
@@ -268,6 +272,7 @@ metadata:
 driverName: csi.drive9.ai
 parameters:
   profile: coding-agent
+  gvisorCompat: "false"
   attrTTL: 30s
   entryTTL: 30s
   dirTTL: 30s
@@ -304,6 +309,9 @@ Parameter ownership is:
 | `remoteRootPrefix` | StorageClass | Creates a CSI-managed directory and affects volume identity |
 | `remoteRoot` | PVC annotation; legacy StorageClass fallback | Selects an existing workspace path and affects volume identity |
 | `profile`, `durability` | VolumeAttributesClass | Forwarded to `drive9 mount` when explicitly set |
+| `gvisorCompat` | VolumeAttributesClass | Strict boolean; always forwarded as `--gvisor-compat=<true|false>` and defaults to `false` |
+| `localOnlyPatterns` | VolumeAttributesClass | Newline-delimited additional local-only rules |
+| `remoteOnlyPatterns` | VolumeAttributesClass | Newline-delimited remote-persistent overrides; wins over local routing |
 | `attrTTL`, `entryTTL`, `dirTTL` | VolumeAttributesClass | Positive Go durations; each defaults to `30s` |
 | `perfEnabled` | VolumeAttributesClass | Boolean; defaults to `false` |
 | Read-directory and writeback tuning | VolumeAttributesClass | Optional; no CSI defaults |
@@ -328,6 +336,35 @@ index entry and `.drive9-csi-volume.json` marker. It never deletes user data.
 The optional `attrTTL`, `entryTTL`, and `dirTTL` values control the matching
 `drive9 mount --attr-ttl`, `--entry-ttl`, and `--dir-ttl` flags. Each uses Go
 duration syntax, for example `500ms`, `1s`, `30s`, or `2m`.
+
+`gvisorCompat` and the two path-policy lists are fixed per volume. The driver
+normalizes each policy list by trimming lines, removing blanks, and preserving
+the first occurrence of exact duplicates. It persists the canonical values in
+PV `volumeAttributes`, then reconstructs deterministic mount arguments during
+staging and recovery. Native CSI users configure these options through a VAC;
+the CSI Node DaemonSet does not forward `DRIVE9_MOUNT_GVISOR_COMPAT`.
+
+Path-policy lists require an overlay profile; `profile: none` and
+`profile: interactive` are rejected when either list is non-empty. The combined
+raw policy values and their expanded mount arguments are each limited to 64
+KiB. Oversized policies are rejected during volume creation before the driver
+accesses the PVC or creates remote volume metadata.
+
+For example, apply
+`deploy/examples/kubernetes/volumeattributesclass-path-policy.example.yaml`
+and reference `drive9-gvisor-persistent-tmp` from a new PVC. Its effective
+arguments include:
+
+```text
+--gvisor-compat=true
+--local-only=**/local-build-cache/**
+--remote-only=**/tmp/**
+--remote-only=**/.tmp/**
+```
+
+The equals form keeps each pattern in one argv entry. A local/remote overlap is
+valid; Drive9 applies remote-only precedence. An explicit empty VAC policy value
+clears the complete matching legacy StorageClass value.
 
 When `perfEnabled` is `"true"`, `NodeStageVolume` passes `--perf-dir` with a
 driver-generated path under `/var/lib/drive9-csi/perf/<volume-id>`. The driver
@@ -381,13 +418,17 @@ sidecar fallback. The path is fixed to `/perf`; use a Kubernetes volume mount to
 choose where `/perf` is stored. The example manifest mounts it from
 `/var/lib/drive9-sidecar/demo/perf`.
 
-The sidecar fallback also supports explicit mount tuning env vars with no
-defaults:
+The sidecar fallback also supports explicit mount-option and tuning environment
+variables. Compatibility defaults to `false`; policy and tuning values default
+to empty:
 
 <!-- markdownlint-disable MD013 -->
 
 | Environment variable                     | `drive9 mount` flag                 |
 | ---------------------------------------- | ----------------------------------- |
+| `DRIVE9_MOUNT_GVISOR_COMPAT`             | `--gvisor-compat`                   |
+| `DRIVE9_MOUNT_LOCAL_ONLY_PATTERNS`        | Repeated `--local-only` rules       |
+| `DRIVE9_MOUNT_REMOTE_ONLY_PATTERNS`       | Repeated `--remote-only` rules      |
 | `DRIVE9_READDIR_PREFETCH`                | `--readdir-prefetch`                |
 | `DRIVE9_READDIR_PREFETCH_MAX_FILES`      | `--readdir-prefetch-max-files`      |
 | `DRIVE9_READDIR_PREFETCH_MAX_FILE_BYTES` | `--readdir-prefetch-max-file-bytes` |
@@ -400,6 +441,12 @@ Example:
 
 ```yaml
 env:
+  - name: DRIVE9_MOUNT_GVISOR_COMPAT
+    value: "true"
+  - name: DRIVE9_MOUNT_REMOTE_ONLY_PATTERNS
+    value: |-
+      **/tmp/**
+      **/.tmp/**
   - name: DRIVE9_PERF_ENABLED
     value: "true"
   - name: DRIVE9_READDIR_PREFETCH

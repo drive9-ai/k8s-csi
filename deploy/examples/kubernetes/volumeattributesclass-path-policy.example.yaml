@@ -1,0 +1,13 @@
+apiVersion: storage.k8s.io/v1
+kind: VolumeAttributesClass
+metadata:
+  name: drive9-gvisor-persistent-tmp
+driverName: csi.drive9.ai
+parameters:
+  profile: coding-agent
+  gvisorCompat: "true"
+  localOnlyPatterns: |-
+    **/local-build-cache/**
+  remoteOnlyPatterns: |-
+    **/tmp/**
+    **/.tmp/**

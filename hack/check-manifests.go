@@ -52,7 +52,9 @@ func checkTextContracts() {
 				"${pvc.name}", "${pvc.namespace}",
 				"remoteRootPrefix:", "remoteRoot:", "profile:",
 				"attrTTL:", "entryTTL:", "dirTTL:",
-				"perfEnabled:", "readdirPrefetch:",
+				"perfEnabled:", "gvisorCompat:",
+				"localOnlyPatterns:", "remoteOnlyPatterns:",
+				"readdirPrefetch:",
 				"readdirPrefetchMaxFiles:",
 				"readdirPrefetchMaxFileBytes:",
 				"readdirPrefetchMaxBytes:", "writebackBatchWindow:",
@@ -63,11 +65,13 @@ func checkTextContracts() {
 			required: []string{
 				"  name: drive9-coding-agent", "driverName: csi.drive9.ai",
 				"  profile: coding-agent",
+				"  gvisorCompat: \"false\"",
 				"  attrTTL: 30s", "  entryTTL: 30s", "  dirTTL: 30s",
 				"  perfEnabled: \"false\"",
 			},
 			forbidden: []string{
 				"durability:",
+				"localOnlyPatterns:", "remoteOnlyPatterns:",
 				"readdirPrefetch:", "readdirPrefetchMaxFiles:",
 				"readdirPrefetchMaxFileBytes:",
 				"readdirPrefetchMaxBytes:", "writebackBatchWindow:",
@@ -84,6 +88,7 @@ func checkTextContracts() {
 			},
 			forbidden: []string{
 				"apiKey", "server:", "secret", "profile:", "durability:",
+				"gvisorCompat:", "localOnlyPatterns:", "remoteOnlyPatterns:",
 			},
 		},
 		{
@@ -115,6 +120,9 @@ func checkTextContracts() {
 				"DRIVE9_ATTR_TTL", "DRIVE9_ENTRY_TTL", "DRIVE9_DIR_TTL",
 				"--attr-ttl", "--entry-ttl", "--dir-ttl", "value: 30s",
 				"DRIVE9_PERF_ENABLED",
+				"DRIVE9_MOUNT_GVISOR_COMPAT",
+				"DRIVE9_MOUNT_LOCAL_ONLY_PATTERNS",
+				"DRIVE9_MOUNT_REMOTE_ONLY_PATTERNS",
 				"set -- --perf-dir /perf", "mountPath: /perf",
 				"path: /var/lib/drive9-sidecar/demo/perf",
 				"value: \"false\"", "DRIVE9_READDIR_PREFETCH",
@@ -152,6 +160,12 @@ func checkTextContracts() {
 				"FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS runtime",
 				"mount_help=\"$(/usr/local/bin/drive9 mount --supervise-foreground --direct-mount-strict --help 2>&1)\"",
 				"grep -F -- '-supervise-foreground'",
+				"grep -F -- '-gvisor-compat'",
+				"grep -F -- '-local-only '",
+				"grep -F -- '-remote-only '",
+				"grep -F -- 'DRIVE9_MOUNT_GVISOR_COMPAT'",
+				"grep -F -- 'DRIVE9_MOUNT_LOCAL_ONLY_PATTERNS'",
+				"grep -F -- 'DRIVE9_MOUNT_REMOTE_ONLY_PATTERNS'",
 				"grep -F -- '-profile '", "grep -F -- '-durability '",
 				"COPY hack/drive9-csi-upload-perf.sh ",
 				"/usr/local/bin/drive9-csi-upload-perf",
@@ -173,6 +187,33 @@ func checkTextContracts() {
 			required: []string{
 				"drive9.ai/secret-name:",
 				"volumeAttributesClassName: drive9-coding-agent-tuned",
+			},
+		},
+		{
+			path: "deploy/examples/kubernetes/volumeattributesclass-path-policy.example.yaml",
+			required: []string{
+				"kind: VolumeAttributesClass",
+				"  name: drive9-gvisor-persistent-tmp",
+				"driverName: csi.drive9.ai",
+				"  profile: coding-agent",
+				"  gvisorCompat: \"true\"",
+				"  localOnlyPatterns: |-",
+				"    **/local-build-cache/**",
+				"  remoteOnlyPatterns: |-",
+				"    **/tmp/**", "    **/.tmp/**",
+			},
+			forbidden: []string{"apiKey", "server:"},
+		},
+		{
+			path: "deploy/examples/kubernetes/volumeattributesclass.example.yaml",
+			required: []string{
+				"kind: VolumeAttributesClass",
+				"  name: drive9-coding-agent-tuned",
+				"  profile: coding-agent",
+				"  gvisorCompat: \"false\"",
+			},
+			forbidden: []string{
+				"localOnlyPatterns:", "remoteOnlyPatterns:",
 			},
 		},
 		{
@@ -207,6 +248,8 @@ func checkTextContracts() {
 			path: "deploy/examples/kubernetes/README.md",
 			required: []string{
 				"shared-pvc.example.yaml",
+				"volumeattributesclass-path-policy.example.yaml",
+				"drive9-gvisor-persistent-tmp",
 				"kubectl apply -k deploy/overlays/local",
 				"kubectl apply -f deploy/examples/kubernetes/shared-pvc.example.yaml",
 				"`ReadWriteMany`", "adds no RWX-specific",

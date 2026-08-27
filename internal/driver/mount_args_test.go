@@ -25,6 +25,7 @@ func TestDrive9MountArgsIncludesMountTTLs(t *testing.T) {
 		"--supervise-foreground",
 		"--mode=fuse",
 		"--direct-mount-strict",
+		"--gvisor-compat=false",
 		"--allow-other",
 		"--cache-dir", cacheDir,
 		"--attr-ttl", "1s",
@@ -53,6 +54,7 @@ func TestDrive9MountArgsDefaultsMountTTLs(t *testing.T) {
 		"--supervise-foreground",
 		"--mode=fuse",
 		"--direct-mount-strict",
+		"--gvisor-compat=false",
 		"--allow-other",
 		"--cache-dir", cacheDir,
 		"--attr-ttl", "30s",
@@ -81,6 +83,7 @@ func TestDrive9MountArgsPassesThroughProfileAndDurability(t *testing.T) {
 		"--supervise-foreground",
 		"--mode=fuse",
 		"--direct-mount-strict",
+		"--gvisor-compat=false",
 		"--allow-other",
 		"--cache-dir", cacheDir,
 		"--attr-ttl", "30s",
@@ -88,6 +91,45 @@ func TestDrive9MountArgsPassesThroughProfileAndDurability(t *testing.T) {
 		"--dir-ttl", "30s",
 		"--profile", "custom-profile",
 		"--durability", "custom-durability",
+		":/",
+		"/stage",
+	}
+	assertStringSlice(t, got, want)
+}
+
+func TestDrive9MountArgsIncludesPerVolumeCompatibilityAndPathPolicy(t *testing.T) {
+	d := &Driver{cfg: Config{StateDir: t.TempDir()}}
+	cacheDir := filepath.Join(d.cfg.StateDir, "cache", "vol")
+
+	got := d.drive9MountArgs(drive9MountRequest{
+		VolumeID:      "vol",
+		RemoteRoot:    "/",
+		StagingTarget: "/stage",
+		Profile:       "coding-agent",
+		GVisorCompat:  true,
+		Policy: mountPathPolicy{
+			LocalOnlyPatterns:  []string{"**/.cache/**", "--foreground"},
+			RemoteOnlyPatterns: []string{"**/tmp/**", "**/.tmp/**"},
+		},
+	}, cacheDir)
+
+	want := []string{
+		"mount",
+		"--supervise-foreground",
+		"--mode=fuse",
+		"--direct-mount-strict",
+		"--gvisor-compat=true",
+		"--allow-other",
+		"--cache-dir", cacheDir,
+		"--attr-ttl", "30s",
+		"--entry-ttl", "30s",
+		"--dir-ttl", "30s",
+		"--profile", "coding-agent",
+		"--local-root", filepath.Join(d.cfg.StateDir, "local", "vol"),
+		"--local-only=**/.cache/**",
+		"--local-only=--foreground",
+		"--remote-only=**/tmp/**",
+		"--remote-only=**/.tmp/**",
 		":/",
 		"/stage",
 	}
@@ -112,6 +154,7 @@ func TestDrive9MountArgsIncludesPerfDir(t *testing.T) {
 		"--supervise-foreground",
 		"--mode=fuse",
 		"--direct-mount-strict",
+		"--gvisor-compat=false",
 		"--allow-other",
 		"--cache-dir", cacheDir,
 		"--attr-ttl", "30s",
@@ -147,6 +190,7 @@ func TestDrive9MountArgsIncludesExplicitMountTuning(t *testing.T) {
 		"--supervise-foreground",
 		"--mode=fuse",
 		"--direct-mount-strict",
+		"--gvisor-compat=false",
 		"--allow-other",
 		"--cache-dir", cacheDir,
 		"--attr-ttl", "30s",
