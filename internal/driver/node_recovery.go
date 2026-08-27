@@ -285,6 +285,14 @@ func (d *Driver) drive9MountRequestFromAttributes(volumeID string, stagingTarget
 	if err != nil {
 		return drive9MountRequest{}, err
 	}
+	gvisor, err := effectiveMountGVisor(attrs)
+	if err != nil {
+		return drive9MountRequest{}, err
+	}
+	policy, err := effectiveMountPathPolicy(attrs)
+	if err != nil {
+		return drive9MountRequest{}, err
+	}
 	tuning, err := effectiveMountTuning(attrs)
 	if err != nil {
 		return drive9MountRequest{}, err
@@ -303,6 +311,8 @@ func (d *Driver) drive9MountRequestFromAttributes(volumeID string, stagingTarget
 		DirTTL:        ttls.DirTTL,
 		PerfDir:       d.mountPerfDir(volumeID, perf),
 		Tuning:        tuning,
+		GVisorCompat:  gvisor.Enabled,
+		Policy:        policy,
 	}, nil
 }
 

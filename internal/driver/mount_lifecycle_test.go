@@ -90,6 +90,7 @@ func TestMountLaunchPreservesAllDrive9MountArgs(t *testing.T) {
 		"--supervise-foreground",
 		"--mode=fuse",
 		"--direct-mount-strict",
+		"--gvisor-compat=false",
 		"--server", "https://api.drive9.ai",
 		"--allow-other",
 		"--cache-dir", "/var/lib/drive9-csi/cache/volume",

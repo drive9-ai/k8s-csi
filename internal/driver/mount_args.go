@@ -2,6 +2,7 @@ package driver
 
 import (
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -23,6 +24,8 @@ type drive9MountRequest struct {
 	DirTTL        string
 	PerfDir       string
 	Tuning        mountTuning
+	GVisorCompat  bool
+	Policy        mountPathPolicy
 }
 
 func (d *Driver) drive9MountArgs(req drive9MountRequest, cacheDir string) []string {
@@ -32,6 +35,7 @@ func (d *Driver) drive9MountArgs(req drive9MountRequest, cacheDir string) []stri
 		superviseForegroundFlag,
 		"--mode=fuse",
 		directMountStrictFlag,
+		"--gvisor-compat=" + strconv.FormatBool(req.GVisorCompat),
 	}
 	if req.Server != "" {
 		args = append(args, "--server", req.Server)
@@ -51,6 +55,12 @@ func (d *Driver) drive9MountArgs(req drive9MountRequest, cacheDir string) []stri
 	}
 	if req.Durability != "" {
 		args = append(args, "--durability", req.Durability)
+	}
+	for _, pattern := range req.Policy.LocalOnlyPatterns {
+		args = append(args, "--local-only="+pattern)
+	}
+	for _, pattern := range req.Policy.RemoteOnlyPatterns {
+		args = append(args, "--remote-only="+pattern)
 	}
 	if req.PerfDir != "" {
 		args = append(args, "--perf-dir", req.PerfDir)
