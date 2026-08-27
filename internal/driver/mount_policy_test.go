@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -39,6 +40,51 @@ func TestEffectiveMountPathPolicyAbsentOrEmpty(t *testing.T) {
 		if len(got.LocalOnlyPatterns) != 0 || len(got.RemoteOnlyPatterns) != 0 {
 			t.Fatalf("effectiveMountPathPolicy(%q) = %#v, want empty", values, got)
 		}
+	}
+}
+
+func TestEffectiveMountPathPolicyRejectsNonOverlayProfile(t *testing.T) {
+	for _, profile := range []string{"none", "interactive"} {
+		t.Run(profile, func(t *testing.T) {
+			_, err := effectiveMountPathPolicy(map[string]string{
+				paramProfile:            profile,
+				paramRemoteOnlyPatterns: "**/tmp/**",
+			})
+			if status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+			}
+			if !strings.Contains(err.Error(), "requires an overlay profile") {
+				t.Fatalf("error = %q, want overlay profile requirement", err)
+			}
+		})
+	}
+}
+
+func TestEffectiveMountPathPolicyRejectsOversizedPolicy(t *testing.T) {
+	shortPatterns := make([]string, 5_000)
+	for index := range shortPatterns {
+		shortPatterns[index] = fmt.Sprintf("p%d", index)
+	}
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "raw value", raw: strings.Repeat("a", 1<<20)},
+		{name: "expanded arguments", raw: strings.Join(shortPatterns, "\n")},
+		{name: "serialized state", raw: strings.Repeat("<", 50<<10)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := effectiveMountPathPolicy(map[string]string{
+				paramLocalOnlyPatterns: test.raw,
+			})
+			if status.Code(err) != codes.InvalidArgument {
+				t.Fatalf("status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+			}
+			if !strings.Contains(err.Error(), "mount path policy is too large") {
+				t.Fatalf("error = %q, want policy size error", err)
+			}
+		})
 	}
 }
 
