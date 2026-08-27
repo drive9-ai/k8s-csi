@@ -52,8 +52,8 @@ func normalizeMountPolicyParameter(parameter string, flagPrefix string, raw stri
 		}
 		if err := validateMountPolicyPattern(flagPrefix, pattern); err != nil {
 			return nil, status.Errorf(codes.InvalidArgument,
-				"%s line %d: invalid path pattern %q: %v",
-				parameter, index+1, pattern, err)
+				"%s line %d: invalid path pattern: %v",
+				parameter, index+1, err)
 		}
 		if _, ok := seen[pattern]; ok {
 			continue
