@@ -62,6 +62,9 @@ func (d *Driver) drive9MountArgs(req drive9MountRequest, cacheDir string) []stri
 	for _, pattern := range req.Policy.RemoteOnlyPatterns {
 		args = append(args, "--remote-only="+pattern)
 	}
+	for _, pattern := range req.Policy.AppendLogPatterns {
+		args = append(args, "--append-log="+pattern)
+	}
 	if req.PerfDir != "" {
 		args = append(args, "--perf-dir", req.PerfDir)
 	}

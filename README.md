@@ -106,8 +106,8 @@ in the workflow summary. It does not generate deployment manifests. Each target
 architecture must execute
 `drive9 mount --supervise-foreground --direct-mount-strict --help`
 successfully during the image build, and its help must expose
-`--gvisor-compat`, `--local-only`, `--remote-only`, and the corresponding
-`DRIVE9_MOUNT_*` environment names used by the fallback sidecar. The minimum
+`--gvisor-compat`, `--local-only`, `--remote-only`, `--append-log`, and the
+corresponding `DRIVE9_MOUNT_*` environment names used by the fallback sidecar. The minimum
 compatible version is the first published Drive9 release containing those
 contracts; do not use the older `dac2d62` minimum for this driver version. The
 runtime image installs neither `fuse3` nor an `/etc/fuse.conf` dependency.
@@ -312,6 +312,7 @@ Parameter ownership is:
 | `gvisorCompat` | VolumeAttributesClass | Strict boolean; always forwarded as `--gvisor-compat=<true|false>` and defaults to `false` |
 | `localOnlyPatterns` | VolumeAttributesClass | Newline-delimited additional local-only rules |
 | `remoteOnlyPatterns` | VolumeAttributesClass | Newline-delimited remote-persistent overrides; wins over local routing |
+| `appendLogPatterns` | VolumeAttributesClass | Newline-delimited append-log optimization rules for remote-persistent files; empty by default |
 | `attrTTL`, `entryTTL`, `dirTTL` | VolumeAttributesClass | Positive Go durations; each defaults to `30s` |
 | `perfEnabled` | VolumeAttributesClass | Boolean; defaults to `false` |
 | Read-directory and writeback tuning | VolumeAttributesClass | Optional; no CSI defaults |
@@ -337,17 +338,20 @@ The optional `attrTTL`, `entryTTL`, and `dirTTL` values control the matching
 `drive9 mount --attr-ttl`, `--entry-ttl`, and `--dir-ttl` flags. Each uses Go
 duration syntax, for example `500ms`, `1s`, `30s`, or `2m`.
 
-`gvisorCompat` and the two path-policy lists are fixed per volume. The driver
+`gvisorCompat` and the three pattern lists are fixed per volume. The driver
 normalizes each policy list by trimming lines, removing blanks, and preserving
 the first occurrence of exact duplicates. It persists the canonical values in
 PV `volumeAttributes`, then reconstructs deterministic mount arguments during
 staging and recovery. Native CSI users configure these options through a VAC;
-the CSI Node DaemonSet does not forward `DRIVE9_MOUNT_GVISOR_COMPAT`.
+the CSI Node DaemonSet does not forward the matching `DRIVE9_MOUNT_*`
+environment variables.
 
-Path-policy lists require an overlay profile; `profile: none` and
-`profile: interactive` are rejected when either list is non-empty. The combined
-raw policy values and their expanded mount arguments are each limited to 64
-KiB. Oversized policies are rejected during volume creation before the driver
+`localOnlyPatterns` and `remoteOnlyPatterns` require an overlay profile;
+`profile: none` and `profile: interactive` are rejected when either routing
+list is non-empty. `appendLogPatterns` alone also supports those two profiles.
+The combined raw values of all three lists and their expanded mount arguments
+are each limited to 64 KiB; their JSON-encoded arguments are limited to 256 KiB.
+Oversized policies are rejected during volume creation before the driver
 accesses the PVC or creates remote volume metadata.
 
 For example, apply
@@ -365,6 +369,20 @@ arguments include:
 The equals form keeps each pattern in one argv entry. A local/remote overlap is
 valid; Drive9 applies remote-only precedence. An explicit empty VAC policy value
 clears the complete matching legacy StorageClass value.
+
+To opt into append-log, apply
+`deploy/examples/kubernetes/volumeattributesclass-append-log.example.yaml`
+and reference `drive9-append-log` from a new PVC. The example uses
+`profile: none` and emits `--append-log=data/app.db-wal` and
+`--append-log=logs/events.log`. Patterns refer to paths inside the mounted
+filesystem, not the host mountpoint or a path prefixed with `remoteRoot`.
+
+Append-log does not change local/remote routing or require a WAL filename
+suffix. A matching local-only file stays local. Drive9 decides whether a
+remote-persistent file and its writes qualify for the optimization, including
+server capability checks and fallback behavior. Empty lists emit no append-log
+flags. Changing an existing PVC's VAC remains unsupported; recreate the volume
+to apply different patterns.
 
 When `perfEnabled` is `"true"`, `NodeStageVolume` passes `--perf-dir` with a
 driver-generated path under `/var/lib/drive9-csi/perf/<volume-id>`. The driver
@@ -429,6 +447,7 @@ to empty:
 | `DRIVE9_MOUNT_GVISOR_COMPAT`             | `--gvisor-compat`                   |
 | `DRIVE9_MOUNT_LOCAL_ONLY_PATTERNS`        | Repeated `--local-only` rules       |
 | `DRIVE9_MOUNT_REMOTE_ONLY_PATTERNS`       | Repeated `--remote-only` rules      |
+| `DRIVE9_MOUNT_APPEND_LOG_PATTERNS`        | Repeated `--append-log` rules       |
 | `DRIVE9_READDIR_PREFETCH`                | `--readdir-prefetch`                |
 | `DRIVE9_READDIR_PREFETCH_MAX_FILES`      | `--readdir-prefetch-max-files`      |
 | `DRIVE9_READDIR_PREFETCH_MAX_FILE_BYTES` | `--readdir-prefetch-max-file-bytes` |

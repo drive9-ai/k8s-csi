@@ -154,6 +154,12 @@ func TestNodePreflightClassifiesEveryFailure(t *testing.T) {
 			capability: nodeCapabilityDrive9Execution,
 			reason:     `host Drive9 mount help missing required flag "--remote-only"`,
 		},
+		{
+			name:       "Drive9 append-log capability",
+			failure:    "drive9-help-missing-append-log",
+			capability: nodeCapabilityDrive9Execution,
+			reason:     `host Drive9 mount help missing required flag "--append-log"`,
+		},
 	}
 
 	for _, test := range tests {
@@ -465,6 +471,7 @@ func drive9MountHelpFixture(failure string) string {
 		{name: "gvisor-compat", failure: "drive9-help-missing-gvisor"},
 		{name: "local-only", failure: "drive9-help-missing-local-only"},
 		{name: "remote-only", failure: "drive9-help-missing-remote-only"},
+		{name: "append-log", failure: "drive9-help-missing-append-log"},
 	}
 	var help strings.Builder
 	for _, flag := range flags {

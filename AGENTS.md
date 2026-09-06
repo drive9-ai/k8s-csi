@@ -47,8 +47,8 @@ Both build stages validate target arch and static ELF contracts. The target
 runtime stage executes
 `drive9 mount --supervise-foreground --direct-mount-strict --help`; an
 incompatible CLI fails the image build. The help must expose
-`gvisor-compat`, `local-only`, `remote-only`, and the three corresponding
-`DRIVE9_MOUNT_*` environment names used by the fallback sidecar; the minimum
+`gvisor-compat`, `local-only`, `remote-only`, `append-log`, and the four
+corresponding `DRIVE9_MOUNT_*` environment names used by the fallback sidecar; the minimum
 compatible version is the first published Drive9 release containing those
 contracts, not the older `dac2d62` supervisor minimum. The runtime image does
 not contain `fuse3` and does not configure `/etc/fuse.conf`.
@@ -201,8 +201,8 @@ volume creation time:
 The external provisioner sends VolumeAttributesClass parameters through
 `CreateVolumeRequest.mutable_parameters`. Supported create-time keys are
 `profile`, `durability`, `gvisorCompat`, `localOnlyPatterns`,
-`remoteOnlyPatterns`, the three TTLs, `perfEnabled`, and the five tuning
-parameters. They override matching legacy StorageClass parameters by complete
+`remoteOnlyPatterns`, `appendLogPatterns`, the three TTLs, `perfEnabled`, and the
+five tuning parameters. They override matching legacy StorageClass parameters by complete
 value. Identity parameters such as `remoteRoot` and `remoteRootPrefix` are not
 mutable.
 
@@ -211,6 +211,15 @@ flag. The policy values contain one pattern per line; the driver trims blanks,
 deduplicates exact values in order, persists the canonical newline-delimited
 form, and emits repeated equals-form flags. Native CSI does not forward the
 matching Drive9 environment variables.
+
+`appendLogPatterns` selects remote-persistent files for Drive9's append-log
+sync optimization without changing their routing. It defaults to empty and
+emits repeated `--append-log=<pattern>` arguments when set. Unlike non-empty
+local/remote routing lists, append-log alone allows `none` and `interactive`
+profiles. All three lists share the existing raw, argv, and JSON size limits.
+The runtime image help check requires the flag and its environment variable;
+the host preflight requires the flag and uses the existing degraded capability
+handling when it is absent.
 
 The driver advertises `MODIFY_VOLUME` so external-provisioner can provision a
 PVC that references a VAC, but `ControllerModifyVolume` returns `Unimplemented`

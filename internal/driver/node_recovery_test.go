@@ -32,6 +32,7 @@ func TestDrive9MountRequestFromAttributesPassesThroughMountParameters(t *testing
 		wantGVisor       bool
 		wantLocalPolicy  []string
 		wantRemotePolicy []string
+		wantAppendLog    []string
 	}{
 		{name: "absent", attrs: map[string]string{"remoteRoot": remoteRoot}},
 		{
@@ -43,6 +44,7 @@ func TestDrive9MountRequestFromAttributesPassesThroughMountParameters(t *testing
 				paramGVisorCompat:         " true ",
 				paramLocalOnlyPatterns:    " **/.cache/**\n**/tmp/** ",
 				paramRemoteOnlyPatterns:   " **/tmp/**\n**/.tmp/** ",
+				paramAppendLogPatterns:    " data/app.db-wal\n--foreground\ndata/app.db-wal ",
 				paramWritebackBatchWindow: "20ms",
 			},
 			wantProfile:      "custom-profile",
@@ -50,6 +52,7 @@ func TestDrive9MountRequestFromAttributesPassesThroughMountParameters(t *testing
 			wantGVisor:       true,
 			wantLocalPolicy:  []string{"**/.cache/**", "**/tmp/**"},
 			wantRemotePolicy: []string{"**/tmp/**", "**/.tmp/**"},
+			wantAppendLog:    []string{"data/app.db-wal", "--foreground"},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -76,6 +79,18 @@ func TestDrive9MountRequestFromAttributesPassesThroughMountParameters(t *testing
 			}
 
 			args := d.drive9MountArgs(request, "/var/lib/drive9-csi/cache/test")
+			if !slices.Equal(request.Policy.AppendLogPatterns, test.wantAppendLog) {
+				t.Fatalf("append-log policy = %q, want %q", request.Policy.AppendLogPatterns, test.wantAppendLog)
+			}
+			var appendLogArgs []string
+			for _, arg := range args {
+				if pattern, ok := strings.CutPrefix(arg, "--append-log="); ok {
+					appendLogArgs = append(appendLogArgs, pattern)
+				}
+			}
+			if !slices.Equal(appendLogArgs, test.wantAppendLog) {
+				t.Fatalf("append-log args = %q, want %q", appendLogArgs, test.wantAppendLog)
+			}
 			gvisorArg := "--gvisor-compat=false"
 			if test.wantGVisor {
 				gvisorArg = "--gvisor-compat=true"
@@ -551,13 +566,18 @@ func TestBootRecoveryStartingResumeFetchesSecretAfterSinglePVList(t *testing.T) 
 	}
 }
 
-func TestBootRecoveryRejectsUnprovedModeWithoutMutation(t *testing.T) {
+func TestBootRecoveryRejectsUnprovedVolumeContextWithoutMutation(t *testing.T) {
 	tests := []struct {
 		name    string
 		objects func(mountState) []kruntime.Object
 		mutate  func(*mountState)
 	}{
 		{name: "missing PV", objects: func(mountState) []kruntime.Object { return nil }},
+		{name: "invalid append-log", objects: func(state mountState) []kruntime.Object {
+			return []kruntime.Object{recoveryPV(state, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, map[string]string{
+				paramAppendLogPatterns: "data/../bad",
+			})}
+		}},
 		{name: "duplicate PV", objects: func(state mountState) []kruntime.Object {
 			return []kruntime.Object{
 				recoveryPV(state, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, nil),
@@ -623,9 +643,10 @@ func TestBootRecoveryRelaunchPublishesConfiguredMountParameters(t *testing.T) {
 		gvisor       bool
 		localPolicy  []string
 		remotePolicy []string
+		appendLog    []string
 	}{
 		{name: "RWO absent", modes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}},
-		{name: "RWO explicit", modes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, durability: "custom-rwo-durability"},
+		{name: "RWO explicit", modes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}, profile: "none", durability: "custom-rwo-durability", appendLog: []string{"data/app.db-wal", "--foreground"}},
 		{
 			name:         "MNMW configured",
 			modes:        []corev1.PersistentVolumeAccessMode{corev1.ReadWriteMany},
@@ -634,6 +655,7 @@ func TestBootRecoveryRelaunchPublishesConfiguredMountParameters(t *testing.T) {
 			gvisor:       true,
 			localPolicy:  []string{"**/.cache/**", "**/tmp/**"},
 			remotePolicy: []string{"**/tmp/**", "**/.tmp/**"},
+			appendLog:    []string{"data/app.db-wal", "logs/events.log"},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -690,6 +712,9 @@ func TestBootRecoveryRelaunchPublishesConfiguredMountParameters(t *testing.T) {
 			if len(test.remotePolicy) > 0 {
 				attrs[paramRemoteOnlyPatterns] = strings.Join(test.remotePolicy, "\n")
 			}
+			if len(test.appendLog) > 0 {
+				attrs[paramAppendLogPatterns] = strings.Join(test.appendLog, "\n")
+			}
 			k8s := k8sfake.NewSimpleClientset(secret, recoveryPV(active, test.modes, attrs))
 			launch := newMountLaunchFixture(t, "")
 			launch.attemptNumber = 1
@@ -733,6 +758,15 @@ func TestBootRecoveryRelaunchPublishesConfiguredMountParameters(t *testing.T) {
 				t.Fatalf("boot relaunch systemd-run count = %d, want 1", runs)
 			}
 			wantArgsBody := encodeNULTerminated(append([]string{launch.drive9Path}, recovered.MountArgs...))
+			var appendLogArgs []string
+			for _, arg := range recovered.MountArgs {
+				if pattern, ok := strings.CutPrefix(arg, "--append-log="); ok {
+					appendLogArgs = append(appendLogArgs, pattern)
+				}
+			}
+			if !slices.Equal(appendLogArgs, test.appendLog) {
+				t.Fatalf("recovered append-log args = %q, want %q", appendLogArgs, test.appendLog)
+			}
 			if got := launch.publishedBody(t, ".args."); string(got) != string(wantArgsBody) {
 				t.Fatalf("published recovery argv = %q, want %q", got, wantArgsBody)
 			}

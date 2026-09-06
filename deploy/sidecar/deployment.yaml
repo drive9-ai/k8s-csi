@@ -156,6 +156,8 @@ spec:
               value: ""
             - name: DRIVE9_MOUNT_REMOTE_ONLY_PATTERNS
               value: ""
+            - name: DRIVE9_MOUNT_APPEND_LOG_PATTERNS
+              value: ""
             - name: DRIVE9_ATTR_TTL
               value: 30s
             - name: DRIVE9_ENTRY_TTL

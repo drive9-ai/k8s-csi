@@ -110,6 +110,7 @@ func TestDrive9MountArgsIncludesPerVolumeCompatibilityAndPathPolicy(t *testing.T
 		Policy: mountPathPolicy{
 			LocalOnlyPatterns:  []string{"**/.cache/**", "--foreground"},
 			RemoteOnlyPatterns: []string{"**/tmp/**", "**/.tmp/**"},
+			AppendLogPatterns:  []string{"data/app.db-wal", "--foreground", "logs/event = 1.log"},
 		},
 	}, cacheDir)
 
@@ -130,6 +131,9 @@ func TestDrive9MountArgsIncludesPerVolumeCompatibilityAndPathPolicy(t *testing.T
 		"--local-only=--foreground",
 		"--remote-only=**/tmp/**",
 		"--remote-only=**/.tmp/**",
+		"--append-log=data/app.db-wal",
+		"--append-log=--foreground",
+		"--append-log=logs/event = 1.log",
 		":/",
 		"/stage",
 	}
