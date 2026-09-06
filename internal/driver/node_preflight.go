@@ -391,6 +391,7 @@ func checkHostDrive9Execution(ctx context.Context, runtime hostRuntime, drive9Pa
 		"gvisor-compat",
 		"local-only",
 		"remote-only",
+		"append-log",
 	} {
 		if !drive9MountHelpContainsFlag(result, name) {
 			return fmt.Sprintf("host Drive9 mount help missing required flag %q", "--"+name)

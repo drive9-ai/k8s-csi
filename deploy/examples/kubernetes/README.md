@@ -156,6 +156,7 @@ resources:
 | `storageclass.example.yaml` | Default workspace-root provisioning policy |
 | `volumeattributesclass.example.yaml` | Optional tuned mount profile |
 | `volumeattributesclass-path-policy.example.yaml` | Per-volume gVisor compatibility and local/remote path-policy overrides |
+| `volumeattributesclass-append-log.example.yaml` | Opt-in append-log sync optimization for selected remote-persistent files |
 | `pvc.example.yaml` | PVC that binds the Secret and tuned VolumeAttributesClass |
 | `pod.example.yaml` | Single-Pod read/write smoke workload |
 
@@ -173,6 +174,15 @@ the workload needs gVisor-compatible directory enumeration and remote-persistent
 `tmp` paths. Native CSI users configure these options through a
 VolumeAttributesClass; they do not patch the CSI Node environment. The
 `remoteOnlyPatterns` list wins over overlapping profile or local-only rules.
+
+For append-log optimization, apply
+`deploy/examples/kubernetes/volumeattributesclass-append-log.example.yaml`
+and set `spec.volumeAttributesClassName: drive9-append-log` on a new PVC.
+This example uses `profile: none` with `appendLogPatterns` matching
+`data/app.db-wal` and `logs/events.log` inside the mounted filesystem. Each
+line becomes one `--append-log=<pattern>` argument. The list is empty by
+default and does not change local/remote routing. Drive9 determines whether
+the file, write operation, and server qualify for the optimization.
 
 Use these files when testing one resource at a time or integrating the PVC into
 an existing namespace. Use `shared-pvc.example.yaml` when the goal is a complete

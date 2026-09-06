@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -172,7 +173,10 @@ func TestReconcileStartingDesignRows(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newStartingReconcileFixture(t)
+			fixture.state.MountArgs = append(fixture.state.MountArgs[:len(fixture.state.MountArgs)-2],
+				"--append-log=data/app.db-wal", "--append-log=--foreground", ":"+fixture.state.RemoteRoot, fixture.state.StagingTarget)
 			test.configure(fixture)
+			fixture.states.states = []mountState{fixture.state}
 			fixture.installCallbacks()
 
 			result, err := fixture.reconciler.Reconcile(
@@ -201,6 +205,9 @@ func TestReconcileStartingDesignRows(t *testing.T) {
 				}
 				if test.wantFallback && states[len(states)-1].BinaryPath != fixture.fallbackBinary {
 					t.Fatalf("active binary = %q, want fallback %q", states[len(states)-1].BinaryPath, fixture.fallbackBinary)
+				}
+				if !slices.Equal(states[len(states)-1].MountArgs, fixture.state.MountArgs) {
+					t.Fatalf("reconciliation changed saved argv: %q", states[len(states)-1].MountArgs)
 				}
 			}
 			if runs := countMountSystemdRuns(fixture.runtime.Calls()); runs != test.wantRuns {
