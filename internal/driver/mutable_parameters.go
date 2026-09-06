@@ -22,6 +22,7 @@ var supportedMutableMountParameters = map[string]struct{}{
 	paramGVisorCompat:                {},
 	paramLocalOnlyPatterns:           {},
 	paramRemoteOnlyPatterns:          {},
+	paramAppendLogPatterns:           {},
 	paramReaddirPrefetch:             {},
 	paramReaddirPrefetchMaxFiles:     {},
 	paramReaddirPrefetchMaxFileBytes: {},

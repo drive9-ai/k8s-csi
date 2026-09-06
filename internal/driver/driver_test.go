@@ -962,6 +962,115 @@ func TestCreateVolumeOptionalDurability(t *testing.T) {
 	}
 }
 
+func TestNodeStageVolumeRejectsAppendLogBeforeHostAccess(t *testing.T) {
+	for _, raw := range []string{"data/../bad", strings.Repeat("a", 1<<20)} {
+		runtime := &fakeHostRuntime{}
+		k8s := k8sfake.NewSimpleClientset()
+		d := &Driver{nodeRuntime: runtime, k8s: k8s}
+		_, err := d.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+			VolumeId:          volumeIDForWorkspaceRoot("append-log", "/"),
+			StagingTargetPath: t.TempDir(),
+			VolumeCapability:  singleNodeMountCapability(),
+			VolumeContext: map[string]string{
+				"volumeName": "append-log", "remoteRoot": "/",
+				paramAppendLogPatterns: raw,
+			},
+		})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("NodeStageVolume status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+		}
+		if len(runtime.Calls()) != 0 || len(k8s.Actions()) != 0 {
+			t.Fatalf("invalid append-log accessed host or Kubernetes: %v / %v", runtime.Calls(), k8s.Actions())
+		}
+	}
+}
+
+func TestCreateVolumeAppendLogParameters(t *testing.T) {
+	for _, managed := range []bool{false, true} {
+		for _, test := range []struct {
+			name    string
+			profile string
+			legacy  string
+			mutable map[string]string
+			want    string
+		}{
+			{name: "absent"},
+			{name: "SC none", profile: "none", legacy: " data/app.db-wal \r\n\nlogs/events.log\ndata/app.db-wal ", want: "data/app.db-wal\nlogs/events.log"},
+			{name: "SC interactive", profile: "interactive", legacy: "logs/events.log", want: "logs/events.log"},
+			{name: "VAC default", mutable: map[string]string{"appendLogPatterns": "data/app.db-wal"}, want: "data/app.db-wal"},
+			{name: "VAC replaces", profile: "coding-agent", legacy: "legacy.log", mutable: map[string]string{"appendLogPatterns": "new.log\nnew.log"}, want: "new.log"},
+			{name: "VAC clears", legacy: "legacy.log", mutable: map[string]string{"appendLogPatterns": ""}},
+			{name: "VAC whitespace clears", legacy: "legacy.log", mutable: map[string]string{"appendLogPatterns": " \r\n\t"}},
+		} {
+			t.Run(fmt.Sprintf("managed=%t/%s", managed, test.name), func(t *testing.T) {
+				fd := newFakeDrive9(t)
+				defer fd.close()
+				k8s := k8sfake.NewSimpleClientset(
+					fd.k8sPVC("pvc-append-log", "default", "drive9-secret"),
+					fd.k8sSecret("drive9-secret", "default"),
+				)
+				d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+				params := map[string]string{paramProfile: test.profile}
+				if test.legacy != "" {
+					params["appendLogPatterns"] = test.legacy
+				}
+				if managed {
+					params["remoteRootPrefix"] = "/k8s/pvc"
+				}
+				resp, err := d.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+					Name:               "pvc-append-log",
+					Parameters:         pvcParams("pvc-append-log", "default", params),
+					MutableParameters:  test.mutable,
+					VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+				})
+				if status.Code(err) != codes.OK {
+					t.Fatalf("CreateVolume status = %s, want OK (err=%v)", status.Code(err), err)
+				}
+				attrs := resp.GetVolume().GetVolumeContext()
+				got, present := attrs["appendLogPatterns"]
+				if got != test.want || present != (test.want != "") {
+					t.Fatalf("appendLogPatterns = %q (present=%t), want %q", got, present, test.want)
+				}
+				wantID := volumeIDForWorkspaceRoot("pvc-append-log", attrs["remoteRoot"])
+				if managed {
+					wantID = volumeIDForRemoteRoot(attrs["remoteRoot"])
+				}
+				if resp.GetVolume().GetVolumeId() != wantID {
+					t.Fatalf("volume ID = %q, want %q", resp.GetVolume().GetVolumeId(), wantID)
+				}
+			})
+		}
+	}
+}
+
+func TestCreateVolumeRejectsAppendLogBeforePVCResolution(t *testing.T) {
+	for _, mutable := range []bool{false, true} {
+		for _, raw := range []string{"valid\nsecret/../bad", strings.Repeat("a", 1<<20)} {
+			t.Run(fmt.Sprintf("mutable=%t/bytes=%d", mutable, len(raw)), func(t *testing.T) {
+				k8s := k8sfake.NewSimpleClientset()
+				d := &Driver{cfg: Config{DriverName: "csi.drive9.ai"}, k8s: k8s}
+				req := &csi.CreateVolumeRequest{
+					Name:               "invalid-append-log",
+					Parameters:         pvcParams("missing", "default", nil),
+					VolumeCapabilities: []*csi.VolumeCapability{singleNodeMountCapability()},
+				}
+				if mutable {
+					req.MutableParameters = map[string]string{"appendLogPatterns": raw}
+				} else {
+					req.Parameters["appendLogPatterns"] = raw
+				}
+				_, err := d.CreateVolume(context.Background(), req)
+				if status.Code(err) != codes.InvalidArgument {
+					t.Fatalf("CreateVolume status = %s, want InvalidArgument (err=%v)", status.Code(err), err)
+				}
+				if len(k8s.Actions()) != 0 {
+					t.Fatalf("CreateVolume accessed Kubernetes before rejecting append-log: %v", k8s.Actions())
+				}
+			})
+		}
+	}
+}
+
 func TestCreateVolumeStoresMutableMountParameters(t *testing.T) {
 	fd := newFakeDrive9(t)
 	defer fd.close()
@@ -2325,6 +2434,7 @@ func TestControllerModifyVolumeAcceptsPerVolumeMountOptionsButRemainsUnimplement
 			paramGVisorCompat:       "true",
 			paramLocalOnlyPatterns:  "**/.cache/**",
 			paramRemoteOnlyPatterns: "**/tmp/**",
+			paramAppendLogPatterns:  "data/app.db-wal",
 		},
 	})
 	if status.Code(err) != codes.Unimplemented {
@@ -2337,6 +2447,7 @@ func TestControllerModifyVolumeRejectsInvalidPerVolumeMountOptions(t *testing.T)
 	for _, mutable := range []map[string]string{
 		{paramGVisorCompat: "TRUE"},
 		{paramLocalOnlyPatterns: "**/../bad/**"},
+		{paramAppendLogPatterns: "**/../bad/**"},
 	} {
 		_, err := d.ControllerModifyVolume(context.Background(), &csi.ControllerModifyVolumeRequest{
 			VolumeId:          "drive9-root-demo",

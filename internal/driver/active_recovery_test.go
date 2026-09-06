@@ -166,9 +166,11 @@ func TestRecoverActiveHealthyDesiredMismatchDoesNotRestart(t *testing.T) {
 
 func TestRecoverActiveCreatesDesiredFirstCandidateWithExactFallback(t *testing.T) {
 	active := validActiveState(t)
+	active.MountArgs = append(active.MountArgs[:len(active.MountArgs)-2], "--append-log=old.log", ":"+active.RemoteRoot, active.StagingTarget)
 	desiredBinary := "/var/lib/drive9-csi/bin/drive9-" + strings.Repeat("b", 64)
 	desiredArgs := append([]string(nil), active.MountArgs...)
 	desiredArgs[5] = "https://new-api.drive9.ai"
+	desiredArgs[len(desiredArgs)-3] = "--append-log=new.log"
 	candidate, err := newActiveRecoveryCandidate(
 		active,
 		desiredBinary,
@@ -301,9 +303,11 @@ func TestRecoverActiveCleanupFailureBlocksCandidate(t *testing.T) {
 
 func TestRecoverActiveDesiredFailureCleansBeforeFallback(t *testing.T) {
 	active := validActiveState(t)
+	active.MountArgs = append(active.MountArgs[:len(active.MountArgs)-2], "--append-log=old.log", ":"+active.RemoteRoot, active.StagingTarget)
 	desiredBinary := "/var/lib/drive9-csi/bin/drive9-" + strings.Repeat("b", 64)
 	desiredArgs := append([]string(nil), active.MountArgs...)
 	desiredArgs[5] = "https://new-api.drive9.ai"
+	desiredArgs[len(desiredArgs)-3] = "--append-log=new.log"
 	events := []string{}
 	var started []mountState
 	executor := activeRecoveryFactoryExecutor{

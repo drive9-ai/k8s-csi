@@ -53,7 +53,7 @@ func checkTextContracts() {
 				"remoteRootPrefix:", "remoteRoot:", "profile:",
 				"attrTTL:", "entryTTL:", "dirTTL:",
 				"perfEnabled:", "gvisorCompat:",
-				"localOnlyPatterns:", "remoteOnlyPatterns:",
+				"localOnlyPatterns:", "remoteOnlyPatterns:", "appendLogPatterns:",
 				"readdirPrefetch:",
 				"readdirPrefetchMaxFiles:",
 				"readdirPrefetchMaxFileBytes:",
@@ -71,7 +71,7 @@ func checkTextContracts() {
 			},
 			forbidden: []string{
 				"durability:",
-				"localOnlyPatterns:", "remoteOnlyPatterns:",
+				"localOnlyPatterns:", "remoteOnlyPatterns:", "appendLogPatterns:",
 				"readdirPrefetch:", "readdirPrefetchMaxFiles:",
 				"readdirPrefetchMaxFileBytes:",
 				"readdirPrefetchMaxBytes:", "writebackBatchWindow:",
@@ -88,7 +88,7 @@ func checkTextContracts() {
 			},
 			forbidden: []string{
 				"apiKey", "server:", "secret", "profile:", "durability:",
-				"gvisorCompat:", "localOnlyPatterns:", "remoteOnlyPatterns:",
+				"gvisorCompat:", "localOnlyPatterns:", "remoteOnlyPatterns:", "appendLogPatterns:",
 			},
 		},
 		{
@@ -98,7 +98,7 @@ func checkTextContracts() {
 				"storageclass-rwx.yaml",
 			},
 			forbidden: []string{
-				"volumeattributesclass-rwx.yaml",
+				"volumeattributesclass-rwx.yaml", "volumeattributesclass-append-log.example.yaml",
 				"secret.example.yaml", "shared-pvc.example.yaml",
 			},
 		},
@@ -123,6 +123,7 @@ func checkTextContracts() {
 				"DRIVE9_MOUNT_GVISOR_COMPAT",
 				"DRIVE9_MOUNT_LOCAL_ONLY_PATTERNS",
 				"DRIVE9_MOUNT_REMOTE_ONLY_PATTERNS",
+				"- name: DRIVE9_MOUNT_APPEND_LOG_PATTERNS\n              value: \"\"",
 				"set -- --perf-dir /perf", "mountPath: /perf",
 				"path: /var/lib/drive9-sidecar/demo/perf",
 				"value: \"false\"", "DRIVE9_READDIR_PREFETCH",
@@ -152,7 +153,7 @@ func checkTextContracts() {
 				"--recover-node-mounts=enabled",
 				"terminationGracePeriodSeconds: 120",
 			},
-			forbidden: []string{"--fusermount-source"},
+			forbidden: []string{"--fusermount-source", "DRIVE9_MOUNT_APPEND_LOG_PATTERNS"},
 		},
 		{
 			path: "Dockerfile",
@@ -163,9 +164,11 @@ func checkTextContracts() {
 				"grep -F -- '-gvisor-compat'",
 				"grep -F -- '-local-only '",
 				"grep -F -- '-remote-only '",
+				"grep -F -- '-append-log '",
 				"grep -F -- 'DRIVE9_MOUNT_GVISOR_COMPAT'",
 				"grep -F -- 'DRIVE9_MOUNT_LOCAL_ONLY_PATTERNS'",
 				"grep -F -- 'DRIVE9_MOUNT_REMOTE_ONLY_PATTERNS'",
+				"grep -F -- 'DRIVE9_MOUNT_APPEND_LOG_PATTERNS'",
 				"grep -F -- '-profile '", "grep -F -- '-durability '",
 				"COPY hack/drive9-csi-upload-perf.sh ",
 				"/usr/local/bin/drive9-csi-upload-perf",
@@ -205,6 +208,16 @@ func checkTextContracts() {
 			forbidden: []string{"apiKey", "server:"},
 		},
 		{
+			path: "deploy/examples/kubernetes/volumeattributesclass-append-log.example.yaml",
+			required: []string{
+				"apiVersion: storage.k8s.io/v1", "kind: VolumeAttributesClass",
+				"  name: drive9-append-log", "driverName: csi.drive9.ai",
+				"  profile: none", "  appendLogPatterns: |-",
+				"    data/app.db-wal", "    logs/events.log",
+			},
+			forbidden: []string{"apiKey", "server:", "localOnlyPatterns:", "remoteOnlyPatterns:", "durability:"},
+		},
+		{
 			path: "deploy/examples/kubernetes/volumeattributesclass.example.yaml",
 			required: []string{
 				"kind: VolumeAttributesClass",
@@ -213,7 +226,7 @@ func checkTextContracts() {
 				"  gvisorCompat: \"false\"",
 			},
 			forbidden: []string{
-				"localOnlyPatterns:", "remoteOnlyPatterns:",
+				"localOnlyPatterns:", "remoteOnlyPatterns:", "appendLogPatterns:",
 			},
 		},
 		{
@@ -249,6 +262,7 @@ func checkTextContracts() {
 			required: []string{
 				"shared-pvc.example.yaml",
 				"volumeattributesclass-path-policy.example.yaml",
+				"volumeattributesclass-append-log.example.yaml", "drive9-append-log",
 				"drive9-gvisor-persistent-tmp",
 				"kubectl apply -k deploy/overlays/local",
 				"kubectl apply -f deploy/examples/kubernetes/shared-pvc.example.yaml",

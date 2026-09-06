@@ -13,6 +13,7 @@ import (
 const (
 	paramLocalOnlyPatterns          = "localOnlyPatterns"
 	paramRemoteOnlyPatterns         = "remoteOnlyPatterns"
+	paramAppendLogPatterns          = "appendLogPatterns"
 	maxMountPathPolicyArgumentBytes = 64 << 10
 	maxMountPathPolicyStateBytes    = maxMountStateLength / 4
 )
@@ -20,10 +21,11 @@ const (
 type mountPathPolicy struct {
 	LocalOnlyPatterns  []string
 	RemoteOnlyPatterns []string
+	AppendLogPatterns  []string
 }
 
 func effectiveMountPathPolicy(values map[string]string) (mountPathPolicy, error) {
-	if len(values[paramLocalOnlyPatterns])+len(values[paramRemoteOnlyPatterns]) > maxMountPathPolicyArgumentBytes {
+	if len(values[paramLocalOnlyPatterns])+len(values[paramRemoteOnlyPatterns])+len(values[paramAppendLogPatterns]) > maxMountPathPolicyArgumentBytes {
 		return mountPathPolicy{}, status.Error(codes.InvalidArgument, "mount path policy is too large")
 	}
 	local, err := normalizeMountPolicyParameter(
@@ -42,9 +44,18 @@ func effectiveMountPathPolicy(values map[string]string) (mountPathPolicy, error)
 	if err != nil {
 		return mountPathPolicy{}, err
 	}
+	appendLog, err := normalizeMountPolicyParameter(
+		paramAppendLogPatterns,
+		"--append-log=",
+		values[paramAppendLogPatterns],
+	)
+	if err != nil {
+		return mountPathPolicy{}, err
+	}
 	policy := mountPathPolicy{
 		LocalOnlyPatterns:  local,
 		RemoteOnlyPatterns: remote,
+		AppendLogPatterns:  appendLog,
 	}
 	if err := validateMountPathPolicyContract(profileFromParameters(values), policy); err != nil {
 		return mountPathPolicy{}, err
@@ -53,14 +64,15 @@ func effectiveMountPathPolicy(values map[string]string) (mountPathPolicy, error)
 }
 
 func validateMountPathPolicyContract(profile string, policy mountPathPolicy) error {
-	if len(policy.LocalOnlyPatterns) == 0 && len(policy.RemoteOnlyPatterns) == 0 {
+	routingPatterns := len(policy.LocalOnlyPatterns) + len(policy.RemoteOnlyPatterns)
+	if routingPatterns == 0 && len(policy.AppendLogPatterns) == 0 {
 		return nil
 	}
-	if profile == "none" || profile == "interactive" {
+	if routingPatterns > 0 && (profile == "none" || profile == "interactive") {
 		return status.Errorf(codes.InvalidArgument, "mount path policy requires an overlay profile; profile %q is not supported", profile)
 	}
 
-	args := make([]string, 0, len(policy.LocalOnlyPatterns)+len(policy.RemoteOnlyPatterns))
+	args := make([]string, 0, routingPatterns+len(policy.AppendLogPatterns))
 	encodedLength := 0
 	for _, pattern := range policy.LocalOnlyPatterns {
 		arg := "--local-only=" + pattern
@@ -69,6 +81,11 @@ func validateMountPathPolicyContract(profile string, policy mountPathPolicy) err
 	}
 	for _, pattern := range policy.RemoteOnlyPatterns {
 		arg := "--remote-only=" + pattern
+		args = append(args, arg)
+		encodedLength += len(arg) + 1
+	}
+	for _, pattern := range policy.AppendLogPatterns {
+		arg := "--append-log=" + pattern
 		args = append(args, arg)
 		encodedLength += len(arg) + 1
 	}
@@ -139,5 +156,8 @@ func (m mountPathPolicy) addToVolumeContext(ctx map[string]string) {
 	}
 	if len(m.RemoteOnlyPatterns) > 0 {
 		ctx[paramRemoteOnlyPatterns] = strings.Join(m.RemoteOnlyPatterns, "\n")
+	}
+	if len(m.AppendLogPatterns) > 0 {
+		ctx[paramAppendLogPatterns] = strings.Join(m.AppendLogPatterns, "\n")
 	}
 }
