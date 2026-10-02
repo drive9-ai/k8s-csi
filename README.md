@@ -97,155 +97,97 @@ the volume prefix, for example `/k8s/pvc`, and the metadata index path
 
 ## Install
 
-The checked-in Kubernetes manifests are a fail-closed base. Their CSI image is
-`registry.invalid/drive9-csi:unpublished`, so applying the base cannot silently
-run an older, incompatible driver. The manually triggered validation-image
-workflow resolves the latest complete Drive9 CLI release, builds and pushes the
-image, then reports its trace tag, manifest-list digest, and immutable reference
-in the workflow summary. It does not generate deployment manifests. Each target
-architecture must execute
-`drive9 mount --supervise-foreground --direct-mount-strict --help`
-successfully during the image build, and its help must expose
-`--gvisor-compat`, `--local-only`, `--remote-only`, and the corresponding
-`DRIVE9_MOUNT_*` environment names used by the fallback sidecar. The minimum
-compatible version is the first published Drive9 release containing those
-contracts; do not use the older `dac2d62` minimum for this driver version. The
-runtime image installs neither `fuse3` nor an `/etc/fuse.conf` dependency.
-Non-production validation must inject
-that immutable reference through a local, environment-specific overlay.
+This quickstart installs the CSI driver and creates a Drive9-backed PVC. Mount
+the claim in your sandbox Pod as a regular volume; an existing PVC is not
+rebound in place, and the application does not need Drive9-specific code.
 
-Validation images have a traceable tag:
+Before you begin, use Kubernetes 1.34 or later; this quickstart uses the stable
+[`VolumeAttributesClass`](https://kubernetes.io/docs/concepts/storage/volume-attributes-classes/)
+API. Your Kubernetes context must be able to create cluster-scoped resources
+and privileged workloads. Linux worker nodes must allow the CSI DaemonSet to
+use `SYS_ADMIN`, `/dev/fuse`, host mount propagation, and host systemd. Have
+your Drive9 server URL and API key ready.
 
-```text
-ghcr.io/drive9-ai/drive9-csi:drive9-<drive9-short-sha>-csi-<csi-short-sha>
-```
+### 1. Install the CSI driver
 
-The publish workflow does not publish `:latest` or `0.1.0`. Use a traceable tag
-or a digest.
-
-A manually published image is validation-only and is not release-admitted. Do
-not promote it to production until the N/N-1 bidirectional cache/writeback
-compatibility gate in the mount-survival design has landed and passed.
-
-To build a validation image with the latest published Drive9 CLI:
+From the repository root, apply the image-pinned overlay and wait for both CSI
+components:
 
 ```sh
-gh workflow run publish-image.yml \
-  -R drive9-ai/k8s-csi \
-  --ref <csi-branch>
+kubectl apply -k deploy/overlays/quickstart
+kubectl -n drive9-csi rollout status deployment/drive9-csi-controller --timeout=180s
+kubectl -n drive9-csi rollout status daemonset/drive9-csi-node --timeout=180s
 ```
 
-To build a local image using the Dockerfile's public-release downloader:
+The overlay uses `ghcr.io/drive9-ai/drive9-csi:drive9-0f0f301-csi-b631ef5`.
+The base manifests contain a placeholder image; use the overlay instead of
+applying `deploy/kubernetes` directly.
 
-```sh
-make image \
-  IMAGE=ghcr.io/drive9-ai/drive9-csi:local
-```
+### 2. Create the Drive9 Secret
 
-Install that preloaded local image with the local overlay:
+Make `DRIVE9_API_KEY` available to your shell through your secret-management
+workflow. The commands below use the `default` namespace; replace it with your
+sandbox namespace and keep the Secret and PVC in the same namespace.
 
-```sh
-kubectl apply -k deploy/overlays/local
-```
-
-For a published validation image, read the immutable reference from the workflow
-summary and use it only in a non-production validation overlay. The tag or
-digest is traceability evidence, not release-admission evidence. Do not apply
-the fail-closed base directly.
-
-Create a Drive9 Secret in the workload namespace before creating each PVC:
+Create the Secret:
 
 ```sh
 kubectl -n default create secret generic drive9-workspace-secret \
   --from-literal=server=https://api.drive9.ai \
-  --from-literal=apiKey=drive9_api_key_redacted \
+  --from-literal=apiKey="$DRIVE9_API_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Create a PVC with the `drive9.ai/secret-name` annotation pointing to the Secret:
+Replace the server URL if you use a different Drive9 endpoint. The example PVC
+references this Secret with the `drive9.ai/secret-name` annotation.
+
+### 3. Create and verify a PVC
+
+Apply the example VolumeAttributesClass and PVC, then start the smoke-test Pod:
 
 ```sh
 kubectl apply -f deploy/examples/kubernetes/volumeattributesclass.example.yaml
 kubectl -n default apply -f deploy/examples/kubernetes/pvc.example.yaml
-```
-
-Because the default `StorageClass` uses `WaitForFirstConsumer`, a PVC can remain
-`Pending` until the first Pod uses it.
-
-Mount the PVC in a normal workload Pod:
-
-```sh
 kubectl -n default apply -f deploy/examples/kubernetes/pod.example.yaml
-kubectl -n default wait --for=condition=Ready \
-  pod/drive9-workspace-smoke --timeout=180s
-kubectl -n default logs drive9-workspace-smoke
+kubectl -n default wait --for=condition=Ready pod/drive9-workspace-smoke --timeout=180s
 kubectl -n default exec drive9-workspace-smoke -- cat /workspace/hello.txt
 ```
 
-Expected output:
+The expected output is `hello-drive9`. The PVC may remain `Pending` until the
+Pod is scheduled because the StorageClass uses `WaitForFirstConsumer`.
 
-```text
-hello-drive9
-```
+### 4. Mount the PVC in your sandbox
 
-The shared-PVC example is a single-file application bundle containing its own
-Namespace, StorageClass, Secret, PVC, writer Deployment, and two writer
-replicas. Replace `replace-with-drive9-api-key` in the file, then apply it once:
-
-```sh
-kubectl apply -f deploy/examples/kubernetes/shared-pvc.example.yaml
-kubectl -n drive9-shared-pvc-example rollout status \
-  deployment/drive9-workspace-writer --timeout=180s
-kubectl -n drive9-shared-pvc-example exec \
-  deployment/drive9-workspace-writer -- ls -1 /workspace
-```
-
-Both writer replicas update a file named after their Pod every five seconds.
-Kubernetes may place the replicas on the same node or different nodes. The PVC
-uses `ReadWriteMany` without RWX-specific mount-parameter defaults; visibility
-semantics follow the Drive9 arguments configured by the user. See
-`deploy/examples/kubernetes/README.md` for the scenario, resource roles,
-credential flow, verification steps, consistency limits, and retention
-behavior.
-
-RWX does not provide distributed file locks.
-It does not merge concurrent writes to the same file. Applications that require
-those semantics must supply their own coordination.
-
-Use the PVC from application Pods the same way:
+Add the PVC to the sandbox Pod spec and choose the mount path your workload
+expects:
 
 ```yaml
-volumeMounts:
-  - name: workspace
-    mountPath: /workspace
-volumes:
-  - name: workspace
-    persistentVolumeClaim:
-      claimName: drive9-workspace
+spec:
+  containers:
+    - name: sandbox
+      volumeMounts:
+        - name: drive9-workspace
+          mountPath: /workspace
+  volumes:
+    - name: drive9-workspace
+      persistentVolumeClaim:
+        claimName: drive9-workspace-tuned
 ```
 
-Clean up the examples:
+For a shared `ReadWriteMany` example, see
+[`shared-pvc.example.yaml`](deploy/examples/kubernetes/shared-pvc.example.yaml).
+RWX does not provide distributed file locks.
+It does not merge concurrent writes to the same file.
+
+### Clean up the smoke test
 
 ```sh
-kubectl -n default delete pod drive9-workspace-smoke
-kubectl -n default delete pvc drive9-workspace-tuned
+kubectl -n default delete pod/drive9-workspace-smoke pvc/drive9-workspace-tuned secret/drive9-workspace-secret
 kubectl delete -f deploy/examples/kubernetes/volumeattributesclass.example.yaml
-kubectl delete -f deploy/examples/kubernetes/shared-pvc.example.yaml
 ```
 
-The default example `StorageClass` uses `Retain`, so deleting the PVC keeps the
-PV and Drive9 workspace data for safety. Even with `reclaimPolicy: Delete`, the
-default workspace-root mode does not delete Drive9 workspace data.
-
-Example StorageClass, VolumeAttributesClass, Secret, PVC, and workload manifests
-live under `deploy/examples/kubernetes/` so that applying `deploy/kubernetes/`
-does not create placeholder credentials or demo workloads in production
-clusters.
-Apply the example Secret with
-`kubectl -n <workload-namespace> apply -f deploy/examples/kubernetes/secret.example.yaml`
-after replacing the API key. Each PVC references its Secret via the
-`drive9.ai/secret-name` annotation — multiple PVCs can share a Secret or use
-different ones.
+The example StorageClass uses `Retain`, so deleting the PVC keeps the PV and
+Drive9 workspace data.
 
 ## StorageClass and VolumeAttributesClass
 
