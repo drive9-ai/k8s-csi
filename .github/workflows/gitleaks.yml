@@ -44,7 +44,10 @@ env:
 
 jobs:
   gitleaks:
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: a gate that decides whether a merge is safe
+    # should not change underneath itself when GitHub moves the floating label.
+    # Matches the runner image used by publish-image.yml.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Checkout the PR head (read only, never executed)
