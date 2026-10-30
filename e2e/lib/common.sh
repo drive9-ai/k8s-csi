@@ -339,12 +339,16 @@ e2e_require_prepared_driver() {
 	local installer_image
 	local node_jsonpath
 	local node_image
+	local preparer_image
+	local preparer_jsonpath
 
 	controller_jsonpath='jsonpath={.spec.template.spec.containers'
 	controller_jsonpath+='[?(@.name=="drive9-csi")].image}'
 	node_jsonpath="$controller_jsonpath"
 	installer_jsonpath='jsonpath={.spec.template.spec.initContainers'
 	installer_jsonpath+='[?(@.name=="install-host-binaries")].image}'
+	preparer_jsonpath='jsonpath={.spec.template.spec.initContainers'
+	preparer_jsonpath+='[?(@.name=="prepare-cos-exec")].image}'
 
 	e2e_ensure_present namespace "$driver_namespace"
 	e2e_ensure_present csidriver csi.drive9.ai
@@ -381,6 +385,14 @@ e2e_require_prepared_driver() {
 	if [[ "$controller_image" != "$node_image" ||
 		"$controller_image" != "$installer_image" ]]; then
 		e2e_fail "prepared Drive9 CSI containers use different images"
+	fi
+	preparer_image=$(kube_retry -n "$driver_namespace" get \
+		daemonset drive9-csi-node -o "$preparer_jsonpath") ||
+		e2e_fail "read prepared COS exec image"
+	if [[ -n "$preparer_image" ]]; then
+		e2e_require_validation_image "prepared COS exec image" "$preparer_image"
+		[[ "$preparer_image" == "$controller_image" ]] ||
+			e2e_fail "prepared Drive9 CSI containers use different images"
 	fi
 	if [[ -n "$expected_image" && "$controller_image" != "$expected_image" ]]; then
 		e2e_fail "prepared Driver image does not match DRIVE9_CSI_IMAGE"

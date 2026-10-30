@@ -153,6 +153,79 @@ summary and use it only in a non-production validation overlay. The tag or
 digest is traceability evidence, not release-admission evidence. Do not apply
 the fail-closed base directly.
 
+### GKE Container-Optimized OS
+
+COS normally mounts `/var` with `noexec`. The opt-in
+`deploy/overlays/gke-cos` overlay adds `prepare-cos-exec` before the host binary
+installer. Its script is packaged at
+`/usr/local/bin/drive9-csi-prepare-cos-exec` in the CSI image; users do not need
+to write host mount commands. The script enters the host mount namespace and
+root, then prepares only `/var/lib/drive9-csi/bin` as an executable self-bind
+with `nosuid,nodev`. It keeps the parent mount policy and existing binary paths.
+An already executable parent needs no new mount. Repeated preparation reuses
+the same verified bind; unexpected mounts or unsafe directories fail closed.
+
+This explicitly grants execution to the root-owned binary directory. The base
+deployment does not enable it or detect the cloud provider. Host Bash, `mount`,
+and GNU-compatible `stat` must be available. The script reads its host body
+from stdin, so its image path need not exist on the host. Do not remove the
+bind on CSI Pod exit: existing services and recovery still need it. Node reboot
+removes the bind, and the init container recreates it before installation.
+
+The COS overlay also retains the fail-closed image placeholder. Create an
+environment-specific overlay, for example `deploy/overlays/gke-dev`, with:
+
+```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../gke-cos
+images:
+  - name: registry.invalid/drive9-csi
+    newName: ghcr.io/drive9-ai/drive9-csi
+    digest: sha256:<published-validation-image-digest>
+```
+
+Select a validation image containing this fix and apply that environment
+overlay with an explicit GKE context. One image override updates preparation,
+installer, node, and controller together. Do not apply the bare COS overlay as
+a runnable installation or use a pre-fix image with this preparation command.
+
+GKE may require a namespace ResourceQuota matching `system-node-critical`
+before admitting the node DaemonSet. Keep its existing priority and provide the
+quota as environment configuration. A scope-only quota permits that priority
+without imposing a fixed DaemonSet Pod count:
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: drive9-csi-node-critical
+  namespace: drive9-csi
+spec:
+  scopeSelector:
+    matchExpressions:
+      - scopeName: PriorityClass
+        operator: In
+        values: [system-node-critical]
+```
+
+The Go preflight resolves `test` through host PATH `/usr/bin:/bin`, covering
+COS's `/usr/bin/test` layout. Failed probes retain exit status and bounded
+stderr; they continue to block new mounts.
+Host mount processes receive an explicit `HOME=/var/lib/drive9-csi` so CLI
+default-profile paths do not depend on container homes or a host `getent`
+command. Existing per-volume cache and explicit local-root arguments remain.
+
+`make manifest-check` requires `kustomize` and renders the COS overlay and an
+image override. `make script-check` checks the preparation logic without
+changing host mounts. Local checks do not establish COS support: authenticated
+mount/I/O, recovery, CSI Pod replacement, node reboot, and default EKS
+regression remain separate real-node validation. The existing `e2e/prepare.sh`
+renders the base deployment; it does not select the COS overlay. For COS,
+explicitly prepare the environment overlay before running cases under the
+E2E context, authorization, and pre-provisioned Secret rules.
+
 Create a Drive9 Secret in the workload namespace before creating each PVC:
 
 ```sh

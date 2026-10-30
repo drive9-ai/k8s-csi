@@ -3,9 +3,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -27,6 +32,7 @@ func main() {
 	checkSharedPVCExample()
 	checkNodeManifest()
 	checkControllerManifest()
+	checkCOSOverlay()
 	if failures != 0 {
 		fmt.Fprintf(os.Stderr, "manifest-check: %d failure(s)\n", failures)
 		os.Exit(1)
@@ -173,6 +179,8 @@ func checkTextContracts() {
 				"COPY hack/drive9-csi-upload-perf.sh ",
 				"/usr/local/bin/drive9-csi-upload-perf",
 				"chmod +x /usr/local/bin/drive9-csi-upload-perf",
+				"COPY hack/drive9-csi-prepare-cos-exec.sh /usr/local/bin/drive9-csi-prepare-cos-exec",
+				"chmod +x /usr/local/bin/drive9-csi-prepare-cos-exec",
 			},
 			forbidden: []string{"fuse3", "/etc/fuse.conf", "user_allow_other"},
 		},
@@ -463,6 +471,97 @@ func checkBaseImage(role string, image string) {
 	if image != "registry.invalid/drive9-csi:unpublished" {
 		failf("%s image = %q", role, image)
 	}
+}
+
+func checkCOSOverlay() {
+	var base appsv1.DaemonSet
+	decodeYAML("deploy/kubernetes/node.yaml", &base)
+	node, controller := renderCOSOverlay("deploy/overlays/gke-cos")
+	if len(node.Spec.Template.Spec.InitContainers) != 2 {
+		failf("COS overlay must have preparation followed by installer")
+		return
+	}
+	preparer := node.Spec.Template.Spec.InitContainers[0]
+	if preparer.Name != "prepare-cos-exec" || !slices.Equal(preparer.Command,
+		[]string{"/usr/local/bin/drive9-csi-prepare-cos-exec"}) ||
+		preparer.SecurityContext == nil || preparer.SecurityContext.Privileged == nil ||
+		!*preparer.SecurityContext.Privileged {
+		failf("COS preparation command or privilege is incorrect")
+	}
+	checkMount(preparer, "host-proc", "/host-proc", true, nil)
+	want := base.Spec.Template.Spec.DeepCopy()
+	want.InitContainers = append([]corev1.Container{preparer}, want.InitContainers...)
+	if !reflect.DeepEqual(*want, node.Spec.Template.Spec) {
+		failf("COS overlay changed base node settings beyond preparation")
+	}
+	checkBaseImage("COS preparation", preparer.Image)
+	if driver, ok := findContainer(controller.Spec.Template.Spec.Containers, "drive9-csi"); ok {
+		checkBaseImage("COS controller", driver.Image)
+	}
+
+	dir, err := os.MkdirTemp(".", ".cos-manifest-check-")
+	if err != nil {
+		failf("create COS image override: %v", err)
+		return
+	}
+	defer os.RemoveAll(dir)
+	const image = "ghcr.io/drive9-ai/drive9-csi:drive9-0123456-csi-abcdef0"
+	override := "resources:\n  - ../deploy/overlays/gke-cos\nimages:\n  - name: registry.invalid/drive9-csi\n    newName: ghcr.io/drive9-ai/drive9-csi\n    newTag: drive9-0123456-csi-abcdef0\n"
+	if err := os.WriteFile(filepath.Join(dir, "kustomization.yaml"), []byte(override), 0o600); err != nil {
+		failf("write COS image override: %v", err)
+		return
+	}
+	node, controller = renderCOSOverlay(dir)
+	containers := append(node.Spec.Template.Spec.InitContainers, node.Spec.Template.Spec.Containers...)
+	containers = append(containers, controller.Spec.Template.Spec.Containers...)
+	count := 0
+	for _, container := range containers {
+		if container.Name == "prepare-cos-exec" || container.Name == "install-host-binaries" || container.Name == "drive9-csi" {
+			count++
+			if container.Image != image {
+				failf("COS image override missed %s: %s", container.Name, container.Image)
+			}
+		}
+	}
+	if count != 4 {
+		failf("COS image override covered %d CSI containers, want 4", count)
+	}
+}
+
+func renderCOSOverlay(path string) (appsv1.DaemonSet, appsv1.Deployment) {
+	var node appsv1.DaemonSet
+	var controller appsv1.Deployment
+	body, err := exec.Command("kustomize", "build", path).CombinedOutput()
+	if err != nil {
+		failf("render %s (requires kustomize): %v: %s", path, err, body)
+		return node, controller
+	}
+	decoder := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(body), 4096)
+	for {
+		var document json.RawMessage
+		if err := decoder.Decode(&document); err != nil {
+			if err != io.EOF {
+				failf("decode rendered COS overlay: %v", err)
+			}
+			break
+		}
+		var metadata struct{ Kind string }
+		if err := json.Unmarshal(document, &metadata); err != nil {
+			failf("parse COS document kind: %v", err)
+			continue
+		}
+		switch metadata.Kind {
+		case "DaemonSet":
+			if err := json.Unmarshal(document, &node); err != nil {
+				failf("parse COS node: %v", err)
+			}
+		case "Deployment":
+			if err := json.Unmarshal(document, &controller); err != nil {
+				failf("parse COS controller: %v", err)
+			}
+		}
+	}
+	return node, controller
 }
 
 func findContainer(containers []corev1.Container, name string) (corev1.Container, bool) {

@@ -196,6 +196,7 @@ e2e_render_driver_manifests
 e2e_validate_driver_manifests
 
 test_prepared_driver() {
+	local fake_preparer_image="${1:-}"
 	e2e_ensure_present() {
 		:
 	}
@@ -212,6 +213,10 @@ test_prepared_driver() {
 			return 0
 		fi
 		output_format="${!#}"
+		if [[ "$output_format" == *prepare-cos-exec* ]]; then
+			printf '%s\n' "$fake_preparer_image"
+			return 0
+		fi
 		case "$output_format" in
 		*.image\})
 			printf '%s\n' "$trace_image"
@@ -229,6 +234,17 @@ if ! (test_prepared_driver \
 	> "$stdout_file" 2> "$stderr_file"); then
 	fail "prepared Driver rejected a valid trace tag"
 fi
+if ! (test_prepared_driver "$trace_image" \
+	> "$stdout_file" 2> "$stderr_file"); then
+	fail "prepared Driver rejected matching COS preparation image"
+fi
+if (test_prepared_driver \
+	ghcr.io/drive9-ai/drive9-csi:drive9-0123456-csi-abcdef0 \
+	> "$stdout_file" 2> "$stderr_file"); then
+	fail "prepared Driver accepted a mismatched COS preparation image"
+fi
+grep -Fq 'use different images' "$stderr_file" ||
+	fail 'mismatched COS image diagnostic is missing'
 
 driver_namespace="drive9-csi"
 DRIVE9_CSI_E2E_SECRET_NAME="drive9-existing-secret"

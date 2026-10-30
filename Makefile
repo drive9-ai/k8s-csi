@@ -56,6 +56,9 @@ manifest-check:
 script-check:
 	bash -n hack/check-upload-perf.sh
 	hack/check-upload-perf.sh
+	bash -n hack/drive9-csi-prepare-cos-exec.sh
+	bash -n hack/check-cos-exec.sh
+	hack/check-cos-exec.sh
 
 .PHONY: e2e-check
 e2e-check:

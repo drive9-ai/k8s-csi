@@ -86,7 +86,7 @@ func TestNodePreflightClassifiesEveryFailure(t *testing.T) {
 			name:       "fuse device",
 			failure:    "fuse",
 			capability: nodeCapabilityFUSEDevice,
-			reason:     "host /dev/fuse is not a readable/writable character device",
+			reason:     "host test -c /dev/fuse failed (exit=1): test failed",
 		},
 		{
 			name:       "systemctl",
@@ -98,7 +98,7 @@ func TestNodePreflightClassifiesEveryFailure(t *testing.T) {
 			name:       "journalctl",
 			failure:    "journalctl",
 			capability: nodeCapabilityJournalctl,
-			reason:     "host journalctl executable unavailable",
+			reason:     "host test -x /usr/bin/journalctl failed (exit=1): test failed",
 		},
 		{
 			name:       "runtime directory",
@@ -128,7 +128,7 @@ func TestNodePreflightClassifiesEveryFailure(t *testing.T) {
 			name:       "Drive9 execution",
 			failure:    "drive9-exec",
 			capability: nodeCapabilityDrive9Execution,
-			reason:     "host systemd cannot execute Drive9 binary",
+			reason:     "host Drive9 execution probe failed for <drive9> (exit=1): Drive9 failed",
 		},
 		{
 			name:       "Drive9 supervisor capability",
@@ -167,8 +167,9 @@ func TestNodePreflightClassifiesEveryFailure(t *testing.T) {
 			fixture := newNodePreflightFixture(test.failure)
 			capabilities := runNodePreflight(context.Background(), fixture.runtime)
 			status := capabilities.Status(test.capability)
-			if status.Available || status.Reason != test.reason {
-				t.Fatalf("capability %q = %#v, want unavailable reason %q", test.capability, status, test.reason)
+			want := strings.ReplaceAll(test.reason, "<drive9>", fixture.drive9Path)
+			if status.Available || status.Reason != want {
+				t.Fatalf("capability %q = %#v, want unavailable reason %q", test.capability, status, want)
 			}
 		})
 	}
@@ -449,7 +450,7 @@ func (f *nodePreflightFixture) installCallbacks() {
 				return hostCommandResult{ExitCode: 1, Stderr: []byte("systemctl failed")}, errors.New("exit status 1")
 			}
 			return systemdShowResult(systemdUnitNotFound), nil
-		case "/bin/test":
+		case "test":
 			path := inner[len(inner)-1]
 			switch {
 			case path == "/dev/fuse" && f.failure == "fuse":

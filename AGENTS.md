@@ -88,7 +88,7 @@ promoted to production.
 make test             # formatting + production Go unit tests
 make build-check      # Linux artifact and ELF validation
 make manifest-check   # Kubernetes deployment contract validation
-make script-check     # drive9-csi-upload-perf shell behavior
+make script-check     # upload helper and COS exec preparation shell behavior
 make e2e-check        # non-mutating E2E structure validation
 make check            # all local checks above, including race and vet
 ```
@@ -105,7 +105,7 @@ unit suite:
 | ---------------- | -------------------------------------------------------------------------------------- |
 | `build-check`    | Cross-compiled CSI/launcher binaries, ELF architecture, static linkage, build metadata |
 | `manifest-check` | Deploy YAML, RBAC, Kustomize, Dockerfile and example contracts                         |
-| `script-check`   | Performance upload shell helper behavior and secret hygiene                            |
+| `script-check`   | Upload helper secret hygiene and COS exec preparation behavior                       |
 | `e2e-check`      | E2E script safety and prepare/case ownership boundaries                                |
 
 Tests use:
@@ -278,6 +278,7 @@ Deploy resources:
 | ----------------------------- | ----------------------------------------------------------------------------------------------- |
 | `deploy/kubernetes/`          | Fail-closed CSI base: namespace, CSIDriver, controller, node, RBAC, two StorageClasses, VAC |
 | `deploy/overlays/local/`      | Local image override for the CSI base                                                     |
+| `deploy/overlays/gke-cos/`    | Opt-in host binary exec preparation; requires an environment image override              |
 | `deploy/sidecar/`             | Fail-closed fallback sidecar base (privileged, hostPath mount propagation)                |
 | `deploy/examples/kubernetes/` | Separate SC, VAC, Secret, PVC and Pod examples plus a self-contained RWX bundle            |
 | `deploy/examples/sidecar/`    | Example Secret for sidecar                                                               |
