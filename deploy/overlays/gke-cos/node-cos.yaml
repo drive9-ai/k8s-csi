@@ -1,0 +1,16 @@
+- op: test
+  path: /spec/template/spec/initContainers/0/name
+  value: install-host-binaries
+- op: add
+  path: /spec/template/spec/initContainers/0
+  value:
+    name: prepare-cos-exec
+    image: registry.invalid/drive9-csi:unpublished
+    imagePullPolicy: IfNotPresent
+    command: [/usr/local/bin/drive9-csi-prepare-cos-exec]
+    securityContext:
+      privileged: true
+    volumeMounts:
+      - name: host-proc
+        mountPath: /host-proc
+        readOnly: true

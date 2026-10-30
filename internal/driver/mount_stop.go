@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 )
@@ -374,6 +375,7 @@ func (s mountStopper) runKernelUnmount(ctx context.Context, state mountState, la
 
 func hostMountRuntimeEnvironment() []string {
 	return []string{
+		"HOME=" + filepath.Dir(hostBinaryDir),
 		"TMPDIR=" + hostRuntimeDir,
 		"XDG_RUNTIME_DIR=" + hostRuntimeDir,
 		"PATH=/usr/sbin:/usr/bin:/sbin:/bin",
