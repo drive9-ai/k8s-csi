@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: drive9-csi-node-critical
+  namespace: drive9-csi
+spec:
+  # Permit the priority class without capping the DaemonSet Pod count.
+  scopeSelector:
+    matchExpressions:
+      - scopeName: PriorityClass
+        operator: In
+        values: [system-node-critical]

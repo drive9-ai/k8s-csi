@@ -172,43 +172,12 @@ from stdin, so its image path need not exist on the host. Do not remove the
 bind on CSI Pod exit: existing services and recovery still need it. Node reboot
 removes the bind, and the init container recreates it before installation.
 
-The COS overlay also retains the fail-closed image placeholder. Create an
-environment-specific overlay, for example `deploy/overlays/gke-dev`, with:
-
-```yaml
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-  - ../gke-cos
-images:
-  - name: registry.invalid/drive9-csi
-    newName: ghcr.io/drive9-ai/drive9-csi
-    digest: sha256:<published-validation-image-digest>
-```
-
-Select a validation image containing this fix and apply that environment
-overlay with an explicit GKE context. One image override updates preparation,
-installer, node, and controller together. Do not apply the bare COS overlay as
-a runnable installation or use a pre-fix image with this preparation command.
-
-GKE may require a namespace ResourceQuota matching `system-node-critical`
-before admitting the node DaemonSet. Keep its existing priority and provide the
-quota as environment configuration. A scope-only quota permits that priority
-without imposing a fixed DaemonSet Pod count:
-
-```yaml
-apiVersion: v1
-kind: ResourceQuota
-metadata:
-  name: drive9-csi-node-critical
-  namespace: drive9-csi
-spec:
-  scopeSelector:
-    matchExpressions:
-      - scopeName: PriorityClass
-        operator: In
-        values: [system-node-critical]
-```
+Use the [GKE COS deployment example](deploy/examples/kubernetes/gke-cos/README.md)
+for image selection, namespace setup, and deployment commands. It includes a
+scope-only ResourceQuota permitting `system-node-critical` without imposing a
+fixed DaemonSet Pod count. Select an image containing this fix: one override
+updates preparation, installer, node, and controller together. The example
+requires replacing its digest placeholder before deployment.
 
 The Go preflight resolves `test` through host PATH `/usr/bin:/bin`, covering
 COS's `/usr/bin/test` layout. Failed probes retain exit status and bounded

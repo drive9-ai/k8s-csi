@@ -8,13 +8,14 @@ title: Drive9 CSI Kubernetes Examples
 
 | Example | Purpose | Apply model |
 | ------- | ------- | ----------- |
+| [`gke-cos/`](gke-cos/README.md) | Install the driver on GKE COS nodes | Select an image digest, apply namespace and quota, then the Kustomize example |
 | `shared-pvc.example.yaml` | Two read-write replicas share one RWX PVC | Replace the API key, then apply one file |
 | Separate `*.example.yaml` files | Inspect or customize Secret, StorageClass, VolumeAttributesClass, PVC, and Pod independently | Apply selected files in dependency order |
 
 <!-- markdownlint-enable MD013 -->
 
-The examples assume the Drive9 CSI driver is already installed with a compatible
-image. The checked-in driver base uses the fail-closed
+The workload examples assume the Drive9 CSI driver is already installed with a
+compatible image. The checked-in driver base uses the fail-closed
 `registry.invalid/drive9-csi:unpublished` image and cannot run as-is. Use an
 immutable, release-admitted image for production; a validation workflow tag or
 digest alone is not release-admission evidence.
