@@ -62,6 +62,7 @@ func TestMountLaunchCommitsStartsVerifiesAndPromotesInOrder(t *testing.T) {
 	wantEnv := strings.Join([]string{
 		"DRIVE9_SERVER=" + request.Server,
 		"DRIVE9_API_KEY=" + request.APIKey,
+		"HOME=" + filepath.Dir(hostBinaryDir),
 		"TMPDIR=" + hostRuntimeDir,
 		"XDG_RUNTIME_DIR=" + hostRuntimeDir,
 		"PATH=/usr/sbin:/usr/bin:/sbin:/bin",
@@ -80,6 +81,17 @@ func TestMountLaunchCommitsStartsVerifiesAndPromotesInOrder(t *testing.T) {
 			call.Mode != 0o600 {
 			t.Fatalf("startup file mode = %o, want 0600", call.Mode)
 		}
+	}
+}
+
+func TestMountRuntimeEnvironmentDoesNotInheritContainerHome(t *testing.T) {
+	t.Setenv("HOME", "/container-only/home")
+	environment := hostMountRuntimeEnvironment()
+	if !containsArgument(environment, "HOME="+filepath.Dir(hostBinaryDir)) {
+		t.Fatal("host mount runtime lacks a stable application home")
+	}
+	if strings.Contains(strings.Join(environment, "\x00"), "/container-only/home") {
+		t.Fatal("container home leaked into host mount runtime")
 	}
 }
 

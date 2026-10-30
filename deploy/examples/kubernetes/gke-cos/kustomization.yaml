@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../overlays/gke-cos
+  - resourcequota.yaml
+images:
+  # Select an immutable image containing the COS preparation command.
+  - name: registry.invalid/drive9-csi
+    newName: ghcr.io/drive9-ai/drive9-csi
+    digest: sha256:replace-with-compatible-image-digest

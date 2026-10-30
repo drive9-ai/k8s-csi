@@ -153,6 +153,48 @@ summary and use it only in a non-production validation overlay. The tag or
 digest is traceability evidence, not release-admission evidence. Do not apply
 the fail-closed base directly.
 
+### GKE Container-Optimized OS
+
+COS normally mounts `/var` with `noexec`. The opt-in
+`deploy/overlays/gke-cos` overlay adds `prepare-cos-exec` before the host binary
+installer. Its script is packaged at
+`/usr/local/bin/drive9-csi-prepare-cos-exec` in the CSI image; users do not need
+to write host mount commands. The script enters the host mount namespace and
+root, then prepares only `/var/lib/drive9-csi/bin` as an executable self-bind
+with `nosuid,nodev`. It keeps the parent mount policy and existing binary paths.
+An already executable parent needs no new mount. Repeated preparation reuses
+the same verified bind; unexpected mounts or unsafe directories fail closed.
+
+This explicitly grants execution to the root-owned binary directory. The base
+deployment does not enable it or detect the cloud provider. Host Bash, `mount`,
+and GNU-compatible `stat` must be available. The script reads its host body
+from stdin, so its image path need not exist on the host. Do not remove the
+bind on CSI Pod exit: existing services and recovery still need it. Node reboot
+removes the bind, and the init container recreates it before installation.
+
+Use the [GKE COS deployment example](deploy/examples/kubernetes/gke-cos/README.md)
+for image selection, namespace setup, and deployment commands. It includes a
+scope-only ResourceQuota permitting `system-node-critical` without imposing a
+fixed DaemonSet Pod count. Select an image containing this fix: one override
+updates preparation, installer, node, and controller together. The example
+requires replacing its digest placeholder before deployment.
+
+The Go preflight resolves `test` through host PATH `/usr/bin:/bin`, covering
+COS's `/usr/bin/test` layout. Failed probes retain exit status and bounded
+stderr; they continue to block new mounts.
+Host mount processes receive an explicit `HOME=/var/lib/drive9-csi` so CLI
+default-profile paths do not depend on container homes or a host `getent`
+command. Existing per-volume cache and explicit local-root arguments remain.
+
+`make manifest-check` requires `kustomize` and renders the COS overlay and an
+image override. `make script-check` checks the preparation logic without
+changing host mounts. Local checks do not establish COS support: authenticated
+mount/I/O, recovery, CSI Pod replacement, node reboot, and default EKS
+regression remain separate real-node validation. The existing `e2e/prepare.sh`
+renders the base deployment; it does not select the COS overlay. For COS,
+explicitly prepare the environment overlay before running cases under the
+E2E context, authorization, and pre-provisioned Secret rules.
+
 Create a Drive9 Secret in the workload namespace before creating each PVC:
 
 ```sh

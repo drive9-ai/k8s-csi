@@ -62,7 +62,10 @@ COPY --from=csi-builder /out/drive9-csi /usr/local/bin/drive9-csi
 COPY --from=csi-builder /out/drive9-csi-launcher /usr/local/bin/drive9-csi-launcher
 COPY --from=drive9-downloader /out/drive9 /usr/local/bin/drive9
 COPY hack/drive9-csi-upload-perf.sh /usr/local/bin/drive9-csi-upload-perf
+COPY hack/drive9-csi-prepare-cos-exec.sh /usr/local/bin/drive9-csi-prepare-cos-exec
 RUN chmod +x /usr/local/bin/drive9-csi-upload-perf \
+ && chmod +x /usr/local/bin/drive9-csi-prepare-cos-exec \
+ && bash -n /usr/local/bin/drive9-csi-prepare-cos-exec \
  && mount_help="$(/usr/local/bin/drive9 mount --supervise-foreground --direct-mount-strict --help 2>&1)" \
  && printf '%s\n' "${mount_help}" | grep -F -- '-supervise-foreground' >/dev/null \
  && printf '%s\n' "${mount_help}" | grep -F -- '-gvisor-compat' >/dev/null \

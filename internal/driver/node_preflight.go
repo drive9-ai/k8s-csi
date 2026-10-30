@@ -53,9 +53,7 @@ var orderedNodeCapabilityNames = [...]nodeCapabilityName{
 const (
 	hostProcUnavailableReason  = "host /proc not mounted at /host-proc or PID 1 namespace/root inaccessible"
 	hostPIDSignalUnavailable   = "host systemd PID signal execution unavailable"
-	fuseUnavailableReason      = "host /dev/fuse is not a readable/writable character device"
 	systemctlUnavailable       = "host systemctl executable unavailable"
-	journalctlUnavailable      = "host journalctl executable unavailable"
 	runtimeDirUnavailable      = "host /run/drive9-csi runtime directory unavailable or unsafe"
 	binariesUnavailable        = "host Drive9 binaries missing — init container may have failed"
 	drive9ContentUnavailable   = "host Drive9 content-addressed binary validation failed"
@@ -182,14 +180,14 @@ func runNodePreflight(ctx context.Context, runtime hostRuntime) nodeCapabilities
 	if reason := checkTransientSystemd(ctx, runtime); reason != "" {
 		capabilities = capabilities.withUnavailable(nodeCapabilityTransientSystemd, reason)
 	}
-	if !checkHostFUSEDevice(ctx, runtime) {
-		capabilities = capabilities.withUnavailable(nodeCapabilityFUSEDevice, fuseUnavailableReason)
+	if reason := checkHostFUSEDevice(ctx, runtime); reason != "" {
+		capabilities = capabilities.withUnavailable(nodeCapabilityFUSEDevice, reason)
 	}
 	if !checkHostSystemctl(ctx, runtime) {
 		capabilities = capabilities.withUnavailable(nodeCapabilitySystemctl, systemctlUnavailable)
 	}
-	if !checkHostExecutable(ctx, runtime, "/usr/bin/journalctl") {
-		capabilities = capabilities.withUnavailable(nodeCapabilityJournalctl, journalctlUnavailable)
+	if reason := checkHostExecutable(ctx, runtime, "/usr/bin/journalctl"); reason != "" {
+		capabilities = capabilities.withUnavailable(nodeCapabilityJournalctl, reason)
 	}
 	if err := prepareHostRuntimeDirectory(runtime); err != nil {
 		capabilities = capabilities.withUnavailable(nodeCapabilityRuntimeDirectory, runtimeDirUnavailable)
@@ -201,7 +199,8 @@ func runNodePreflight(ctx context.Context, runtime hostRuntime) nodeCapabilities
 	drive9Path, err := validateDesiredDrive9Content(runtime)
 	if err != nil {
 		capabilities = capabilities.withUnavailable(nodeCapabilityDrive9Content, drive9ContentUnavailable)
-		capabilities = capabilities.withUnavailable(nodeCapabilityDrive9Execution, drive9ExecutionUnavailable)
+		capabilities = capabilities.withUnavailable(nodeCapabilityDrive9Execution,
+			"host Drive9 execution probe not attempted: "+compactDiagnostic([]byte(err.Error())))
 		return capabilities
 	}
 	if reason := checkHostDrive9Execution(ctx, runtime, drive9Path); reason != "" {
@@ -268,22 +267,31 @@ func classifySystemdPreflightFailure(result hostCommandResult) string {
 	}
 }
 
-func checkHostFUSEDevice(ctx context.Context, runtime hostRuntime) bool {
+func checkHostFUSEDevice(ctx context.Context, runtime hostRuntime) string {
 	for _, predicate := range []string{"-c", "-r", "-w"} {
-		if !runHostTest(ctx, runtime, predicate, "/dev/fuse") {
-			return false
+		if reason := runHostTest(ctx, runtime, predicate, "/dev/fuse"); reason != "" {
+			return reason
 		}
 	}
-	return true
+	return ""
 }
 
-func checkHostExecutable(ctx context.Context, runtime hostRuntime, path string) bool {
+func checkHostExecutable(ctx context.Context, runtime hostRuntime, path string) string {
 	return runHostTest(ctx, runtime, "-x", path)
 }
 
-func runHostTest(ctx context.Context, runtime hostRuntime, args ...string) bool {
-	result, err := runtime.Exec(ctx, hostNamespaceCommand("/bin/test", args...))
-	return err == nil && result.ExitCode == 0
+func runHostTest(ctx context.Context, runtime hostRuntime, args ...string) string {
+	command := hostNamespaceCommand("test", args...)
+	command.Env = append(os.Environ(), "PATH=/usr/bin:/bin")
+	result, err := runtime.Exec(ctx, command)
+	if err == nil && result.ExitCode == 0 {
+		return ""
+	}
+	detail := compactDiagnostic(result.Stderr)
+	if detail == "" && err != nil {
+		detail = compactDiagnostic([]byte(err.Error()))
+	}
+	return fmt.Sprintf("host test %s failed (exit=%d): %s", strings.Join(args, " "), result.ExitCode, detail)
 }
 
 func prepareHostRuntimeDirectory(runtime hostRuntime) error {
@@ -384,7 +392,11 @@ func checkHostDrive9Execution(ctx context.Context, runtime hostRuntime, drive9Pa
 	}
 	result, err := runtime.Exec(ctx, command)
 	if err != nil || result.ExitCode != 0 {
-		return drive9ExecutionUnavailable
+		detail := compactDiagnostic(result.Stderr)
+		if detail == "" && err != nil {
+			detail = compactDiagnostic([]byte(err.Error()))
+		}
+		return fmt.Sprintf("host Drive9 execution probe failed for %s (exit=%d): %s", drive9Path, result.ExitCode, detail)
 	}
 	for _, name := range []string{
 		"supervise-foreground",
