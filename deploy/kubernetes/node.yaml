@@ -42,10 +42,12 @@ spec:
         - name: drive9-csi
           image: registry.invalid/drive9-csi:unpublished
           imagePullPolicy: IfNotPresent
+          # privileged already grants every capability, so an explicit
+          # capabilities.add entry only re-declares SYS_ADMIN. Keep the
+          # implicit set from privileged and avoid advertising a capability
+          # that is not required by this container's own spec.
           securityContext:
             privileged: true
-            capabilities:
-              add: ["SYS_ADMIN"]
           args:
             - --endpoint=unix:///csi/csi.sock
             - --node-id=$(NODE_NAME)
