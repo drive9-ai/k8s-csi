@@ -6,8 +6,8 @@ driverName: csi.drive9.ai
 parameters:
   profile: coding-agent
   gvisorCompat: "false"
-  attrTTL: 30s
-  entryTTL: 30s
+  attrTTL: 60s
+  entryTTL: 60s
   dirTTL: 30s
   perfEnabled: "false"
   readdirPrefetch: "true"
